@@ -1,0 +1,33 @@
+# Secrets — Börsdata API key and local overrides
+.env
+.env.*
+!.env.example
+
+# Database — SQLite WAL system-of-record (file-backup-able)
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+deptry/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo

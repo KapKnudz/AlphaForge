@@ -9,7 +9,7 @@
 - `scout-alphaforge-data-foundation/report.md` — SQLite WAL + Postgres seam, full DDL for ~10 tables, 17-module deterministic core map, pipeline composition, Appendix D ready-to-drop design section (preferred core for this plan's data-layer)  
 - `scout-alphaforge-evidence-sources/report.md` — deterministic scrape vs LLM-extract split, credibility-ledger and ownership pipelines, validation contract  
 - `scout-ownership-free-sources/report.md` — free holder-level ownership: what exists, what stays unavailable  
-- `scout-borsdata-api-coverage/report.md` — **not yet landed at plan freeze (2026-09-16 17:06 UTC status: `working`)** — official spec vs 10 known families, candidate extra endpoints, `currency_ratio` semantics. Integrate on landing; see § 2.6 open slot.  
+- `scout-borsdata-api-coverage/report.md` — **integrated 2026-09-16** — official spec: 33 GET paths at `https://apidoc.borsdata.se/swagger/v1/swagger.json` (OpenAPI 3.0.1, 115 751 bytes) reconciled against 10 known families (23 unused, 0 stale — all 200 live); adjudicated must-adds, should-adds and deferrals (see § 10); `currency_ratio` semantics **verified**: `converted = original × ratio`, fetch `original=0` so monetary fields arrive in `stockPriceCurrency`, `currency` stays provenance.  
 - Reference: `PycharmProjects/KN-CompanyScraper` (`~29.7k lines`, `~37 tables`, `30+ CLI`, `PostgreSQL`, `.github/workflows/ci.yml` house reference)  
 - Hedborg distillation: `docs/petter_hedborg_investment_philosophy.md` §§ 12–13  
 
@@ -23,7 +23,7 @@ These decisions are settled and the plan implements them verbatim; no phase revi
 2. **MVP universe Sweden-only; watchlist ~100–150 smaller Swedish companies with positive earnings, hand-curated by the captain via the Börsdata scanner.** `country_id = 1` filter on `companies`; Nordic-wide is a filter removal, not a migration. Import source is `watchlist.csv` (Id;Name;Ticker;ISIN) produced by the Börsdata scanner and curated by hand.
 3. **Closing price + volume only (no OHLC columns).** `prices` stores `price_date, close, volume, currency` only. Börsdata payload `o/h/l` is ignored at adapter; deterministic ADTV uses `close*volume`. No `open/high/low` columns.
 4. **Required-return v2 market-cap buckets kept verbatim.** `RequiredReturnPolicy.VERSION = "required-return-v2-market-cap-buckets"` with `SIZE_BUCKETS = (<1bn → 15%, 1–5bn → 13.5%, 5–30bn → 11.5%, ≥30bn → 10%)`, SEK-only guard. No recalibration in MVP.
-5. **SEK-only gate plus small FX conversion utility at valuation seam.** Hard gate: non-SEK `report_currency`/`stock_price_currency` → `RequiredReturnDecision(available=False)` and thesis limitation, except for a narrow utility that converts only cross-currency **sums** (net debt, market cap, EV) using Börsdata's own `currency_ratio` field **once its semantics are verified** (spec or probe confirms it is SEK-per-foreign). The utility never converts **ratios** (margins, yields, multiples). The rate used is persisted per observation (`financial_periods.fx_rate_to_sek`, `kpi_observations.fx_rate_to_sek` nullable, or `valuation_inputs.fx_rate`). Probe/verification step is owned by Phase 0 data-layer.
+5. **SEK-only gate plus small FX conversion utility at valuation seam — verified.** Hard gate: non-SEK `report_currency`/`stock_price_currency` → `RequiredReturnDecision(available=False)` and thesis limitation, except for a narrow utility that converts only cross-currency **sums** (net debt, market cap, EV) using Börsdata's own `currency_ratio` with **verified semantics: `converted = original × ratio`** (wiki `Reports` page: `[currency_Ratio] is the ratio to convert original Report-currency than Stockprice-currency`; live probe ABB USD 33220×9.2268=306514, `currency` stays original irrespective of `original` flag; fetch with `original=0` so monetary fields arrive in `stockPriceCurrency`). The utility never converts **ratios** (margins, yields, multiples). The rate used is persisted per observation (`financial_periods.currency_ratio`, `financial_periods.fx_rate_to_sek`, `kpi_observations.fx_rate_to_sek` nullable, or `valuation_inputs.fx_rate`). Verification done in `scout-borsdata-api-coverage` (swagger `ReportV1` + wiki + 5 live cases).
 6. **PDF page cap 50 with tail extraction.** `pypdf` extracts `pages[:50]` plus tail slice `pages[80:90]` when the PDF exceeds 50 pages and the shareholder/notes tables are known to live late (Vitec p.51 at boundary proves need). `page_truncated` + `pages_included` metadata persisted; scanned-image PDFs → `missing_information: supplemental`.
 7. **Swedish-aware prompt variants (no translation layer).** Deterministic language tag at ingest (`lang: sv|en`, `lang_confidence`); per-specialist prompt variants `prompts/specialist_*_sv.md` selected when majority lang of the packet is `sv`. Directive: *"Du svarar på svenska där evidens är på svenska; citera ordagrant och översätt inte nyckeltermer."* Deterministic layer performs no translation; Börsdata fields are language-independent.
 8. **MFN cadence daily delta + weekly page-2 backstop.** `MfnScraper.discover_feed()` daily page-1 delta (feed → unseen URLs → detail fetch), plus Sunday page-2 sweep to catch FY reports pushed off page 1 by interim flow. `mfn_feed_checks{checked_at, discovered_count, unseen_count}` persisted even on zero delta.
@@ -74,7 +74,7 @@ Operational acceptance: 2–3 pilot companies from the curated watchlist complet
 - **Data foundation** (`scout-alphaforge-data-foundation`): normative recommendation **SQLite WAL as MVP system-of-record with a typed `Repository` Protocol seam to Postgres**. DDL for ~10 tables (`companies`/`watchlist`/`financial_periods`/`kpi_observations`/`prices`/`dividends`+`dividend_coverage`/`ranking_runs`/`research_documents`/`theses`/`jobs`) in §4's Appendix D is this plan's authoritative data-layer section. 17-module deterministic core map, pipeline composition `rank → gate → evidence → analyze → export` with import-isolated `alphaforge.core`, and promotion signal for Postgres are committed. Size at Sweden ~800 names: ~218 MB (10y) / ~298 MB (20y backfill); Nordic 1 709: ~458 MB / ~626 MB, both file-backup-able.
 - **Evidence sources** (`scout-alphaforge-evidence-sources`): MFN scraper already polls correctly (Playwright feed `a.title-link.item-link`, detail `h1`/`.release-body`, attachment `storage.mfn.se`, `published_at` two-tier, report-prioritized 24 cap, delta via `discover_feed → unseen`), `ResearchDocumentIngestionService` deterministically ingests PDFs (`pypdf` 30→**50+tail** after this plan, report-period normalization, both URLs retained (`source_url` + `source_release_url`), `ON CONFLICT(source_url)` idempotence). Gap closure is **deterministic-scrape vs LLM-extract split** (S0–S13): scrape stays pure code; extraction emits typed `ManagementCredibilitySpecialistOutput` / `BusinessModel…` / `Margin…` / `InsiderOwnership…` / `SellConditions…` under a single validation contract (closed schema, citation traversal via `evidence_catalog`, paragraph-anchored excerpt, deterministic post-LLM interpreters, one-repair ceiling).
 - **Free ownership** (`scout-ownership-free-sources`): built from live curls (Vitec 194-page PDF p.51 holder table within 50-page boundary, Acast p.27 explicitly *"based on data from Modular Finance, Monitor"*, MFN Mycronic flagging, `marknadssok.fi.se` 211 Vitec PDMR rows over 22 pages, FI blankning register, Euroclear Cloudflare-blocked, Holdings.se SPA paywalled, Avanza `numberOfOwners` single integer via `orderbookId`, Nordnet session-gated). **No free combination closes holder categories, free float, or quarterly change**; the MVP ships the four-piece free stack (annual top-10, flagging/placement/lockup, PDMR windowed, short register) and three permanent limitations with a capped sub-score.
-- **Börsdata API coverage** (`scout-borsdata-api-coverage`): in flight at freeze; when it lands, reconcile official spec against the 10 families, classify *in-use / available-but-unused / stale*, and adjudicate additions (KPI-definition/metadata, splits, calendar events, per-branch KPI listings, global metrics) plus verify `currency_ratio` semantics for the FX utility. Until then, the FX utility is speculatively designed behind a verification gate (Phase 0).
+- **Börsdata API coverage** (`scout-borsdata-api-coverage`): **landed and integrated 2026-09-16** — official spec `https://apidoc.borsdata.se/swagger/v1/swagger.json` (33 GET paths, 63 schemas, all 200 live with prod key) reconciled against 10 verified families (§2.1 in-use / §2.2 23 available-but-unused / §2.3 0 stale). **Must-adds:** `GET /v1/instruments/StockSplits` (per-share correctness — ~80 splits/year, e.g., Atrium 5:1 2025-04-09; price history is split-adjusted live but historic `number_Of_Shares` is not) and `GET /v1/instruments/report/calendar` (catalyst calendar + `pending` gate — 2012→2027 per instrument, live AAK 54 releases inc. future 2027-02-05 Q4). **Should-adds:** `branches`/`sectors`/`countries`/`translationmetadata` reference dictionaries (94/10/19 rows, `L_BRANCH_75`→Real Estate), `kpis/metadata`+`reports/metadata` self-describing caches (60+ KPIs, 33 report properties, `format` MCURR/CURR/%), per-instrument `kpis/{reporttype}/summary` discovery to build `branch_kpi_allowlist` (property 277–289, bank 290–296 without 400-probing). **Deferrals:** global endpoints (`/global` 14k instruments), batch throughput variants (`stockprices` batch, `kpis` batch/history, screener), `updated` delta-sync timestamps. **`currency_ratio` verified** (see §4): `converted(original=0) = original(original=1) × ratio`, `currency` stays original provenance, ratio unchanged by `original` flag.
 
 ### What changed from the draft MVP
 
@@ -134,7 +134,7 @@ SIZE_BUCKETS:
 
 Guard: currency != SEK  →  available=False, missing_information="market-cap hurdle policy is defined for SEK; received {CCY}".
 Guard: market_cap is None / non-finite / ≤0  →  available=False.
-Input verification: probe Börsdata currency exposure on the curated watchlist (are there any SEK-listed micro caps with foreign reportCurrency despite the Sweden-only filter?) — if the FX utility is needed, it is applied at the valuation seam only (see §3.4).
+Input verification: first `sync` over the curated watchlist logs currency-exposure surface (`stockPriceCurrency` vs `reportCurrency`; live 203 mismatched of 1 709 Nordics, e.g., ABB USD→SEK ratio 9.2268, Betsson EUR→SEK 10.8257, Arctic Paper PLN→SEK 2.5655, SSAB SEK→EUR 0.09237) — when needed, the **verified** FX utility (`converted = original × ratio`, `original=0`) converts **sums only** at the valuation seam (see §3.5; verification done, no speculative gate).
 
 All thesis valuations persist `policy_version`, `size_bucket`, `market_cap`, `required_return`, `source_date = as_of`.
 ```
@@ -146,11 +146,12 @@ All thesis valuations persist `policy_version`, `size_bucket`, `market_cap`, `re
 - **Rationale:** At ~10 tables / 6 commands / Sweden ~800 names (2.0M price rows 10y, 4.0M backfilled 20y) the hot path is index seeks per company (≤20 rows), not warehouse scans. SQLite WAL covers that with zero daemon (`PRAGMA journal_mode=WAL; synchronous=NORMAL; foreign_keys=ON; busy_timeout=5000; cache_size=-20000; temp_store=MEMORY`), file-copy backup, and a canonical `sha256(packet.json)` golden packet. Nordic 1 709 instruments (~4.3M/8.5M price rows) remains ≈0.5–0.9 GB with indexes — below the threshold where Postgres's buffer-pool and VACUUM-autovacuum buyback matters.
 - **Promotion signal — switch when any holds:** (a) second concurrent writer (web UI, scheduler), (b) price rows exceed ~12M or file exceeds ~2 GB and `VACUUM` latency becomes user-visible, (c) team >1 or hosted PITR required. The flip replays `db/alphaforge.sqlite.sql`'s Postgres variant (`db/alphaforge.postgres.sql`) plus `now()`/`JSONB`/`GENERATED ALWAYS AS IDENTITY` deltas — no code above `db/` changes because no ranking/thesis code imports `sqlite3`/`psycopg2` or Börsdata raw keys.
 
-**Appendix D is incorporated by reference.** The full DDL, indexes (including `partial WHERE is_placeholder=0`, `partial WHERE volume IS NOT NULL`, `partial WHERE report_date IS NOT NULL`, `(company_id,period_type,period_end DESC)`, and the two KPI partial uniques `uq_kpi_snapshot`/`uq_kpi_history`), `ON CONFLICT` upsert discipline (with `source_url` — not `url` — as the `research_documents` conflict target, keeping `source_release_url` distinct), stub-zero quarantine `CHECK(is_placeholder IN (0,1))`, nullable `fx_rate_to_sek` / `currency_ratio` audit columns, `dividend_coverage` completeness guard, `theses{UNIQUE(company_id,revision)}` identity (packet_hash uniqueness is dropped — idempotence is application-checked, see §5.3), and the Postgres delta are normative — see the updated **Appendix D** block reproduced as this plan's **Addendum A (Data Foundation DDL)**. Key amendments applied for the consolidated v2:
+**Appendix D is incorporated by reference with Phase 0 Börsdata-coverage integration applied.** The full DDL, indexes (including `partial WHERE is_placeholder=0`, `partial WHERE volume IS NOT NULL`, `partial WHERE report_date IS NOT NULL`, `(company_id,period_type,period_end DESC)`, and the two KPI partial uniques `uq_kpi_snapshot`/`uq_kpi_history`), `ON CONFLICT` upsert discipline (with `source_url` — not `url` — as the `research_documents` conflict target, keeping `source_release_url` distinct), stub-zero quarantine `CHECK(is_placeholder IN (0,1))`, nullable `fx_rate_to_sek` / `currency_ratio` audit columns, `dividend_coverage` completeness guard, `theses{UNIQUE(company_id,revision)}` identity (packet_hash uniqueness is dropped — idempotence is application-checked, see §5.3), and the Postgres delta are normative — see the updated **Appendix D** block reproduced as this plan's **Addendum A (Data Foundation DDL, now includes `stock_splits`, `report_calendar`, and reference dictionaries)**. Key amendments for consolidated v2 + Phase 0 integration:
 
 - `prices` keeps **only** `(company_id PK, price_date, close NOT NULL, volume INT nullable, currency, fetched_at)` — no `open/high/low` columns (captain's closing-price-only call). Partial index `WHERE volume IS NOT NULL` accelerates ADTV windows.
-- `financial_periods` and `kpi_observations` each carry `fx_rate_to_sek REAL CHECK (fx_rate_to_sek IS NULL OR fx_rate_to_sek > 0)` + `fx_source TEXT CHECK (fx_source IN ('currency_ratio','manual','null'))` for the FX utility audit trail (see §3.5).
-- `financial_periods.raw_payload` retains the Börsdata JSON verbatim including `currency_ratio`; the FX utility prefers `currency_ratio` when a `//! verified: currency_ratio is SEK per foreign` note is present (Phase 0 verification), otherwise requires captain-supplied `manual_rates.json`.
+- `financial_periods` carries `currency TEXT`, `currency_ratio REAL` (**verified**: `ratio` converts `original→stockPriceCurrency` as `converted = original × ratio`; `currency` stays original report-currency provenance, unchanged by `original` flag; fetch `original=0` for valuation), plus `fx_rate_to_sek REAL CHECK (fx_rate_to_sek IS NULL OR fx_rate_to_sek > 0)` + `fx_source TEXT CHECK (fx_source IN ('currency_ratio','manual','null') OR fx_source IS NULL)` audit trail (see §3.5, verified). `kpi_observations` carries matching `fx_rate_to_sek`/`fx_source` for completeness.
+- `financial_periods.raw_payload` retains the Börsdata JSON verbatim including `currency_ratio` and the `original` flag provenance (`original=0` converted vs `1` original); persisted per observation as `currency` (original), `currency_ratio` (ratio), `fx_rate_to_sek = currency_ratio`, `fx_source='currency_ratio'` and logged as `thesis_json.valuation.fx_rate_used`. Manual `data/fx/manual_rates.json` is fallback only when `currency_ratio` is unexpectedly null (mismatched pair should always have `>0`; assert `currency_ratio > 0` when `reportCurrency != stockPriceCurrency`).
+- New tables `stock_splits` (per-share correctness — rolling 1-year window, `instrumentId, splitType S|RS, ratio "4:1"/"1:100", splitDate`) and `report_calendar` (catalyst calendar + `pending` gate — `instrumentId, releaseDate, reportType Q1–Q4`, 2012→2027) are added; reference dictionaries `branches`/`sectors`/`countries` + `translationmetadata` (human-readable sector/branch/country names, `L_BRANCH_75→Real Estate`/`L_SECTOR_1→Financials`) and metadata caches `kpi_metadata`/`report_metadata` (`nameSv/nameEn`, `format` `%|CURR|MCURR|MILL`) plus per-instrument `kpis/{reporttype}/summary` discovery (build `branch_kpi_allowlist` so property 277–289 / bank 290–296 are queried only where `values` non-empty, avoiding 400 noise) are seeded Phase 0 and carried in Addendum A.
 
 **Point-in-time discipline:** `core/point_in_time.in_window` (`[start, end+1 day)` half-open UTC) applied at **two layers** — adapter trimming (windowed prices ≤ `as_of`) and packet assembly (each `Report/Kpi/Price/Dividend/Document` row filtered by `report_date|published_at|observation_date|ex_date ≤ as_of`). `is_placeholder=1` rows never enter ranking/valuation; `report_Date null` stubs are never PIT-visible.
 
@@ -169,9 +170,9 @@ Per the captain's FX call (detailed shape from §3):
 
   Applied **only** to **level sums** `net_debt`, `market_cap`, `enterprise_value` (and their history when denominated in foreign currency) before `EV = marketCap + netDebt` or `EV/EBIT` denominator. **Never** applied to **ratios** (`pe/pe_percentile`, `ev/ebit`, `margins`, `yields`, `roic`, `growth CAGRs`) or to `Dividend.amount` per-share (foreign dividend stays foreign; yield conversion uses price currency, not report currency).
 
-  Rate source preference: (1) **Börsdata `currency_ratio`** from `reports.currency_Ratio` **if Phase 0 verification confirms it is SEK per unit of `currency`** (compare a known SEK-reporting-DKK-priced instrument's ratio to ECB `SEK/DKK` on the same `report_End_Date`), (2) otherwise manual `data/fx/manual_rates.json` keyed by `(currency, observation_date)`. Whatever the source, the row persists `fx_rate_to_sek` and `fx_source`; valuation derivation logs `fx_rate_to_sek` in `thesis_json.valuation.fx_rate_used`. If no rate is verifiable, the `sum` is `null`, the valuation limitation is surfaced, and the thesis stays ineligible — never guessed.
+  Rate source (verified): **Börsdata `currency_ratio`** from `reports.currency_Ratio` — **verified as factor to convert `original` → `stockPriceCurrency` as `converted = original × ratio`**. Evidence: wiki `Reports` page *"[currency_Ratio] is the ratio to convert original Report-currency than Stockprice-currency"* + swagger `ReportV1` (`currency` + `currency_Ratio` double) + live 5-case probe (`ABB 3` USD 33220×9.2268=306514, `Betsson 32` EUR 1197×10.8257=12958, `Arctic Paper 381` PLN 3197×2.5655=8203, `SSAB 695` SEK→EUR 96220×0.09237=8888, `Beowulf GBP` ratio 12.408 even with stub-zero revenue; `currency` stays original and `ratio` unchanged by `original=0|1`). Fetch reports with **`original=0`** so monetary fields already arrive in `stockPriceCurrency` (denomination-consistent `marketCap = price×shares` and `EV = marketCap + netDebt` without extra multiply); persist `currency` (original provenance), `currency_ratio` (>0 when mismatched, `1.0` when matched), `fx_rate_to_sek = currency_ratio`, `fx_source='currency_ratio'` per observation and log `fx_rate_to_sek` in `thesis_json.valuation.fx_rate_used`. Fallback manual `data/fx/manual_rates.json` keyed by `(currency, observation_date)` only when `currency_ratio` is unexpectedly null. If no rate verifiable, the sum is `null` with limitation — never guessed.
 
-- **Owned by Phase 0:** the first `sync` over the curated watchlist must probe and log actual currency exposure (how many of the 100–150 names report in NOK/DKK/EUR despite a Stockholm venue) and confirm or reject `currency_ratio` semantics via the Börsdata api-coverage report plus a live spot-check.
+- **Phase 0 currency exposure (verification done):** the first `sync` over the curated watchlist logs `(stockPriceCurrency, reportCurrency, currency_ratio)` per instrument (203 mismatched live); `currency_ratio` semantics are verified — no speculative FX gate remains. Fetch mode is fixed to `original=0` (converted) for valuation; provenance `currency` + `ratio` is still persisted for audit and for cross-peer original-currency comps.
 
 ### 3.6 Hedborg philosophy — how it is encoded
 
@@ -455,8 +456,8 @@ This keeps the nightly fleet cheap (Börsdata prices drift; only issuers with fr
 ### Phase 1 — Lean data layer (rank-foundation)
 
 - **1.1 Schema & migrations.** `db/alphaforge.sqlite.sql` (normative, §3.4 + Addendum A) plus `db/alphaforge.postgres.sql` delta; `PRAGMA user_version` migration shim or `dbmate`/`alembic` runner; `config.py` typed `Settings(DSN, watchlist_path, as_of)` with `ALPHAFORGE_DSN` default `sqlite:///data/alphaforge.db`.
-- **1.2 Börsdata adapter** — single `BorsdataAdapter` implementing `MarketDataProvider` Protocol (`instruments, markets, kpis/{kpiId}/{calcGroup}/{calc}, kpi_history/{reportType}/{priceType}, report_bundles, stock_prices, dividends, insider/buyback/shorts-global`). `MAX_RETRIES=3` + backoff + `Retry-After`; batch 50, 0.5–1 s sleep; **`maxCount` not trusted** (fetch full, slice locally); sector-KPI 400 swallowed as `missing`; `currency/currency_ratio` audit columns plumbed.
-- **1.3 FX verification probe.** During first `sync` of the curated 100–150 names, log exposed currency surface (`stockPriceCurrency` vs `reportCurrency` per `insId`) and, if any foreign, assert `currency_ratio` semantics against a spot ECB rate on matching `report_End_Date` (two-company spot). Result determines whether the FX utility is live or remains `available=False` with a limitation.
+- **1.2 Börsdata adapter** — single `BorsdataAdapter` implementing `MarketDataProvider` Protocol (`instruments, markets, kpis/{kpiId}/{calcGroup}/{calc}, kpi_history/{reportType}/{priceType}, report_bundles, stock_prices, dividends, insider/buyback/shorts-global` **plus Phase 0 must-adds `StockSplits` and `report/calendar` and should-adds `branches`/`sectors`/`countries`/`translationmetadata` + `kpis/metadata`/`reports/metadata` and `kpis/{reporttype}/summary` discovery for `branch_kpi_allowlist`**). `MAX_RETRIES=3` + backoff + `Retry-After`; batch 50, 0.5–1 s sleep; **`maxCount` not trusted** (fetch full, slice locally); sector-KPI 400 swallowed as `missing`; `currency/currency_ratio` verified and plumbed (`original=0`).
+- **1.3 Currency exposure log (verification done).** During first `sync` of the curated 100–150 names, log currency surface (`stockPriceCurrency` vs `reportCurrency` + `currency_ratio` per `insId`; live 203 mismatched Nordics). `currency_ratio` semantics are **verified** (`converted = original × ratio`, `original=0` provenance) — no ECB spot gate remains; the FX sums-only utility is live and its `fx_rate_to_sek` provenance is persisted per observation (see §3.5).
 - **1.4 MFN/document fetcher** — `MfnScraper` (Playwright), `ResearchDocumentIngestionService` (50+tail, both URLs, `ON CONFLICT(source_url)` keeping `source_release_url` distinct, report-period normalization, bilingual dedupe), `NewsRepository` + `mfn_feed_checks`. Deterministic staging tables `ownership_holders_pdf_staging` + `ownership_events_staging`.
 - **1.5 Free ownership free stack.** MFN top-10 parser (deterministic >2 rows), MFN event tagger (`flaggning/riktad emission/lock-up`), FI PDMR windowed scraper (90-day slices, 2 s cadence, cache, FI throttle quote documented), FI blankning snapshot — piped into `ResearchEvidence.ownership_liquidity` with the three limitations injected.
 - **1.6 Watchlist import & sync CLIs.** `alphaforge import-watchlist --file imports/watchlist_2026-09-16.csv --source-file watchlist_2026-09-16` (ISIN→ticker normalized match, `UNIQUE(source_file,row_hash)`), `alphaforge sync --all --as-of YYYY-MM-DD` (per-company failure isolation, `jobs{status, attempt, error JSON}`), idempotence via `ON CONFLICT DO UPDATE`.
@@ -517,7 +518,7 @@ All checks run without a paid model when marked *deterministic*; the pilot is th
 - **Stub-zero quarantine:** for a 2620-class newly-listed instrument (`reportsYear=[]` yet `reportsQuarter=[{revenues:0.0, report_Date:null}]`), assert `financial_periods.is_placeholder=1` and that no ranking/valuation path with `WHERE is_placeholder=0` surfaces it as revenue-zero.
 - **`maxCount` bug regression:** call `BorsdataAdapter.stock_prices(insId)` with `max_count=10` and without; assert both return the **same** row set after adapter slicing (backend bug not propagated to storage).
 - **MFN cadence invariant:** `mfn_feed_checks` receives a row every day per watchlist issuer even on zero delta; Sunday page-2 sweep produces at most one net new report row per issuer in tests (no duplicate page-1 re-ingest).
-- **`currency_ratio` verification gate:** a unit test asserts the stored `financial_periods.currency_ratio` equals the Börsdata raw `currency_Ratio` verbatim and that `fx.convert_sum` is the only caller that reads it; a live integration step logs the SEM verification (see §3.5) without asserting financial correctness.
+- **`currency_ratio` verification (done):** unit test asserts `financial_periods.currency_ratio` equals Börsdata raw `currency_Ratio` verbatim and `fx.convert_sum(value, ratio) = value × ratio` applies **only to sums** (net debt/market cap/EV) with `original=0` provenance (`currency` stays original); the only caller that reads `currency_ratio` is `fx.convert_sum`. Live verification completed in `scout-borsdata-api-coverage` (§4: wiki + 5 detailed cases vs spot `ratio`); no speculative gate remains.
 
 ### 7.5 End-to-end pilot — 2–3 companies from the curated watchlist
 
@@ -556,7 +557,7 @@ All checks run without a paid model when marked *deterministic*; the pilot is th
 | **Over-fitting Hedborg score weights early** | Medium | Low | Weights versioned (`2026-08-12-reverse-dcf-v10`), config-versioned, unevaluated in MVP (no calibration machinery — deferred). |
 | **Hedborg witness gaps (earnings one-off risk, dilution cause, peak margin subjectivity)** | Medium | Medium | Deterministic guards (`earnings_growth_one_off_risk`, `share_dilution>5%`, `gross→EBIT spread` clue vs conclusion); model authors mechanism, core clamps the number. |
 | **Brand risk (scraped PDFs, MFN/FI ToS)** | Low | High | Use only the company's own annual reports via `storage.mfn.se`/company IR for internal research; respect FI throttle quote and never bulk-burst the PDMR search; no Avanza/Nordnet holder-HTML scraping (blocked by SPA session and ToS). |
-| **`currency_ratio` semantics misread (FX utility computes the wrong SEK direction)** | Low | High | Phase 0 verification gate: two-company spot vs ECB rate + `scout-borsdata-api-coverage` reconciliation before the utility is live. Until verified, FX port stays `available=False` with limitation. |
+| **`currency_ratio` semantics misread (FX utility computes the wrong SEK direction)** | Low | High | **Verified** via `scout-borsdata-api-coverage` (wiki *converted = original × ratio* + 5 live cases ABB/Betsson/Arctic/SSAB/Beowulf; fetch `original=0`); persisted `currency_ratio` + `fx_rate_to_sek` per observation; unit test prevents wrong-direction conversion; wrong ratio would surface as valuation limitation, never guessed. |
 | **MFN bilingual double-count inflating evidence** | Medium | Low | Deterministic `(mfn_slug, canonical_url, storage_id)` group + `duplicate_of` pointer; validated by the bilingual PIT proof in §7.3. |
 | **Rollback cost for any phase** | Low | Low | Each phase is additive (new tables `ADD COLUMN`, new CLI subcommands); theses are immutable — nothing rewrites persisted rows. |
 
@@ -582,15 +583,38 @@ Scope discipline rule: a deferred item ships only after the pilot validation gat
 
 ---
 
-## 10. Open Slots — `scout-borsdata-api-coverage` integration (on landing)
+## 10. Börsdata API Coverage — Integrated (Phase 0)
 
-At freeze this scout is `working` (16 17:06 UTC). Do not block the authoritative plan on it; integrate via a small Phase 0 PR as soon as it lands:
+`scout-borsdata-api-coverage` landed 2026-09-16 and is **fully integrated**. No pending slot remains; the speculative FX verification gate is removed — verification is done.
 
-1. Reconcile the official Börsdata spec's full endpoint list against the 10 verified families (§2). Classify each spec entry as **in-use / available-but-unused (with purpose: ranking/valuation/Hedborg evidence) / stale**.
-2. Adjudicate **one** addition per availability: KPI-definition/metadata, splits, calendar events, per-branch KPI listings, global metrics — name the AlphaForge need or say `none`.
-3. **Verify `currency_ratio` semantics** if the spec documents it — confirm or correct the FX utility's `SEK per foreign unit` assumption in §3.5; if the spec is silent, keep the live spot-check gate.
+### 10.1 Reconciliation — 33 official paths vs 10 known families
 
-Until that PR, the FX utility stays behind the verification gate and no speculative extra endpoint is wired into `BorsdataAdapter`.
+Source: `GET https://apidoc.borsdata.se/swagger/v1/swagger.json` (OpenAPI 3.0.1, 33 GET paths, 63 component schemas, 115 751 bytes, 28Enger 2026-09-16; all 33 returned **200** live with prod key, samples saved under `/tmp/borsdata_*.json`).
+
+| Classification | Count | Paths |
+|---|---|---|
+| **In-use** (10 families already called by KN-CompanyScraper) | 10 | `GET /v1/instruments`, `/v1/markets`, `/v1/instruments/{id}/kpis/{kpiId}/{calcGroup}/{calc}`, `/v1/instruments/{id}/kpis/{kpiId}/{reportType}/{priceType}/history`, `/v1/instruments/reports` (batch ≤50), `/v1/instruments/{id}/stockprices`, `/v1/instruments/dividend/calendar`, `/v1/holdings/insider`, `/v1/holdings/buyback`, `/v1/holdings/shorts` (global snapshot, doc says `instList` but live is list-all) |
+| **Available but unused — adjudicated below** | 23 | `branches`, `sectors`, `countries`, `translationmetadata`, `instruments/StockSplits`, `instruments/description`, `instruments/report/calendar`, `instruments/reports/metadata`, `instruments/kpis/metadata`, `instruments/kpis/updated`, `instruments/updated`, `instruments/{id}/reports` variants, `instruments/kpis/{kpiId}/{calcGroup}/{calc}` batch screener, `instruments/global` + `global/kpis` + `global/stockprices/*`, `instruments/kpis/{reporttype}/summary`, `instruments/stockprices` batch + `stockprices/last` + `stockprices/date` (+ global variants), `instruments/kpis/{kpiId}/{reporttype}/{pricetype}/history` batch (`instList`) |
+| **Stale / removed** | 0 | None — every swagger path returned 200. Two doc inaccuracies (shorts `instList` spurious, StockSplits "Max 1 Year" not in swagger) do not make the path stale. |
+
+Quality notes carried: zero-volume ~0.16%, `ebitda` always `None`, dividend zero-row vs cash-flow, insider filter loss −10–60%, shorts 25% coverage (427/1 709, negative `shortsProc`), stub-zero quarantine (2620/2649), `maxCount` ignored by backend (fetch full then slice locally), `quarter/mean` KPI history →400 not supported.
+
+### 10.2 Adjudication — must-adds, should-adds, deferrals
+
+| Priority | Endpoint(s) | AlphaForge need | Action |
+|---|---|---|---|
+| **P1 Must-add** | `GET /v1/instruments/StockSplits` | Per-share correctness (`number_Of_Shares`, `price`, `eps`, `revenue_per_share` CAGR, dilution flag, reverse-DCF `shares_outstanding`) — without it a 5:1 split (Atrium 2025-04-09) is mis-counted as dilution. ~80 split events/year | Add `stock_splits` table (Addendum A) and adjust per-share math in deterministic core; sync rolling 1-year window (`from=last_sync`), backfill 2 years at bootstrap. |
+| **P1 Must-add** | `GET /v1/instruments/report/calendar` | Catalyst calendar (Hedborg Stage C #2 *Why now*, §12), `pending` gate (report due within 5 days → stale inputs), timing `observable_confirmation` | Add `report_calendar` table; wire to thesis `catalysts: [{timing_window, observable_confirmation, status}]` and ranking `pending`; sync weekly for watchlist (50/batch, 2012→2027 horizon, future dates are estimated timing windows, not hard deadlines). |
+| **P1 Must-add (fix)** | `currency_Ratio` field on `reports` | FX sums-only conversion (see §3.5) | **Verified**: `converted(original=0) = original(original=1) × ratio`, `currency` stays original provenance, ratio unchanged by `original` flag, `ratio=1.0` when currencies match (see §3.5/§4); **fetch `original=0`** so monetary fields arrive in `stockPriceCurrency`; persist `currency_ratio` per `financial_periods` row (plus `fx_rate_to_sek=fixed` provenance). |
+| **P2 Should-add** | `GET /v1/branches` + `/v1/sectors` + `/v1/countries` + `GET /v1/translationmetadata` | Ranking display & Hedborg filtering — human-readable thesis/ranking exports, macro-dominance gate without hard-coded 94 branches; `L_BRANCH_75→Real Estate`, `L_SECTOR_1→Financials` | Seed once at bootstrap into `branches`/`sectors`/`countries` (+ `translationmetadata` for en labels); no recurring sync unless branches added. |
+| **P2 Should-add** | `GET /v1/instruments/kpis/metadata` + `GET /v1/instruments/reports/metadata` | Self-describing KPI/report schema — avoid `KpiIds` drift; `nameSv/nameEn`, `format` (`%` vs `CURR` vs `MCURR` vs `MILL`) lets core validate semantics and render thesis units correctly | Cache as `kpi_metadata`/`report_metadata` at startup; add self-test: every hard-coded `KpiIds` must exist in metadata and `format` must match (PE `null`, Dividend Yield `%`, etc.). |
+| **P2 Should-add** | `GET /v1/instruments/{insid}/kpis/{reporttype}/summary` | Per-branch KPI discovery & global metrics (in-instrument) — one call returns all KPIs × 20y per `reportType` (year/r12/quarter); 36kB `year`, 61kB `r12`, 64kB `quarter`; margin KPIs 28–32 have true quarter history | At watchlist import, fetch one representative per `branchId` → `branch_kpi_allowlist(branch_id, kpi_id)` where `values` non-empty; deterministic sync consults allow-list before `get_kpis`/`get_kpi_history`, eliminating 400 noise and documenting property 277–289 / bank 290–296 applicability in code, not comments. |
+| **P3 Nice-to-have** | `GET /v1/instruments/description` | Hedborg business-model seed — 1–2 sentence sv+en description per instrument | Sync for watchlist on import as `research_documents` with limitation “summary only, not diligence”; not a substitute for detailed model/DNA. |
+| **Defer (documented, out of Nordic MVP)** | `GET /v1/instruments/global` + `global/kpis` + `global/stockprices/*` | Global instruments (14k, 4.5 MB dump) — Nordic-first MVP (Sweden ~100–150) does not sync it | Intentionally unused; note in docs as scope exclusion until peer-group widens. |
+| **Defer (throughput, adopt when needed)** | `GET /v1/instruments/stockprices` batch (`instList`) + `stockprices/last` + `stockprices/date`; `GET /v1/instruments/kpis/{kpiId}/{calcGroup}/{calc}` batch screener; `GET /v1/instruments/kpis/{kpiId}/{reporttype}/{pricetype}/history` batch (`instList`) | Bulk price/KPI throughput — same data as per-instrument loops, but N:1 or N/50 calls; `stockprices/last` 145kB gives universe snapshot for ranking; batch history reduces 600 calls (200×3 KPIs) to ~12 | Defer for MVP; if watchlist sync >2 min or >1 rps for >50 names, adopt batch variants and delete per-instrument loops. Keep single-instrument path for on-demand `evidence --company` convenience. |
+| **Defer (incremental-sync optimisation)** | `GET /v1/instruments/updated` + `GET /v1/instruments/kpis/updated` | Delta sync — `insId, updatedAt` per instrument and global `kpisCalcUpdated` timestamp | Defer; current full-watchlist nightly refresh (N≤200) is simpler and more auditable for no-look-ahead discipline. Enable when wall time exceeds ~2 min. |
+
+No endpoint is marked “stale”; all 33 are live. Until this integration, the FX utility was speculatively behind a verification gate and no extra endpoint was wired — now the must-adds are wired (or DDL-ready) and the gate is removed.
 
 ---
 
@@ -601,7 +625,7 @@ Until that PR, the FX utility stays behind the verification gate and no speculat
 - `scout-alphaforge-data-foundation/report.md` — 1 348-line design (SQLite WAL vs Postgres vs DuckDB, §2 DDL, §3 17-module map, §4 pipeline, §5 fold, Appendix D drop-in section — preferred for this plan's §3)
 - `scout-alphaforge-evidence-sources/report.md` — 536-line evidence pipeline (MFN Playwright 24 cap, `pypdf` 30→50, `evidence_catalog` / `packet_hash`, S7–S13 typed ledger/ownership, validation contract `agent-boundary-v23`)
 - `scout-ownership-free-sources/report.md` — 507-line free-holder scout (Vitec 194 pp p.51 / Acast p.27 holder tables, Mycronic flagging, `marknadssok.fi.se` 211 Vitec rows, FI blankning, Euroclear challenge, Holdings.se SPA paywall, Avanza `numberOfOwners`; three limitations + capped sub-score)
-- `scout-borsdata-api-coverage/report.md` — **pending** (official spec vs 10 families, `currency_ratio` semantics — integrate on landing)
+- `scout-borsdata-api-coverage/report.md` — **integrated 2026-09-16** — official spec 33 paths vs 10 families (23 unused, 0 stale), 5 high-value additions (StockSplits, report/calendar, dictionaries, metadata, summary discovery), `currency_ratio` verified `converted = original × ratio` with 5 live cases
 - `PycharmProjects/KN-CompanyScraper` — `src/kncompanyscraper/borsdata/{client.py:26/49/71/81/99/166/180/230/304/347, kpi_ids.py, report.py}`, `analysis/{ranking/*, valuation/*, financial/*}`, `analysis/agent/{research_document_ingestion.py:26-260, mfn_scraper.py:15-182, ownership_liquidity_evidence.py:33-176, execution_boundary.py:65-550, output_schema.py, specialist_runner.py}`, `repositories/*`, `constants.py:5-14 REPORT_TITLE_TERMS`, `.github/workflows/ci.yml` (Python 3.11 `pip install -e ".[dev]"` house reference)
 - FinRobot: `https://raw.githubusercontent.com/AI4Finance-Foundation/FinRobot/master/README.md`, `finrobot_equity/README.md`; TradingAgents: `https://raw.githubusercontent.com/TauricResearch/TradingAgents/main/README.md`
 - Hedborg philosophy: `docs/petter_hedborg_investment_philosophy.md` §§ 7–8, 12–13 (case-not-company, circle of competence, scalable profit, three-stage engine, gross→EBIT spread, falsifiable thesis, credibility ledger 8–12q, ownership 12-item checklist, Stage A gates, Stage B 10/100 ownership weight, Stage C 13-part output)
@@ -871,6 +895,76 @@ CREATE TABLE IF NOT EXISTS company_short_snapshots (
     trend_1m            REAL,
     source              TEXT NOT NULL,
     PRIMARY KEY (company_id, observation_date)
+) STRICT;
+
+-- Phase 0 must-adds — per-share correctness & catalyst calendar (Börsdata 33-path integration)
+CREATE TABLE IF NOT EXISTS stock_splits (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    borsdata_id         INTEGER NOT NULL,
+    split_type          TEXT NOT NULL CHECK (split_type IN ('S','RS')),
+    ratio               TEXT NOT NULL, -- e.g. "4:1" (S) or "1:100" (RS), as returned by API
+    split_date          DATE NOT NULL,
+    fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (borsdata_id, split_date)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_stock_splits_company_date ON stock_splits(company_id, split_date);
+
+CREATE TABLE IF NOT EXISTS report_calendar (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    borsdata_id         INTEGER NOT NULL,
+    release_date        DATE NOT NULL,
+    report_type         TEXT NOT NULL CHECK (report_type IN ('Q1','Q2','Q3','Q4')),
+    fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (borsdata_id, release_date)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_report_calendar_company_date ON report_calendar(company_id, release_date);
+
+-- Phase 0 should-adds — reference dictionaries & metadata caches (seeded once)
+CREATE TABLE IF NOT EXISTS branches (
+    branch_id           INTEGER PRIMARY KEY,
+    name_sv             TEXT NOT NULL,
+    name_en             TEXT,
+    sector_id           INTEGER REFERENCES sectors(sector_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS sectors (
+    sector_id           INTEGER PRIMARY KEY,
+    name_sv             TEXT NOT NULL,
+    name_en             TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS countries (
+    country_id          INTEGER PRIMARY KEY,
+    name_sv             TEXT NOT NULL,
+    name_en             TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS kpi_metadata (
+    kpi_id              INTEGER PRIMARY KEY,
+    name_sv             TEXT NOT NULL,
+    name_en             TEXT NOT NULL,
+    format              TEXT CHECK (format IN ('%','CURR','MCURR',NULL)),
+    is_string           INTEGER NOT NULL CHECK (is_string IN (0,1)),
+    fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS report_metadata (
+    property            TEXT PRIMARY KEY,
+    name_sv             TEXT NOT NULL,
+    name_en             TEXT NOT NULL,
+    format              TEXT CHECK (format IN ('MCURR','CURR','MILL',NULL)),
+    fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+) STRICT;
+
+-- Per-branch KPI allow-list built from kpis/{reporttype}/summary discovery
+CREATE TABLE IF NOT EXISTS branch_kpi_allowlist (
+    branch_id           INTEGER NOT NULL REFERENCES branches(branch_id),
+    kpi_id              INTEGER NOT NULL REFERENCES kpi_metadata(kpi_id),
+    discovered_via      TEXT NOT NULL DEFAULT 'summary',
+    discovered_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (branch_id, kpi_id)
 ) STRICT;
 
 PRAGMAS = [
