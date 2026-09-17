@@ -1,0 +1,62 @@
+"""Typed Settings — ALPHAFORGE_DSN, watchlist path, as_of.
+
+Migration shim: PRAGMA user_version is used for SQLite schema versioning.
+Postgres path uses the same user_version table (schema_migrations) when DSN is postgres.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_DSN = "sqlite:///data/alphaforge.db"
+SCHEMA_VERSION = 1
+
+
+def _default_dsn() -> str:
+    return os.environ.get("ALPHAFORGE_DSN", DEFAULT_DSN)
+
+
+@dataclass(frozen=True)
+class Settings:
+    dsn: str
+    watchlist_path: Path | None
+    as_of: str | None
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        dsn: str | None = None,
+        watchlist_path: str | Path | None = None,
+        as_of: str | None = None,
+    ) -> Settings:
+        resolved_dsn = dsn or _default_dsn()
+        wp = Path(watchlist_path) if watchlist_path is not None else None
+        return cls(dsn=resolved_dsn, watchlist_path=wp, as_of=as_of)
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.dsn.startswith("sqlite:")
+
+    @property
+    def sqlite_path(self) -> Path:
+        if not self.is_sqlite:
+            raise ValueError(f"DSN is not sqlite: {self.dsn}")
+        raw = self.dsn.removeprefix("sqlite://")
+        # handle sqlite:////absolute and sqlite:///relative and sqlite:///:memory:
+        if raw == "/:memory:" or raw == ":memory:":
+            return Path(":memory:")
+        # sqlite:///data/alphaforge.db -> data/alphaforge.db
+        # sqlite:////tmp/x.db -> /tmp/x.db
+        if raw.startswith("/"):
+            return Path(raw)
+        return Path(raw)
+
+    def sqlite_path_for_test(self) -> Path:
+        p = self.sqlite_path
+        if p == Path(":memory:"):
+            return p
+        # tests use data/alphaforge.test.db
+        return p.parent / "alphaforge.test.db"
