@@ -11,7 +11,11 @@ requires-python = ">=3.11"
 dependencies = [
     "python-dotenv",
     "requests",
+    "pypdf",
 ]
+
+[project.scripts]
+alphaforge = "alphaforge.cli.main:main"
 
 [project.optional-dependencies]
 dev = [
@@ -37,27 +41,28 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "C4", "UP"]
-ignore = []
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
 
 [tool.importlinter]
 root_package = "alphaforge"
+include_external_packages = true
 
-[importlinter.contracts.core-isolated]
+[[tool.importlinter.contracts]]
 name = "deterministic core is isolated"
 type = "forbidden"
 source_modules = ["alphaforge.core"]
 forbidden_modules = ["alphaforge.llm", "alphaforge.providers", "openai", "anthropic", "httpx", "requests", "sqlite3", "psycopg2"]
 
-[importlinter.contracts.llm-does-not-own-numbers]
+[[tool.importlinter.contracts]]
 name = "LLM may not import valuation internals"
 type = "forbidden"
 source_modules = ["alphaforge.llm"]
 forbidden_modules = ["alphaforge.core.valuation.reverse_dcf", "alphaforge.core.ranking.engine"]
 
-[importlinter.contracts.repo-is-the-only-db-boundary]
+[[tool.importlinter.contracts]]
 name = "repositories are the only DB boundary"
 type = "forbidden"
 source_modules = ["alphaforge.core", "alphaforge.evidence", "alphaforge.llm"]
