@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alphaforge"
+version = "0.1.0"
+description = "AlphaForge — Hedborg-inspired stock research (deterministic core + LLM packet)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8.0",
+    "import-linter>=2.2",
+    "deptry>=0.16",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alphaforge*"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: live Börsdata/FI/MFN tests (requires BORSDATA_API_KEY env var)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C4", "UP"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.importlinter]
+root_package = "alphaforge"
+
+[importlinter.contracts.core-isolated]
+name = "deterministic core is isolated"
+type = "forbidden"
+source_modules = ["alphaforge.core"]
+forbidden_modules = ["alphaforge.llm", "alphaforge.providers", "openai", "anthropic", "httpx", "requests", "sqlite3", "psycopg2"]
+
+[importlinter.contracts.llm-does-not-own-numbers]
+name = "LLM may not import valuation internals"
+type = "forbidden"
+source_modules = ["alphaforge.llm"]
+forbidden_modules = ["alphaforge.core.valuation.reverse_dcf", "alphaforge.core.ranking.engine"]
+
+[importlinter.contracts.repo-is-the-only-db-boundary]
+name = "repositories are the only DB boundary"
+type = "forbidden"
+source_modules = ["alphaforge.core", "alphaforge.evidence", "alphaforge.llm"]
+forbidden_modules = ["sqlite3", "psycopg2"]

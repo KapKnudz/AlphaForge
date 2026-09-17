@@ -1,0 +1,67 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions: { contents: read }
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install ruff import-linter deptry
+      - run: ruff check . && ruff format --check .
+      - name: importlinter (skip on docs-only tree)
+        run: |
+          set -eu
+          if [ ! -d alphaforge ]; then
+            echo "no alphaforge/ yet — importlinter contracts are ready but nothing to check; passing"
+            exit 0
+          fi
+          # Keep contracts ready so they bite the moment alphaforge/ exists.
+          # importlinter over zero modules must not fail the docs-only phase.
+          lint-imports || {
+            rc=$?
+            # importlinter exits non-zero when source_modules not found on docs-only tree;
+            # treat missing-package as pass until code lands.
+            if [ $rc -ne 0 ] && ! python -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('alphaforge') else 1)"; then
+              echo "importlinter found no alphaforge modules yet — passing docs-only tree"
+              exit 0
+            fi
+            exit $rc
+          }
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  invariants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - run: |
+          set -eu
+          # Secret-leak tripwire: Börsdata key must not appear in any tracked file.
+          # The literal Börsdata key value was previously exposed in this public repo's
+          # history (branch fm/plan-alphaforge-consolidated) and that key must be
+          # rotated immediately at https://www.borsdata.se — history has been rewritten
+          # to scrub the literal, but rotation is still required.
+          # Use a generic 32-hex pattern so the check itself does not embed a secret.
+          if git ls-files | xargs grep -E -l "[a-f0-9]{32}" 2>/dev/null | xargs grep -l "borsdata\|BORSDATA" 2>/dev/null | grep -q .; then
+            echo "::error::Possible Börsdata API key literal tracked in repo — rotate the key immediately"; exit 1; fi
+          if grep -R "BORSDATA_API_KEY" -- .github/workflows/ | grep -v -E 'grep -R|::error::CI references' | grep -q "."; then
+            echo "::error::CI references BORSDATA_API_KEY as an env var — remove"; exit 1; fi
