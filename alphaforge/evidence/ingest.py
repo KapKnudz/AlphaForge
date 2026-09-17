@@ -8,21 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-def _normalize_bilingual_key(title: str, url: str) -> str:
-    # Normalized (mfn_slug, canonical_url_without_lang_suffix, storage_id)
-    # Simplified: slugify title without Inbjudan/Invitation + url stem
-    base = re.sub(r"\b(inbjudan|invitation to)\b", "", title, flags=re.IGNORECASE).strip().lower()
-    base = re.sub(r"[^a-z0-9]+", "-", base).strip("-")
-    # Canonical url without lang suffix (/sv vs /en)
-    canon = re.sub(r"/(sv|en)(/|$)", "/", url.lower())
-    # storage id from url
-    storage_id = ""
-    m = re.search(r"storage\.mfn\.se/([^/?#]+)", url)
-    if m:
-        storage_id = m.group(1)
-    return f"{base}|{canon}|{storage_id}"
-
-
 def _detect_lang(text: str) -> tuple[str, float]:
     # Light heuristic: Swedish chars and words
     sv_markers = [" och ", " att ", " för ", " är ", "ä", "ö", "å", "bokslut", "delår"]
@@ -142,7 +127,7 @@ class ResearchDocumentIngestionService:
             # Tranche: check bilingual key dedupe via canonical grouping already done
             # Insert deduped doc
             try:
-                self.conn.execute(
+                cur = self.conn.execute(
                     """
                     INSERT INTO research_documents
                         (company_id, source_url, source_type, title, published_at, content_text, ingested_lang, checksum, raw_metadata)
@@ -161,10 +146,9 @@ class ResearchDocumentIngestionService:
                         raw_metadata,
                     ),
                 )
-                if self.conn.total_changes:
+                if cur.rowcount and cur.rowcount > 0:
                     inserted += 1
             except Exception:
-                # checksum unique may also conflict — treat as dedupe
                 pass
             # Insert suppressed variants for audit with duplicate_of
             for sup in doc.get("_suppressed_variants", []):  # type: ignore[union-attr]
@@ -176,7 +160,7 @@ class ResearchDocumentIngestionService:
                     hashlib.sha256((sup_body or "").encode()).hexdigest() if sup_body else None
                 )
                 try:
-                    self.conn.execute(
+                    cur = self.conn.execute(
                         """
                         INSERT INTO research_documents
                             (company_id, source_url, source_type, title, published_at, content_text, ingested_lang, checksum, duplicate_of, raw_metadata)
@@ -196,7 +180,8 @@ class ResearchDocumentIngestionService:
                             None,
                         ),
                     )
-                    suppressed += 1
+                    if cur.rowcount and cur.rowcount > 0:
+                        suppressed += 1
                 except Exception:
                     pass
         self.conn.commit()

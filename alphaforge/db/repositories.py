@@ -381,11 +381,15 @@ def upsert_stock_splits(
             continue
         if isinstance(split_date, str) and len(split_date) > 10:
             split_date = split_date[:10]
+        try:
+            borsdata_id_int = int(borsdata_id)
+        except (TypeError, ValueError):
+            continue
         company_id = None
         if company_map is not None:
-            company_id = company_map.get(int(borsdata_id))
+            company_id = company_map.get(borsdata_id_int)
         else:
-            cur = conn.execute("SELECT id FROM companies WHERE borsdata_id=?", (int(borsdata_id),))
+            cur = conn.execute("SELECT id FROM companies WHERE borsdata_id=?", (borsdata_id_int,))
             row = cur.fetchone()
             company_id = int(row[0]) if row else None
         conn.execute(
@@ -395,7 +399,7 @@ def upsert_stock_splits(
             ON CONFLICT(borsdata_id, split_date) DO UPDATE SET
                 split_type=excluded.split_type, ratio=excluded.ratio, company_id=excluded.company_id
             """,
-            (company_id, int(borsdata_id), split_type, str(ratio), split_date),
+            (company_id, borsdata_id_int, split_type, str(ratio), split_date),
         )
         count += 1
     conn.commit()
@@ -422,11 +426,15 @@ def upsert_report_calendar(
             report_type = str(report_type).upper()
             if report_type not in ("Q1", "Q2", "Q3", "Q4"):
                 continue
+        try:
+            borsdata_id_int = int(borsdata_id)
+        except (TypeError, ValueError):
+            continue
         company_id = None
         if company_map is not None:
-            company_id = company_map.get(int(borsdata_id))
+            company_id = company_map.get(borsdata_id_int)
         else:
-            cur = conn.execute("SELECT id FROM companies WHERE borsdata_id=?", (int(borsdata_id),))
+            cur = conn.execute("SELECT id FROM companies WHERE borsdata_id=?", (borsdata_id_int,))
             row = cur.fetchone()
             company_id = int(row[0]) if row else None
         conn.execute(
@@ -436,7 +444,7 @@ def upsert_report_calendar(
             ON CONFLICT(borsdata_id, release_date) DO UPDATE SET
                 report_type=excluded.report_type, company_id=excluded.company_id
             """,
-            (company_id, int(borsdata_id), release_date, report_type),
+            (company_id, borsdata_id_int, release_date, report_type),
         )
         count += 1
     conn.commit()
