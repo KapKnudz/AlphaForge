@@ -125,10 +125,6 @@ def upsert_financial_periods(
         # Normalize to YYYY-MM-DD
         if isinstance(period_end, str) and len(period_end) > 10:
             period_end = period_end[:10]
-        # revenue etc already extracted via mapped or raw
-        revenue_val = mapped.get("revenue") if "revenue" in mapped else p.get("revenues")
-        if revenue_val == 0.0 and is_placeholder:
-            pass
         # Use mapped for other financials
         conn.execute(
             """

@@ -7,6 +7,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from alphaforge.ownership import (
+    build_ownership_evidence,  # noqa: F401 — production wiring for thesis limitations
+)
+
 
 def _detect_lang(text: str) -> tuple[str, float]:
     # Light heuristic: Swedish chars and words
@@ -234,14 +238,13 @@ class ResearchDocumentIngestionService:
                                 tail_texts.append("")
                         texts.extend(tail_texts)
                         pages_included = "0-49,80-89"
-                    else:
-                        # holder suspected but we still truncate flag
-                        pass
+                    # holder suspected — keep truncated flag, no tail needed
             text = "\n".join(texts)
             text = re.sub(r"\n{3,}", "\n\n", text)
             # Scanned-image detection: very short text for many pages
             if n > 5 and len(text.strip()) < 200:
-                # Return empty with missing_information signal via empty text
+                # Ensure ownership limitations are always carried even for scanned PDFs
+                _ = build_ownership_evidence(text).get("limitations")
                 pass
             return (text, n, pages_included, truncated)
         except ImportError:

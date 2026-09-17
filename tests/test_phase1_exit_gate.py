@@ -13,7 +13,8 @@ from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import get_user_version, migrate
 from alphaforge.db.repositories import upsert_financial_periods
 from alphaforge.evidence.ingest import ResearchDocumentIngestionService, bilingual_dedupe
-from alphaforge.ownership.parser import LIMITATIONS, parse_top10_holders, tag_mfn_events
+from alphaforge.ownership import build_ownership_evidence
+from alphaforge.ownership.parser import parse_top10_holders, tag_mfn_events
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter
 
 
@@ -337,11 +338,19 @@ def test_idempotent_sync_twice_identical_rowcounts(mem_conn):
 
 
 def test_ownership_stack_three_limitations_always_present():
-    assert isinstance(LIMITATIONS, list)
-    assert len(LIMITATIONS) == 3
-    assert "Free-float % is unavailable" in LIMITATIONS
-    assert "Named large-holder coverage is unavailable beyond annual top 10" in LIMITATIONS
-    assert "Ownership-change history is unavailable at quarterly granularity" in LIMITATIONS
+    # Behavioral contract: limitations must appear in the production ownership-evidence output
+    evidence = build_ownership_evidence()
+    assert "limitations" in evidence
+    limitations = evidence["limitations"]
+    assert isinstance(limitations, list)
+    assert len(limitations) == 3
+    assert "Free-float % is unavailable" in limitations
+    assert "Named large-holder coverage is unavailable beyond annual top 10" in limitations
+    assert "Ownership-change history is unavailable at quarterly granularity" in limitations
+    # Also verify via direct parser import that source of truth is consistent
+    from alphaforge.ownership.parser import LIMITATIONS as parser_limitations
+
+    assert limitations == parser_limitations
 
 
 def test_mfn_top10_parser_requires_gt2_rows():
