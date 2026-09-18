@@ -73,3 +73,43 @@ def canonical_report_field(raw_key: str) -> str | None:
 
 def is_known_kpi(kpi_id: int) -> bool:
     return kpi_id in KNOWN_KPI_IDS
+
+
+class KpiIds:
+    """Borsdata KPI identifiers — mirrored from reference, pure."""
+
+    DIVIDEND_YIELD = 1
+    PE = 2
+    PS = 3
+    PB = 4
+    EV_EBIT = 10
+    EV_EBITDA = 11
+    PEG = 19
+    ENTERPRISE_VALUE = 49
+    MARKET_CAP = 50
+    PFCF = 76
+    ROIC = 37
+    NET_DEBT_EBITDA = 42
+    GENERAL_FUNDAMENTAL_KPIS = (ROIC, NET_DEBT_EBITDA)
+    PROPERTY_NAV = 277
+    PROPERTY_INTEREST_COVERAGE = 278
+    PROPERTY_LTV = 279
+    PROPERTY_OCCUPANCY = 280
+    PROPERTY_NOI = 281
+    PROPERTY_NOI_PER_SHARE = 282
+    PROPERTY_NOI_MARGIN = 283
+    PROPERTY_INCOME = 284
+    PROPERTY_INCOME_PER_SHARE = 285
+    PROPERTY_INCOME_MARGIN = 286
+    PROPERTY_NAV_DISCOUNT = 287
+    PROPERTY_PRICE_TO_NOI = 288
+    PROPERTY_PRICE_TO_INCOME = 289
+    BANK_COST_INCOME = 290
+    BANK_CREDIT_LOSSES = 291
+    BANK_CET1 = 292
+    BANK_TIER1 = 293
+    BANK_CAPITAL_ADEQUACY = 294
+    BANK_DEPOSITS_LENDING = 295
+    BANK_LCR = 296
+    PROPERTY_KPIS = tuple(range(PROPERTY_NAV, PROPERTY_PRICE_TO_INCOME + 1))
+    BANK_KPIS = tuple(range(BANK_COST_INCOME, BANK_LCR + 1))
