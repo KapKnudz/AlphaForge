@@ -666,6 +666,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
             "balance_sheet_score",
             "ranking_model",
             "rank_eligible",
+            "eligibility_reasons",
             "data_quality",
         ])
         for i, score in enumerate(ranking.scores, 1):
@@ -680,6 +681,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
                 score.balance_sheet_score,
                 score.ranking_model,
                 score.rank_eligible,
+                ";".join(score.eligibility_reasons),
                 score.data_quality,
             ])
 
@@ -748,7 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--allow-empty-companies", action="store_true", help=argparse.SUPPRESS)
     sync.set_defaults(func=cmd_sync)
 
-    rank = sub.add_parser("rank", help="Rank watchlist companies")
+    rank = sub.add_parser(
+        "rank",
+        help="Rank watchlist companies (exports full universe with eligibility flags)",
+    )
     rank.add_argument(
         "--as-of",
         dest="as_of",

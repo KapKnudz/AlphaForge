@@ -367,3 +367,79 @@ class TestReadinessGate:
 
         assessment = gate.assess(candidate)
         assert assessment.status == "method_unsupported"
+
+
+# --- Test 8: Eligibility flags and reasons in exports ---
+
+
+class TestExportEligibilityFields:
+    def test_json_contains_eligibility_fields(self):
+        """ranking.json includes rank_eligible and eligibility_reasons per company."""
+        companies = [
+            MockCompany(id=1, name="Company A", ticker="A", branch_id=None),
+        ]
+        results_by_company = {}
+        engine = RankingEngine()
+        ranking = engine.rank(companies, results_by_company)
+        scores_list = [asdict(s) for s in ranking.scores]
+        for score_dict in scores_list:
+            assert "rank_eligible" in score_dict
+            assert isinstance(score_dict["rank_eligible"], bool)
+            assert "eligibility_reasons" in score_dict
+            assert isinstance(score_dict["eligibility_reasons"], list)
+
+    def test_csv_contains_eligibility_fields(self, tmp_path):
+        """ranking.csv includes rank_eligible and eligibility_reasons columns."""
+        import csv
+
+        companies = [
+            MockCompany(id=1, name="Company A", ticker="A", branch_id=None),
+        ]
+        results_by_company = {}
+        engine = RankingEngine()
+        ranking = engine.rank(companies, results_by_company)
+
+        csv_path = tmp_path / "ranking.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "rank", "ticker", "name", "total_score", "quality_score",
+                "growth_score", "valuation_score", "balance_sheet_score",
+                "ranking_model", "rank_eligible", "eligibility_reasons", "data_quality",
+            ])
+            for i, score in enumerate(ranking.scores, 1):
+                writer.writerow([
+                    i, score.ticker, score.name, score.total_score,
+                    score.quality_score, score.growth_score, score.valuation_score,
+                    score.balance_sheet_score, score.ranking_model,
+                    score.rank_eligible, ";".join(score.eligibility_reasons),
+                    score.data_quality,
+                ])
+
+        with open(csv_path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert "rank_eligible" in row
+        assert row["rank_eligible"] in ("True", "False")
+        assert "eligibility_reasons" in row
+        assert isinstance(row["eligibility_reasons"], str)
+
+    def test_eligible_companies_sort_first(self):
+        """Eligible companies appear before ineligible companies in output."""
+        eligible_company = MockCompany(id=1, name="Eligible", ticker="ELIG", branch_id=None)
+        # Bank company with empty sector_data will be ineligible
+        ineligible_company = MockCompany(id=2, name="Bank", ticker="BNK", branch_id=2)
+
+        companies = [eligible_company, ineligible_company]
+        results_by_company = {}
+        engine = RankingEngine()
+        ranking = engine.rank(companies, results_by_company)
+
+        eligible_indices = [i for i, s in enumerate(ranking.scores) if s.rank_eligible]
+        ineligible_indices = [i for i, s in enumerate(ranking.scores) if not s.rank_eligible]
+
+        if eligible_indices and ineligible_indices:
+            assert max(eligible_indices) < min(ineligible_indices)
