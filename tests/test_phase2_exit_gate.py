@@ -112,15 +112,16 @@ class TestADTV:
         assert result.zero_volume_days_120 == 5
 
     def test_adtv_pit_filtering(self):
-        """ADTV respects as_of filtering."""
+        """ADTV respects as_of filtering — bars after as_of are excluded."""
         bars = _make_price_bars(130, close=100.0, volume=1000, as_of=date(2026, 1, 1))
-        # Only include bars up to 2025-12-01 (30 days before as_of)
-        filtered_bars = [b for b in bars if b.date <= date(2025, 12, 1)]
-        result = build(filtered_bars, as_of=date(2025, 12, 1))
-        # Should only see 30 days of data
+        # Bars span 2026-01-01 back to ~2025-08-24. With as_of=2025-12-01,
+        # only bars with date <= 2025-12-01 are included (99 bars).
+        result = build(bars, as_of=date(2025, 12, 1))
         assert result.observed_days_20 == 20
-        assert result.observed_days_60 == 30
-        assert result.observed_days_120 == 30
+        assert result.observed_days_60 == 60
+        assert result.observed_days_120 == 99
+        # ADTV-120 is None because 99 < 120
+        assert result.adtv_120 is None
 
 
 # --- Test 2: Golden-packet ranking round-trip via packet_hash ---
@@ -229,14 +230,13 @@ class TestPointInTimeExclusion:
         from alphaforge.core.point_in_time import in_window
 
         start = date(2025, 1, 1)
-        end = date(2025, 12, 31)
         as_of = date(2026, 1, 1)
 
-        # Date within window should be included
-        assert in_window(date(2025, 6, 1), start, end) is True
+        # Date within window [start, as_of] should be included
+        assert in_window(date(2025, 6, 1), as_of, start=start) is True
 
         # Date after as_of should be excluded
-        assert in_window(date(2026, 6, 1), start, end) is False
+        assert in_window(date(2026, 6, 1), as_of, start=start) is False
 
 
 # --- Test 5: Forward scenario NaN handling ---
