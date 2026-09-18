@@ -231,7 +231,8 @@ class FinancialCalculator:
         shares: list[float | None],
     ) -> list[float | None]:
         return [
-            self.calculate_ratio(value, share_count) for value, share_count in zip(values, shares, strict=False)
+            self.calculate_ratio(value, share_count)
+            for value, share_count in zip(values, shares, strict=False)
         ]
 
     def _margin_history(

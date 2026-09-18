@@ -225,9 +225,7 @@ class ForwardScenarioEngine:
         bands = tuple(band for band in bands_raw if band is not None)
         output_flags = self._validate_outputs(bands)
         if missing_bands:
-            output_flags.append(
-                "annualized return unavailable for: " + ", ".join(missing_bands)
-            )
+            output_flags.append("annualized return unavailable for: " + ", ".join(missing_bands))
         if output_flags:
             return ForwardScenarioAnalysis(
                 status="insufficient_evidence",

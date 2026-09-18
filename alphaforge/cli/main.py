@@ -527,7 +527,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def export_ranking_files(ranking, as_of: str, model_version: str, exports_dir: Path) -> tuple[Path, Path]:
+def export_ranking_files(
+    ranking, as_of: str, model_version: str, exports_dir: Path
+) -> tuple[Path, Path]:
     from dataclasses import asdict
 
     exports_dir.mkdir(parents=True, exist_ok=True)
@@ -546,35 +548,39 @@ def export_ranking_files(ranking, as_of: str, model_version: str, exports_dir: P
     ranking_csv_path = exports_dir / "ranking.csv"
     with open(ranking_csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "rank",
-            "ticker",
-            "name",
-            "total_score",
-            "quality_score",
-            "growth_score",
-            "valuation_score",
-            "balance_sheet_score",
-            "ranking_model",
-            "rank_eligible",
-            "eligibility_reasons",
-            "data_quality",
-        ])
+        writer.writerow(
+            [
+                "rank",
+                "ticker",
+                "name",
+                "total_score",
+                "quality_score",
+                "growth_score",
+                "valuation_score",
+                "balance_sheet_score",
+                "ranking_model",
+                "rank_eligible",
+                "eligibility_reasons",
+                "data_quality",
+            ]
+        )
         for i, score in enumerate(ranking.scores, 1):
-            writer.writerow([
-                i,
-                score.ticker,
-                score.name,
-                score.total_score,
-                score.quality_score,
-                score.growth_score,
-                score.valuation_score,
-                score.balance_sheet_score,
-                score.ranking_model,
-                score.rank_eligible,
-                ";".join(score.eligibility_reasons),
-                score.data_quality,
-            ])
+            writer.writerow(
+                [
+                    i,
+                    score.ticker,
+                    score.name,
+                    score.total_score,
+                    score.quality_score,
+                    score.growth_score,
+                    score.valuation_score,
+                    score.balance_sheet_score,
+                    score.ranking_model,
+                    score.rank_eligible,
+                    ";".join(score.eligibility_reasons),
+                    score.data_quality,
+                ]
+            )
 
     return ranking_json_path, ranking_csv_path
 
@@ -587,7 +593,6 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     from alphaforge.config import Settings
     from alphaforge.core.ranking.engine import RankingEngine
-    from alphaforge.core.ranking.types import WatchlistRanking
     from alphaforge.db.connection import get_connection
     from alphaforge.db.migrations import migrate
     from alphaforge.db.repositories import save_ranking_run
@@ -686,19 +691,18 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     exports_dir = Path("exports") / as_of
     ranking_json_path, ranking_csv_path = export_ranking_files(
-        ranking, as_of, engine.RANKING_MODEL_VERSION, exports_dir,
+        ranking,
+        as_of,
+        engine.RANKING_MODEL_VERSION,
+        exports_dir,
     )
 
     # Save ranking run to DB
     # Generate hashes for reproducibility
-    scores_bytes = json.dumps(
-        [asdict(s) for s in ranking.scores], sort_keys=True
-    ).encode()
+    scores_bytes = json.dumps([asdict(s) for s in ranking.scores], sort_keys=True).encode()
     packet_hash = hashlib.sha256(scores_bytes).hexdigest()
 
-    universe_bytes = json.dumps(
-        sorted([c.ticker for c in companies]), sort_keys=True
-    ).encode()
+    universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()
     universe_hash = hashlib.sha256(universe_bytes).hexdigest()
 
     eligible_count = sum(1 for s in ranking.scores if s.rank_eligible)

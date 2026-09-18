@@ -38,7 +38,9 @@ def build_general_scoring_audit(
     }
 
     audit = {}
-    for (category, metrics), outer_weight in zip(categories_metrics.items(), category_weights, strict=False):
+    for (category, metrics), outer_weight in zip(
+        categories_metrics.items(), category_weights, strict=False
+    ):
         results = [m.evaluate() for m in metrics]
         available_weight = sum(r.weight for r in results if r.score is not None)
 

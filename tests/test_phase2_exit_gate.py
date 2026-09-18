@@ -2,17 +2,12 @@
 
 import hashlib
 import json
-import math
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 
-import pytest
-
-from alphaforge.core.coverage.liquidity import PriceBar, build, adtv
+from alphaforge.core.coverage.liquidity import PriceBar, build
 from alphaforge.core.ranking.engine import RankingEngine
-from alphaforge.core.ranking.types import CompanyScore
-from alphaforge.core.types import DataQuality, RankingModel
-
+from alphaforge.core.types import RankingModel
 
 # --- Test fixtures ---
 
@@ -304,9 +299,7 @@ class TestRankingEligibility:
         valuation = {}
         sector_data = {}
 
-        eligible, reasons = _rank_eligibility(
-            RankingModel.BANK, financial, valuation, sector_data
-        )
+        eligible, reasons = _rank_eligibility(RankingModel.BANK, financial, valuation, sector_data)
         assert eligible is False
         assert any("bank" in r.lower() for r in reasons)
 
@@ -403,7 +396,10 @@ class TestExportEligibilityFields:
 
         exports_dir = tmp_path / "exports"
         ranking_json_path, ranking_csv_path = export_ranking_files(
-            ranking, "2026-01-01", engine.RANKING_MODEL_VERSION, exports_dir,
+            ranking,
+            "2026-01-01",
+            engine.RANKING_MODEL_VERSION,
+            exports_dir,
         )
 
         with open(ranking_csv_path, encoding="utf-8") as f:
@@ -432,7 +428,10 @@ class TestExportEligibilityFields:
 
         exports_dir = tmp_path / "exports"
         ranking_json_path, ranking_csv_path = export_ranking_files(
-            ranking, "2026-01-01", engine.RANKING_MODEL_VERSION, exports_dir,
+            ranking,
+            "2026-01-01",
+            engine.RANKING_MODEL_VERSION,
+            exports_dir,
         )
 
         with open(ranking_json_path, encoding="utf-8") as f:

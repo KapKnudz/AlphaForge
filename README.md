@@ -4,7 +4,7 @@ A clean, simple stock-research system for the Nordic small-cap universe: one mai
 
 ## Status
 
-Early phase — planning. The current implementation plan lives in [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md).
+Phase 2 complete — deterministic ranking, valuation, and return math in pure, model-free code. The current implementation plan lives in [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md).
 
 ## Design principles
 
