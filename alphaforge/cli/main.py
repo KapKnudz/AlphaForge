@@ -527,6 +527,58 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def export_ranking_files(ranking, as_of: str, model_version: str, exports_dir: Path) -> tuple[Path, Path]:
+    from dataclasses import asdict
+
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    ranking_data = {
+        "as_of": as_of,
+        "model_version": model_version,
+        "company_count": len(ranking.scores),
+        "eligible_count": sum(1 for s in ranking.scores if s.rank_eligible),
+        "scores": [asdict(s) for s in ranking.scores],
+    }
+
+    ranking_json_path = exports_dir / "ranking.json"
+    ranking_json_path.write_text(json.dumps(ranking_data, indent=2, ensure_ascii=False))
+
+    ranking_csv_path = exports_dir / "ranking.csv"
+    with open(ranking_csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "rank",
+            "ticker",
+            "name",
+            "total_score",
+            "quality_score",
+            "growth_score",
+            "valuation_score",
+            "balance_sheet_score",
+            "ranking_model",
+            "rank_eligible",
+            "eligibility_reasons",
+            "data_quality",
+        ])
+        for i, score in enumerate(ranking.scores, 1):
+            writer.writerow([
+                i,
+                score.ticker,
+                score.name,
+                score.total_score,
+                score.quality_score,
+                score.growth_score,
+                score.valuation_score,
+                score.balance_sheet_score,
+                score.ranking_model,
+                score.rank_eligible,
+                ";".join(score.eligibility_reasons),
+                score.data_quality,
+            ])
+
+    return ranking_json_path, ranking_csv_path
+
+
 def cmd_rank(args: argparse.Namespace) -> int:
     import hashlib
     import json
@@ -632,58 +684,10 @@ def cmd_rank(args: argparse.Namespace) -> int:
     engine = RankingEngine()
     ranking = engine.rank(companies, results_by_company)
 
-    # Export to exports/<as_of>/
     exports_dir = Path("exports") / as_of
-    exports_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate ranking JSON
-    ranking_data = {
-        "as_of": as_of,
-        "model_version": engine.RANKING_MODEL_VERSION,
-        "company_count": len(ranking.scores),
-        "eligible_count": sum(1 for s in ranking.scores if s.rank_eligible),
-        "scores": [asdict(s) for s in ranking.scores],
-    }
-
-    # Write ranking.json
-    ranking_json_path = exports_dir / "ranking.json"
-    ranking_json_path.write_text(json.dumps(ranking_data, indent=2, ensure_ascii=False))
-
-    # Write ranking.csv
-    ranking_csv_path = exports_dir / "ranking.csv"
-    import csv
-
-    with open(ranking_csv_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "rank",
-            "ticker",
-            "name",
-            "total_score",
-            "quality_score",
-            "growth_score",
-            "valuation_score",
-            "balance_sheet_score",
-            "ranking_model",
-            "rank_eligible",
-            "eligibility_reasons",
-            "data_quality",
-        ])
-        for i, score in enumerate(ranking.scores, 1):
-            writer.writerow([
-                i,
-                score.ticker,
-                score.name,
-                score.total_score,
-                score.quality_score,
-                score.growth_score,
-                score.valuation_score,
-                score.balance_sheet_score,
-                score.ranking_model,
-                score.rank_eligible,
-                ";".join(score.eligibility_reasons),
-                score.data_quality,
-            ])
+    ranking_json_path, ranking_csv_path = export_ranking_files(
+        ranking, as_of, engine.RANKING_MODEL_VERSION, exports_dir,
+    )
 
     # Save ranking run to DB
     # Generate hashes for reproducibility

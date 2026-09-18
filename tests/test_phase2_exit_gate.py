@@ -392,6 +392,8 @@ class TestExportEligibilityFields:
         """ranking.csv includes rank_eligible and eligibility_reasons columns."""
         import csv
 
+        from alphaforge.cli.main import export_ranking_files
+
         companies = [
             MockCompany(id=1, name="Company A", ticker="A", branch_id=None),
         ]
@@ -399,24 +401,12 @@ class TestExportEligibilityFields:
         engine = RankingEngine()
         ranking = engine.rank(companies, results_by_company)
 
-        csv_path = tmp_path / "ranking.csv"
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "rank", "ticker", "name", "total_score", "quality_score",
-                "growth_score", "valuation_score", "balance_sheet_score",
-                "ranking_model", "rank_eligible", "eligibility_reasons", "data_quality",
-            ])
-            for i, score in enumerate(ranking.scores, 1):
-                writer.writerow([
-                    i, score.ticker, score.name, score.total_score,
-                    score.quality_score, score.growth_score, score.valuation_score,
-                    score.balance_sheet_score, score.ranking_model,
-                    score.rank_eligible, ";".join(score.eligibility_reasons),
-                    score.data_quality,
-                ])
+        exports_dir = tmp_path / "exports"
+        ranking_json_path, ranking_csv_path = export_ranking_files(
+            ranking, "2026-01-01", engine.RANKING_MODEL_VERSION, exports_dir,
+        )
 
-        with open(csv_path, encoding="utf-8") as f:
+        with open(ranking_csv_path, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
 
@@ -427,19 +417,81 @@ class TestExportEligibilityFields:
         assert "eligibility_reasons" in row
         assert isinstance(row["eligibility_reasons"], str)
 
+    def test_json_and_csv_eligibility_fields(self, tmp_path):
+        """Both ranking.json and ranking.csv carry per-company eligibility."""
+        import csv
+
+        from alphaforge.cli.main import export_ranking_files
+
+        companies = [
+            MockCompany(id=1, name="Company A", ticker="A", branch_id=None),
+        ]
+        results_by_company = {}
+        engine = RankingEngine()
+        ranking = engine.rank(companies, results_by_company)
+
+        exports_dir = tmp_path / "exports"
+        ranking_json_path, ranking_csv_path = export_ranking_files(
+            ranking, "2026-01-01", engine.RANKING_MODEL_VERSION, exports_dir,
+        )
+
+        with open(ranking_json_path, encoding="utf-8") as f:
+            json_data = json.load(f)
+        assert json_data["scores"][0]["rank_eligible"] in (True, False)
+        assert isinstance(json_data["scores"][0]["eligibility_reasons"], list)
+
+        with open(ranking_csv_path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            csv_rows = list(reader)
+        assert csv_rows[0]["rank_eligible"] in ("True", "False")
+        assert isinstance(csv_rows[0]["eligibility_reasons"], str)
+
     def test_eligible_companies_sort_first(self):
         """Eligible companies appear before ineligible companies in output."""
+        from alphaforge.core.financial.types import FinancialResult
+        from alphaforge.core.valuation.types import ValuationResult
+
         eligible_company = MockCompany(id=1, name="Eligible", ticker="ELIG", branch_id=None)
-        # Bank company with empty sector_data will be ineligible
         ineligible_company = MockCompany(id=2, name="Bank", ticker="BNK", branch_id=2)
 
+        financial = FinancialResult(
+            operating_margin=0.15,
+            net_margin=0.10,
+            fcf_margin=0.12,
+            revenue_growth=0.05,
+            ebit_growth=0.05,
+            net_income_growth=0.05,
+            roe=0.15,
+            roa=0.08,
+            debt_to_equity=0.5,
+        )
+        valuation = ValuationResult(
+            pe=15.0,
+            ev_ebit=10.0,
+            ev_ebitda=8.0,
+            pb=2.0,
+            ps=1.5,
+            pfcf=12.0,
+            peg=1.2,
+            earnings_yield=0.067,
+            free_cash_flow_yield=0.083,
+            pe_vs_5y_avg=0.9,
+            ev_ebit_vs_5y_avg=0.9,
+            pb_vs_5y_avg=1.1,
+            pe_percentile=0.45,
+            ev_ebit_percentile=0.40,
+        )
+
+        results_by_company = {
+            1: {"financial": financial, "valuation": valuation},
+        }
         companies = [eligible_company, ineligible_company]
-        results_by_company = {}
         engine = RankingEngine()
         ranking = engine.rank(companies, results_by_company)
 
         eligible_indices = [i for i, s in enumerate(ranking.scores) if s.rank_eligible]
         ineligible_indices = [i for i, s in enumerate(ranking.scores) if not s.rank_eligible]
 
-        if eligible_indices and ineligible_indices:
-            assert max(eligible_indices) < min(ineligible_indices)
+        assert eligible_indices, "expected at least one eligible company"
+        assert ineligible_indices, "expected at least one ineligible company"
+        assert max(eligible_indices) < min(ineligible_indices)
