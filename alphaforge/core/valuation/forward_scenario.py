@@ -139,7 +139,7 @@ class ForwardScenarioAnalysis:
 class _CalculatedBandEndpoint:
     price: float
     holding_value: float
-    annualized_return: float
+    annualized_return: float | None
 
 
 class ForwardScenarioEngine:
@@ -216,8 +216,18 @@ class ForwardScenarioEngine:
                 warnings=tuple(warnings),
             )
 
-        bands = tuple(self._calculate_band(inputs, bundle) for bundle in inputs.bundles)
+        bands_raw = [self._calculate_band(inputs, bundle) for bundle in inputs.bundles]
+        missing_bands = [
+            bundle.case
+            for bundle, band in zip(inputs.bundles, bands_raw, strict=False)
+            if band is None
+        ]
+        bands = tuple(band for band in bands_raw if band is not None)
         output_flags = self._validate_outputs(bands)
+        if missing_bands:
+            output_flags.append(
+                "annualized return unavailable for: " + ", ".join(missing_bands)
+            )
         if output_flags:
             return ForwardScenarioAnalysis(
                 status="insufficient_evidence",
@@ -466,9 +476,11 @@ class ForwardScenarioEngine:
         cls,
         inputs: ForwardScenarioInputs,
         bundle: ScenarioBundle,
-    ) -> ScenarioBandResult:
+    ) -> ScenarioBandResult | None:
         low = cls._calculate_endpoint(inputs, bundle, bundle.terminal_ev_ebit_low.value)
         high = cls._calculate_endpoint(inputs, bundle, bundle.terminal_ev_ebit_high.value)
+        if low.annualized_return is None or high.annualized_return is None:
+            return None
         return ScenarioBandResult(
             case=bundle.case,
             horizon_months=bundle.horizon_months,
@@ -502,8 +514,6 @@ class ForwardScenarioEngine:
         price = equity_value / diluted_shares
         holding_value = price + bundle.distributions_per_share.value
         annualized_return = cagr(inputs.current_price, holding_value, years)
-        if annualized_return is None:
-            annualized_return = float("nan")
         return _CalculatedBandEndpoint(price, holding_value, annualized_return)
 
     @classmethod
