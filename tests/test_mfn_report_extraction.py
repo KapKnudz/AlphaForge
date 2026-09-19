@@ -22,6 +22,7 @@ def _connection():
 def test_discover_feed_excludes_news_and_report_schedules():
     html = """
     <a class="title-link item-link" href="/a/acme/q1">Q1 2026 Interim Report</a>
+    <a class="title-link item-link" href="/a/acme/q1-sv">Kvartalsrapport Q1 2026</a>
     <a class="title-link item-link" href="/a/acme/news">Acme wins a new contract</a>
     <a class="title-link item-link" href="/a/acme/calendar">Report Schedule 2026</a>
     <a class="title-link item-link" href="/about/annual-report">Annual Report navigation</a>
@@ -34,8 +35,12 @@ def test_discover_feed_excludes_news_and_report_schedules():
         patch("alphaforge.providers.mfn.scraper.time.sleep"),
     ):
         articles = scraper.discover_feed("all/a/acme")
-    assert [article["title"] for article in articles] == ["Q1 2026 Interim Report"]
+    assert [article["title"] for article in articles] == [
+        "Q1 2026 Interim Report",
+        "Kvartalsrapport Q1 2026",
+    ]
     assert articles[0]["report_kind"] == "quarterly"
+    assert articles[1]["lang"] == "sv"
 
 
 def test_scrape_details_extracts_timestamp_body_and_pdf():
@@ -89,6 +94,21 @@ def test_scrape_details_normalises_human_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
     <time>7 May 2026</time>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] == "2026-05-07T00:00:00"
+
+
+def test_scrape_details_normalises_swedish_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <time>7 maj 2026</time>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")

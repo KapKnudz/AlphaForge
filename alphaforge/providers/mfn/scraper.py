@@ -8,6 +8,7 @@ fixture-proven client-rendering check, not in this deterministic parser.
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -50,6 +51,20 @@ _REPORT_ATTACHMENT_TERMS = (
     "rapport",
 )
 _NON_REPORT_ATTACHMENT_TERMS = ("presentation", "slides", "webcast")
+_SWEDISH_MONTHS = {
+    "januari": "january",
+    "februari": "february",
+    "mars": "march",
+    "april": "april",
+    "maj": "may",
+    "juni": "june",
+    "juli": "july",
+    "augusti": "august",
+    "september": "september",
+    "oktober": "october",
+    "november": "november",
+    "december": "december",
+}
 
 
 def _normalise_timestamp(value: str | None) -> str | None:
@@ -61,12 +76,22 @@ def _normalise_timestamp(value: str | None) -> str | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        for date_format in ("%d %B %Y", "%d %b %Y"):
-            try:
-                parsed = datetime.strptime(text, date_format)
-                break
-            except ValueError:
+        localized_text = re.sub(
+            r"\b(?:" + "|".join(_SWEDISH_MONTHS) + r")\b",
+            lambda match: _SWEDISH_MONTHS[match.group(0).lower()],
+            text,
+            flags=re.IGNORECASE,
+        )
+        for date_text in (text, localized_text):
+            for date_format in ("%d %B %Y", "%d %b %Y"):
+                try:
+                    parsed = datetime.strptime(date_text, date_format)
+                    break
+                except ValueError:
+                    continue
+            else:
                 continue
+            break
         else:
             return None
     if parsed.tzinfo is None:
@@ -76,7 +101,10 @@ def _normalise_timestamp(value: str | None) -> str | None:
 
 def _language_hint(text: str) -> str | None:
     lower = text.lower()
-    if any(marker in lower for marker in ("årsredovisning", "bokslutskommuniké", "delårsrapport")):
+    if any(
+        marker in lower
+        for marker in ("årsredovisning", "bokslutskommuniké", "delårsrapport", "kvartalsrapport")
+    ):
         return "sv"
     if any(marker in lower for marker in ("annual report", "year-end report", "interim report")):
         return "en"
