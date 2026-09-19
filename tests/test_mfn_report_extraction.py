@@ -193,6 +193,29 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
         conn.close()
 
 
+def test_persist_articles_is_idempotent_without_company_id():
+    conn = _connection()
+    try:
+        article = {
+            "title": "Annual Report 2025",
+            "source_url": "https://mfn.test/a/reports/annual-2025",
+            "content_text": "Annual report evidence",
+            "report_kind": "annual",
+            "fiscal_period": "2025",
+        }
+        first = ResearchDocumentIngestionService(conn).persist_articles(None, [article])
+        second = ResearchDocumentIngestionService(conn).persist_articles(None, [article])
+        count = conn.execute(
+            "SELECT count(*) FROM research_documents WHERE company_id IS NULL AND source_url=?",
+            (article["source_url"],),
+        ).fetchone()[0]
+        assert first.inserted == 1
+        assert second.inserted == 0
+        assert count == 1
+    finally:
+        conn.close()
+
+
 def test_pypdf_extraction_keeps_all_page_anchors():
     writer = PdfWriter()
     for _ in range(51):

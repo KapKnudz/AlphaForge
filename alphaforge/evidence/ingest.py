@@ -181,6 +181,16 @@ class IngestResult:
     suppressed: int
 
 
+def _document_exists(conn: Any, company_id: int | None, source_url: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM research_documents WHERE company_id IS ? AND source_url=? LIMIT 1",
+            (company_id, source_url),
+        ).fetchone()
+        is not None
+    )
+
+
 @dataclass(frozen=True)
 class PdfExtraction:
     text: str
@@ -229,34 +239,35 @@ class ResearchDocumentIngestionService:
                 or (hashlib.sha256(body.encode()).hexdigest() if body else None)
             )
             metadata = _metadata_json(doc, language=language, checksum=checksum)
-            try:
-                cur = self.conn.execute(
-                    """
-                    INSERT INTO research_documents
-                        (company_id, source_url, source_type, title, published_at, content_text,
-                         page_count, pages_included, page_truncated, ingested_lang, checksum, raw_metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(company_id, source_url) DO NOTHING
-                    """,
-                    (
-                        company_id,
-                        source_url,
-                        source_type,
-                        title,
-                        published_at,
-                        body,
-                        doc.get("page_count"),
-                        doc.get("pages_included"),
-                        doc.get("page_truncated"),
-                        language,
-                        checksum,
-                        metadata,
-                    ),
-                )
-                if cur.rowcount and cur.rowcount > 0:
-                    inserted += 1
-            except Exception:
-                pass
+            if not _document_exists(self.conn, company_id, source_url):
+                try:
+                    cur = self.conn.execute(
+                        """
+                        INSERT INTO research_documents
+                            (company_id, source_url, source_type, title, published_at, content_text,
+                             page_count, pages_included, page_truncated, ingested_lang, checksum, raw_metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(company_id, source_url) DO NOTHING
+                        """,
+                        (
+                            company_id,
+                            source_url,
+                            source_type,
+                            title,
+                            published_at,
+                            body,
+                            doc.get("page_count"),
+                            doc.get("pages_included"),
+                            doc.get("page_truncated"),
+                            language,
+                            checksum,
+                            metadata,
+                        ),
+                    )
+                    if cur.rowcount and cur.rowcount > 0:
+                        inserted += 1
+                except Exception:
+                    pass
             for suppressed_doc in doc.get("_suppressed_variants", []):
                 suppressed_url = suppressed_doc.get("source_url") or suppressed_doc.get("url") or ""
                 if not suppressed_url:
@@ -278,40 +289,41 @@ class ResearchDocumentIngestionService:
                     language=suppressed_language,
                     checksum=suppressed_checksum,
                 )
-                try:
-                    cur = self.conn.execute(
-                        """
-                        INSERT INTO research_documents
-                            (company_id, source_url, source_type, title, published_at, content_text,
-                             page_count, pages_included, page_truncated, duplicate_of,
-                             ingested_lang, checksum, raw_metadata)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                (SELECT id FROM research_documents
-                                 WHERE company_id IS ? AND source_url=?),
-                                ?, ?, ?)
-                        ON CONFLICT(company_id, source_url) DO NOTHING
-                        """,
-                        (
-                            company_id,
-                            suppressed_url,
-                            source_type,
-                            suppressed_title,
-                            suppressed_doc.get("published_at"),
-                            suppressed_body,
-                            suppressed_doc.get("page_count"),
-                            suppressed_doc.get("pages_included"),
-                            suppressed_doc.get("page_truncated"),
-                            company_id,
-                            source_url,
-                            suppressed_language,
-                            suppressed_checksum,
-                            suppressed_metadata,
-                        ),
-                    )
-                    if cur.rowcount and cur.rowcount > 0:
-                        suppressed += 1
-                except Exception:
-                    pass
+                if not _document_exists(self.conn, company_id, suppressed_url):
+                    try:
+                        cur = self.conn.execute(
+                            """
+                            INSERT INTO research_documents
+                                (company_id, source_url, source_type, title, published_at, content_text,
+                                 page_count, pages_included, page_truncated, duplicate_of,
+                                 ingested_lang, checksum, raw_metadata)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                    (SELECT id FROM research_documents
+                                     WHERE company_id IS ? AND source_url=?),
+                                    ?, ?, ?)
+                            ON CONFLICT(company_id, source_url) DO NOTHING
+                            """,
+                            (
+                                company_id,
+                                suppressed_url,
+                                source_type,
+                                suppressed_title,
+                                suppressed_doc.get("published_at"),
+                                suppressed_body,
+                                suppressed_doc.get("page_count"),
+                                suppressed_doc.get("pages_included"),
+                                suppressed_doc.get("page_truncated"),
+                                company_id,
+                                source_url,
+                                suppressed_language,
+                                suppressed_checksum,
+                                suppressed_metadata,
+                            ),
+                        )
+                        if cur.rowcount and cur.rowcount > 0:
+                            suppressed += 1
+                    except Exception:
+                        pass
         self.conn.commit()
         return IngestResult(inserted=inserted, suppressed=suppressed)
 
