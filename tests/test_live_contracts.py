@@ -119,6 +119,16 @@ def test_values_envelopes_reject_rows_without_resource_fields():
             adapter.get_dividends([29])
 
 
+def test_zero_dividend_markers_without_dates_are_ignored():
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(
+        adapter,
+        "_get_json",
+        return_value={"values": [{"insId": 29, "values": [{"amountPaid": 0.0, "currency": "SEK"}]}]},
+    ):
+        assert adapter.get_dividends([29]) == []
+
+
 def test_watchlist_rows_relink_without_replacing_source_row():
     conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
     migrate(conn)

@@ -363,6 +363,14 @@ class BorsdataAdapter:
 
     # ---- dividends (zero-row dropped at adapter) ----
 
+    @staticmethod
+    def _is_zero_dividend(row: dict[str, Any]) -> bool:
+        amount = row.get("amountPaid") if "amountPaid" in row else row.get("amount")
+        try:
+            return amount is not None and float(amount) == 0.0
+        except (TypeError, ValueError):
+            return False
+
     def get_dividends(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
         params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
         data = self._get_json("/v1/instruments/dividend/calendar", params=params)
@@ -386,6 +394,8 @@ class BorsdataAdapter:
                             "/v1/instruments/dividend/calendar: "
                             f"{nested_key} contains non-object rows"
                         )
+                    if self._is_zero_dividend(dividend):
+                        continue
                     if not any(dividend.get(key) for key in ("exDate", "ex_date", "date")):
                         raise BorsdataContractError(
                             "/v1/instruments/dividend/calendar: nested row has no ex-date"
@@ -395,22 +405,14 @@ class BorsdataAdapter:
                         item.setdefault("insId", instrument)
                     flattened.append(item)
             else:
+                if self._is_zero_dividend(row):
+                    continue
                 if not any(row.get(key) for key in ("exDate", "ex_date", "date")):
                     raise BorsdataContractError(
                         "/v1/instruments/dividend/calendar: response row has no ex-date"
                     )
                 flattened.append(row)
-        # Drop zero-row: amountPaid 0.0 with currency = explicit "no distribution"
-        filtered: list[dict[str, Any]] = []
-        for r in flattened:
-            amt = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
-            try:
-                if amt is not None and float(amt) == 0.0:
-                    continue
-            except (TypeError, ValueError):
-                pass
-            filtered.append(r)
-        return filtered
+        return flattened
 
     # ---- holdings ----
 
