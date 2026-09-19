@@ -137,9 +137,7 @@ def bilingual_dedupe(
     return out
 
 
-def _metadata_json(
-    doc: dict[str, Any], *, language: str, checksum: str | None
-) -> str | None:
+def _metadata_json(doc: dict[str, Any], *, language: str, checksum: str | None) -> str | None:
     raw = doc.get("raw_metadata")
     if isinstance(raw, dict):
         metadata = dict(raw)
@@ -210,7 +208,9 @@ class ResearchDocumentIngestionService:
         eligible = [
             article
             for article in articles
-            if not (reports_only and source_type == "mfn" and not is_report(article.get("title") or ""))
+            if not (
+                reports_only and source_type == "mfn" and not is_report(article.get("title") or "")
+            )
         ]
         deduped = bilingual_dedupe(eligible, packet_majority=packet_majority)
         inserted = 0
@@ -258,9 +258,7 @@ class ResearchDocumentIngestionService:
             except Exception:
                 pass
             for suppressed_doc in doc.get("_suppressed_variants", []):
-                suppressed_url = (
-                    suppressed_doc.get("source_url") or suppressed_doc.get("url") or ""
-                )
+                suppressed_url = suppressed_doc.get("source_url") or suppressed_doc.get("url") or ""
                 if not suppressed_url:
                     continue
                 suppressed_title = suppressed_doc.get("title")

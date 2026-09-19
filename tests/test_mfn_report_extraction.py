@@ -87,18 +87,17 @@ def test_bilingual_dedupe_uses_pdf_identity_and_keeps_suppressed_provenance():
     assert selected[0]["lang"] == "en"
     assert selected[0]["bilingual_selection_rule"] == "deterministic_en_fallback"
     assert selected[0]["_suppressed_variants"][0]["lang"] == "sv"
-    assert selected[0]["_suppressed_variants"][0]["_bilingual_group_id"] == selected[0][
-        "_bilingual_group_id"
-    ]
+    assert (
+        selected[0]["_suppressed_variants"][0]["_bilingual_group_id"]
+        == selected[0]["_bilingual_group_id"]
+    )
 
 
 def test_identical_bilingual_pdf_checksums_are_both_auditable():
     conn = _connection()
     try:
         conn.execute("INSERT INTO companies (borsdata_id, name) VALUES (501, 'Reports AB')")
-        company_id = conn.execute(
-            "SELECT id FROM companies WHERE borsdata_id=501"
-        ).fetchone()[0]
+        company_id = conn.execute("SELECT id FROM companies WHERE borsdata_id=501").fetchone()[0]
         docs = [
             {
                 "title": "Annual Report 2025",
