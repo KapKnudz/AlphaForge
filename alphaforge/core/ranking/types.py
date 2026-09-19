@@ -26,6 +26,9 @@ class CompanyScore:
     ranking_model: RankingModel = RankingModel.GENERAL
     rank_eligible: bool = True
     eligibility_reasons: list[str] = field(default_factory=list)
+    readiness_status: str | None = None
+    readiness_blockers: list[str] = field(default_factory=list)
+    readiness_limitations: list[str] = field(default_factory=list)
     scoring_audit: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -47,6 +50,9 @@ class CompanyScore:
             "ranking_model": self.ranking_model,
             "rank_eligible": self.rank_eligible,
             "eligibility_reasons": self.eligibility_reasons,
+            "readiness_status": self.readiness_status,
+            "readiness_blockers": self.readiness_blockers,
+            "readiness_limitations": self.readiness_limitations,
             "scoring_audit": self.scoring_audit,
         }
 

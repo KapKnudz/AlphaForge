@@ -16,14 +16,21 @@ def upsert_company(conn: sqlite3.Connection, borsdata_ins: dict[str, Any]) -> in
     name = borsdata_ins.get("name") or borsdata_ins.get("companyName") or ""
     ticker = borsdata_ins.get("ticker")
     isin = borsdata_ins.get("isin")
-    instrument = int(borsdata_ins.get("instrument") or 0)
+    raw_instrument = borsdata_ins.get("instrument")
+    # The live API has returned instrument values outside the schema's 0/1
+    # contract. Preserve the provider payload, but store a strict preference
+    # flag (zero is false; every other provider value is true).
+    if isinstance(raw_instrument, str):
+        instrument = 0 if raw_instrument.strip().lower() in {"", "0", "false", "no"} else 1
+    else:
+        instrument = int(bool(raw_instrument))
     sector_id = borsdata_ins.get("sectorId") or borsdata_ins.get("sector_id")
     branch_id = borsdata_ins.get("branchId") or borsdata_ins.get("branch_id")
     market_id = borsdata_ins.get("marketId") or borsdata_ins.get("market_id")
     country_id = borsdata_ins.get("countryId") or borsdata_ins.get("country_id")
     listing_date = borsdata_ins.get("listingDate")
-    stock_price_currency = borsdata_ins.get("stockPriceCurrency")
-    report_currency = borsdata_ins.get("reportCurrency")
+    stock_price_currency = borsdata_ins.get("stockPriceCurrency") or borsdata_ins.get("stock_price_currency")
+    report_currency = borsdata_ins.get("reportCurrency") or borsdata_ins.get("report_currency")
     raw_payload = json.dumps(borsdata_ins, ensure_ascii=False)
     conn.execute(
         """
@@ -67,6 +74,52 @@ def upsert_company(conn: sqlite3.Connection, borsdata_ins: dict[str, Any]) -> in
     return int(row[0]) if row else 0
 
 
+def relink_watchlist(conn: sqlite3.Connection) -> int:
+    """Match imported rows after instruments have been seeded.
+
+    The original source row remains untouched; only its foreign key and match
+    provenance are filled in.  Matching is deliberately deterministic and
+    uses the same precedence as watchlist import.
+    """
+    rows = conn.execute(
+        "SELECT id, isin, ticker, borsdata_id FROM watchlist WHERE company_id IS NULL"
+    ).fetchall()
+    linked = 0
+    for row in rows:
+        company_id = None
+        matched_via = None
+        if row[1]:
+            found = conn.execute("SELECT id FROM companies WHERE isin=?", (row[1],)).fetchone()
+            if found:
+                company_id, matched_via = int(found[0]), "isin"
+        if company_id is None and row[2]:
+            found = conn.execute(
+                "SELECT id FROM companies WHERE ticker=? COLLATE NOCASE", (row[2],)
+            ).fetchone()
+            if found:
+                company_id, matched_via = int(found[0]), "ticker"
+        if company_id is None and row[3] is not None:
+            found = conn.execute(
+                "SELECT id FROM companies WHERE borsdata_id=?", (row[3],)
+            ).fetchone()
+            if found:
+                company_id, matched_via = int(found[0]), "borsdata_id"
+        if company_id is None:
+            continue
+        try:
+            conn.execute(
+                "UPDATE watchlist SET company_id=?, matched_via=? WHERE id=?",
+                (company_id, matched_via, int(row[0])),
+            )
+            linked += 1
+        except sqlite3.IntegrityError:
+            # A company may already be represented by another source row. Keep
+            # the original unmatched row rather than deleting source data.
+            continue
+    conn.commit()
+    return linked
+
+
 def upsert_financial_periods(
     conn: sqlite3.Connection, company_id: int, periods: list[dict[str, Any]]
 ) -> int:
@@ -75,14 +128,16 @@ def upsert_financial_periods(
         # Use-core kpi_taxonomy to map? Keep raw mapping here minimal
         # Determine is_placeholder: revenue 0.0 + report_Date null → placeholder
         revenue = p.get("revenues")
-        report_date = p.get("report_Date") or p.get("reportDate")
+        report_date = p.get("report_Date") or p.get("reportDate") or p.get("ReportDate")
         is_placeholder = 1 if (revenue == 0.0 or revenue == 0) and report_date is None else 0
         # If is_placeholder and all core financials are null/0 → quarantine
         # Respect plan: is_placeholder=1 rows never enter ranking/valuation (WHERE is_placeholder=0)
         # Also handle fx
         currency = p.get("currency")
         currency_ratio = (
-            p.get("currency_Ratio") if "currency_Ratio" in p else p.get("currency_ratio")
+            p.get("currency_Ratio")
+            if "currency_Ratio" in p
+            else p.get("currency_ratio") or p.get("currencyRatio")
         )
         fx_rate_to_sek = currency_ratio
         fx_source = None
@@ -109,7 +164,13 @@ def upsert_financial_periods(
         # period_type / period_end handling — caller supplies period_type if not in payload
         period_type = p.get("period_type") or mapped.get("period_type") or "year"
         period_end = (
-            p.get("period_End") or p.get("period_end") or p.get("report_Date") or p.get("date")
+            p.get("period_End")
+            or p.get("report_End_Date")
+            or p.get("period_end")
+            or p.get("periodEnd")
+            or p.get("report_Date")
+            or p.get("reportDate")
+            or p.get("date")
         )
         # Fallback: use report_year/period to synthesize period_end if missing → skip
         if not period_end:

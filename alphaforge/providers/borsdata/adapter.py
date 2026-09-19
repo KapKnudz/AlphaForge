@@ -19,6 +19,10 @@ BASE_URL = "https://apiservice.borsdata.se"
 BATCH_SIZE = 50
 
 
+class BorsdataContractError(RuntimeError):
+    """A successful provider response did not match the documented contract."""
+
+
 class BorsdataAdapter:
     def __init__(self, api_key: str | None = None, *, base_url: str = BASE_URL) -> None:
         key = api_key or os.environ.get("BORSDATA_API_KEY", "")
@@ -39,102 +43,85 @@ class BorsdataAdapter:
 
     def _get_json(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
         resp = self._get(path, params=params)
-        # 400 for sector-KPI mismatch → swallowed as missing (return None)
+        # 400 for sector-KPI mismatch → swallowed as missing (return None).
         if resp.status_code == 400:
             return None
         resp.raise_for_status()
         try:
-            return resp.json()
-        except ValueError:
-            return None
+            return self._normalize_keys(resp.json())
+        except ValueError as exc:
+            raise BorsdataContractError(f"{path}: 200 response was not valid JSON") from exc
 
-    def _unwrap_list(self, data: Any) -> list[dict[str, Any]]:
+    @classmethod
+    def _normalize_keys(cls, value: Any) -> Any:
+        """Normalize live Pascal/camel casing without changing value semantics."""
+        if isinstance(value, list):
+            return [cls._normalize_keys(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                (key[:1].lower() + key[1:] if key else key): cls._normalize_keys(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _unwrap_list(self, data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         if data is None:
             return []
         if isinstance(data, list):
+            if not all(isinstance(item, dict) for item in data):
+                raise BorsdataContractError(f"{endpoint}: list response contains non-object rows")
             return data
         if isinstance(data, dict):
-            # Börsdata wraps in {"instruments": [...]} or {"reports": [...]}, etc.
-            for key in (
-                "instruments",
-                "reports",
-                "markets",
-                "branches",
-                "sectors",
-                "countries",
-                "kpis",
-                "stockPricesList",
-                "dividends",
-                "insider",
-                "buyback",
-                "shorts",
-                "stockSplits",
-                "reportCalendar",
-                "translationMetadata",
-                "kpiMetadata",
-                "reportMetadata",
-            ):
+            # Börsdata has used several envelope names for the same resource.
+            # A 200 object with none of these is a contract failure, not empty
+            # data: silently treating it as empty corrupts the database.
+            keys = (
+                "instruments", "reports", "markets", "branches", "sectors", "countries",
+                "kpis", "stockPricesList", "stockPrices", "dividends", "insider",
+                "buyback", "shorts", "list", "stockSplits", "stockSplitList", "reportCalendar",
+                "translationMetadata", "kpiMetadata", "kpiMetadatas", "reportMetadata",
+                "reportMetadatas", "values",
+            )
+            for key in keys:
                 if key in data and isinstance(data[key], list):
-                    return data[key]
-            # single object wrapped
+                    return [item for item in data[key] if isinstance(item, dict)]
             if "instrument" in data:
                 return [data]
-        return []
+        raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
 
     # ---- reference dictionaries (should-adds) ----
 
     def get_instruments(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/instruments")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/instruments")
 
     def get_markets(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/markets")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/markets")
 
     def get_branches(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/branches")
-        if data is None:
-            return []
-        if isinstance(data, dict) and "branches" in data:
-            return data["branches"]
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/branches")
 
     def get_sectors(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/sectors")
-        if data is None:
-            return []
-        if isinstance(data, dict) and "sectors" in data:
-            return data["sectors"]
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/sectors")
 
     def get_countries(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/countries")
-        if data is None:
-            return []
-        if isinstance(data, dict) and "countries" in data:
-            return data["countries"]
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/countries")
 
     def get_translation_metadata(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/translationmetadata")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/translationmetadata")
 
     def get_kpi_metadata(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/instruments/kpis/metadata")
-        if data is None:
-            return []
-        # response may be {"kpis": [...]} or list
-        if isinstance(data, dict) and "kpis" in data:
-            return data["kpis"]
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/instruments/kpis/metadata")
 
     def get_report_metadata(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/instruments/reports/metadata")
-        if data is None:
-            return []
-        if isinstance(data, dict) and "reports" in data:
-            return data["reports"]
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/instruments/reports/metadata")
 
     # ---- KPIs ----
 
@@ -159,14 +146,12 @@ class BorsdataAdapter:
         if data is None:
             return []  # 400 → missing
         if isinstance(data, dict):
-            # may be {"values": [...]} or list
-            if "values" in data and isinstance(data["values"], list):
-                return data["values"]
-            if "kpiHistory" in data and isinstance(data["kpiHistory"], list):
-                return data["kpiHistory"]
+            for key in ("values", "kpiHistory", "kpiHistoryMetadatas"):
+                if key in data and isinstance(data[key], list):
+                    return data[key]
         if isinstance(data, list):
             return data
-        return []
+        raise BorsdataContractError(f"{path}: unrecognized 200 response shape")
 
     def get_kpi_summary(self, ins_id: int, report_type: str) -> dict[str, Any] | None:
         # GET /v1/instruments/{insid}/kpis/{reporttype}/summary
@@ -174,9 +159,47 @@ class BorsdataAdapter:
         data = self._get_json(path)
         if data is None or isinstance(data, list) and len(data) == 0:
             return None
-        if isinstance(data, dict):
+        if isinstance(data, dict) and data:
             return data
-        return None
+        raise BorsdataContractError(f"{path}: unrecognized 200 response shape")
+
+    @staticmethod
+    def _flatten_report_envelope(data: Any, *, endpoint: str) -> list[dict[str, Any]]:
+        """Flatten live ``reportList`` period arrays into canonical report rows."""
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if not isinstance(data, dict) or "reportList" not in data:
+            # Older responses use a direct reports array.
+            if isinstance(data, dict) and isinstance(data.get("reports"), list):
+                return [row for row in data["reports"] if isinstance(row, dict)]
+            raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
+        flattened: list[dict[str, Any]] = []
+        report_lists = data["reportList"]
+        if isinstance(report_lists, dict):
+            report_lists = [report_lists]
+        if not isinstance(report_lists, list):
+            raise BorsdataContractError(f"{endpoint}: reportList is not an array")
+        for instrument in report_lists:
+            if not isinstance(instrument, dict):
+                continue
+            for key, period_type in (("reportsYear", "year"), ("reportsQuarter", "quarter"), ("reportsR12", "r12")):
+                rows = instrument.get(key, [])
+                if isinstance(rows, dict):
+                    rows = [rows]
+                if not isinstance(rows, list):
+                    raise BorsdataContractError(f"{endpoint}: {key} is not an array")
+                for row in rows:
+                    if isinstance(row, dict):
+                        item = dict(row)
+                        item.setdefault("period_type", period_type)
+                        item.setdefault(
+                            "insId",
+                            instrument.get("insId")
+                            or instrument.get("instrumentId")
+                            or instrument.get("instrument"),
+                        )
+                        flattened.append(item)
+        return flattened
 
     # ---- reports (batch ≤50, original=0) ----
 
@@ -190,21 +213,21 @@ class BorsdataAdapter:
                 "original": original,
             }
             data = self._get_json("/v1/instruments/reports", params=params)
-            out.extend(self._unwrap_list(data))
+            out.extend(self._flatten_report_envelope(data, endpoint="/v1/instruments/reports"))
             if i + BATCH_SIZE < len(ins_ids):
                 sleep_between_batches()
         return out
 
     def get_report_calendar(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/instruments/report/calendar")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/instruments/report/calendar")
 
     def get_stock_splits(self, *, from_date: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if from_date:
             params["from"] = from_date
         data = self._get_json("/v1/instruments/StockSplits", params=params or None)
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/instruments/StockSplits")
 
     # ---- prices (maxCount not trusted) ----
 
@@ -227,7 +250,7 @@ class BorsdataAdapter:
         elif isinstance(data, list):
             rows = data
         else:
-            rows = self._unwrap_list(data)
+            rows = self._unwrap_list(data, endpoint=f"/v1/instruments/{ins_id}/stockprices")
         # Sort by date (n ascending = oldest first as per API), then slice tail if requested
         # Börsdata returns 10y default sorted asc; we keep order and slice locally.
         if max_count is not None and len(rows) > max_count:
@@ -238,7 +261,7 @@ class BorsdataAdapter:
 
     def get_dividends(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/instruments/dividend/calendar")
-        rows = self._unwrap_list(data)
+        rows = self._unwrap_list(data, endpoint="/v1/instruments/dividend/calendar")
         # Drop zero-row: amountPaid 0.0 with currency = explicit "no distribution"
         filtered: list[dict[str, Any]] = []
         for r in rows:
@@ -255,12 +278,12 @@ class BorsdataAdapter:
 
     def get_insider(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/holdings/insider")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/holdings/insider")
 
     def get_buyback(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/holdings/buyback")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/holdings/buyback")
 
     def get_shorts(self) -> list[dict[str, Any]]:
         data = self._get_json("/v1/holdings/shorts")
-        return self._unwrap_list(data)
+        return self._unwrap_list(data, endpoint="/v1/holdings/shorts")

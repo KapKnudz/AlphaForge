@@ -10,7 +10,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_DSN = "sqlite:///data/alphaforge.db"
+# Keep the default relative to the repository/worktree.  ``sqlite:///data`` is
+# interpreted as an absolute ``/data`` path by sqlite URL parsers.
+DEFAULT_DSN = "sqlite://./data/alphaforge.db"
 SCHEMA_VERSION = 1
 
 
