@@ -157,7 +157,7 @@ class BorsdataAdapter:
             return None  # 400 swallowed
         if isinstance(data, dict):
             return data
-        return None
+        raise BorsdataContractError(f"{path}: unrecognized 200 response shape")
 
     def get_kpi_history(
         self, ins_id: int, kpi_id: int, report_type: str, price_type: str
@@ -169,10 +169,10 @@ class BorsdataAdapter:
             return []  # 400 → missing
         if isinstance(data, dict):
             for key in ("values", "kpiHistory", "kpiHistoryMetadatas"):
-                if key in data and isinstance(data[key], list):
-                    return data[key]
+                if key in data:
+                    return self._object_rows(data[key], endpoint=path, field=key)
         if isinstance(data, list):
-            return data
+            return self._object_rows(data, endpoint=path, field="response")
         raise BorsdataContractError(f"{path}: unrecognized 200 response shape")
 
     def get_kpi_summary(self, ins_id: int, report_type: str) -> dict[str, Any] | None:

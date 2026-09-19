@@ -578,7 +578,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     conn.commit()
     if sync_failed:
-        print("sync: failed (see jobs.error)", file=sys.stderr)
+        print("sync: failed (see stderr diagnostics)", file=sys.stderr)
         return 1
     print("sync: complete", file=sys.stderr)
     return 0
