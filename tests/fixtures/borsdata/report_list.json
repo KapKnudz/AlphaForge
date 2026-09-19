@@ -1,0 +1,10 @@
+{
+  "reportList": [
+    {
+      "insId": 101,
+      "reportsYear": [{"year": 2024, "period": 4, "period_End": "2024-12-31", "report_Date": "2025-02-14", "revenues": 1000, "profit_To_Equity_Holders": 120, "currency": "SEK", "currency_Ratio": 1}],
+      "reportsQuarter": [{"year": 2025, "period": 1, "period_End": "2025-03-31", "report_Date": "2025-05-02", "revenues": 260, "profit_To_Equity_Holders": 31}],
+      "reportsR12": [{"year": 2025, "period": 1, "period_End": "2025-03-31", "report_Date": "2025-05-02", "revenues": 1040, "profit_To_Equity_Holders": 125}]
+    }
+  ]
+}

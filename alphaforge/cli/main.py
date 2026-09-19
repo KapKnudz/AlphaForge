@@ -127,9 +127,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from alphaforge.db.migrations import migrate
     from alphaforge.db.repositories import (
         record_job,
+        relink_watchlist,
         upsert_company,
         upsert_dividends,
         upsert_financial_periods,
+        upsert_kpi_observations,
         upsert_prices,
         upsert_report_calendar,
         upsert_stock_splits,
@@ -139,6 +141,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
     conn = get_connection(settings)
     migrate(conn)
+    sync_failed = False
 
     # Resolve company scope
     company_rows: list[tuple[int, int, str | None]] = []  # (company_id, borsdata_id, ticker)
@@ -148,22 +151,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if not company_rows and not args.allow_empty_companies:
             # If no companies yet, fetch instruments first
             pass
-    elif args.company:
-        cur = conn.execute(
-            "SELECT id, borsdata_id, ticker FROM companies WHERE ticker=? COLLATE NOCASE",
-            (args.company,),
-        )
-        r = cur.fetchone()
-        if r:
-            company_rows = [(int(r[0]), int(r[1]), r[2])]
-    elif args.ticker:
-        cur = conn.execute(
-            "SELECT id, borsdata_id, ticker FROM companies WHERE ticker=? COLLATE NOCASE",
-            (args.ticker,),
-        )
-        r = cur.fetchone()
-        if r:
-            company_rows = [(int(r[0]), int(r[1]), r[2])]
+    # Requested ticker scope is resolved after instrument seeding below. On a
+    # fresh database this is the difference between a real company sync and a
+    # successful no-op.
 
     adapter = BorsdataAdapter()
 
@@ -193,6 +183,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         )
             except Exception as e:
                 # per-company failure isolation
+                sync_failed = True
                 record_job(
                     conn,
                     "sync_instruments",
@@ -204,7 +195,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 continue
         if instruments:
             record_job(
-                conn, "sync_instruments", company_id=None, borsdata_id=None, status="success"
+                conn,
+                "sync_instruments",
+                company_id=None,
+                borsdata_id=None,
+                status="failed" if sync_failed else "success",
+                error=(
+                    {
+                        "code": "instrument_upsert_failed",
+                        "message": "one or more instruments failed",
+                    }
+                    if sync_failed
+                    else None
+                ),
             )
             # Currency exposure log (plan 1.3) — print to stderr for visibility
             mismatched = [c for c in currency_exposure if c[1] != c[2]]
@@ -214,6 +217,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
     except Exception as e:
+        sync_failed = True
         print(f"sync instruments failed: {e}", file=sys.stderr)
         record_job(
             conn,
@@ -223,6 +227,32 @@ def cmd_sync(args: argparse.Namespace) -> int:
             status="failed",
             error={"code": "instruments_fetch_failed", "message": str(e), "retryable": True},
         )
+
+    # Instruments now exist, so relink rows imported before the sync and only
+    # then resolve a requested ticker.
+    relink_watchlist(conn)
+    if args.company or args.ticker:
+        requested = args.company or args.ticker
+        cur = conn.execute(
+            "SELECT id, borsdata_id, ticker FROM companies WHERE ticker=? COLLATE NOCASE",
+            (requested,),
+        )
+        r = cur.fetchone()
+        if r:
+            company_rows = [(int(r[0]), int(r[1]), r[2])]
+        else:
+            sync_failed = True
+            message = f"requested company ticker not found after instrument seeding: {requested}"
+            print(f"sync failed: {message}", file=sys.stderr)
+            record_job(
+                conn,
+                "sync_instruments",
+                company_id=None,
+                borsdata_id=None,
+                status="failed",
+                error={"code": "company_not_found", "message": message, "retryable": False},
+            )
+            return 1
 
     # Resolve watchlist-scoped companies if --all and still empty → use watchlist
     if args.all and not company_rows:
@@ -285,8 +315,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
             # translationmetadata rows contain branch/sector translations; upsert if needed
             for _r in trows:
                 pass
-        except Exception:
-            pass
+        except Exception as exc:
+            sync_failed = True
+            print(f"translation metadata sync failed: {exc}", file=sys.stderr)
         # kpi/report metadata caches
         try:
             kpis_meta = adapter.get_kpi_metadata()
@@ -313,10 +344,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     ),
                 )
             conn.commit()
-        except Exception:
-            pass
+        except Exception as exc:
+            sync_failed = True
+            print(f"metadata cache sync failed: {exc}", file=sys.stderr)
     except Exception as e:
-        print(f"reference dictionaries sync failed (non-fatal): {e}", file=sys.stderr)
+        sync_failed = True
+        print(f"reference dictionaries sync failed: {e}", file=sys.stderr)
 
     # Per-company sync with failure isolation — each company wrapped individually
     # Reports (batch 50 inside adapter)
@@ -346,6 +379,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             conn, "sync_reports", company_id=cid, borsdata_id=bid, status="success"
                         )
                     except Exception as e:
+                        sync_failed = True
                         record_job(
                             conn,
                             "sync_reports",
@@ -359,7 +393,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             },
                         )
         except Exception as e:
+            sync_failed = True
             print(f"reports sync failed: {e}", file=sys.stderr)
+            for cid, bid, _ticker in company_rows:
+                record_job(
+                    conn,
+                    "sync_reports",
+                    company_id=cid,
+                    borsdata_id=bid,
+                    status="failed",
+                    error={"code": "reports_contract_failed", "message": str(e), "retryable": True},
+                )
 
         # Per-company prices / dividends / kpi branches etc — isolated
         for cid, bid, _ticker in company_rows:
@@ -376,6 +420,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     upsert_prices(conn, cid, price_rows, currency=cur_ccy)
                 record_job(conn, "sync_prices", company_id=cid, borsdata_id=bid, status="success")
             except Exception as e:
+                sync_failed = True
                 record_job(
                     conn,
                     "sync_prices",
@@ -408,16 +453,38 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 elif values is not None:
                                     has_values = True
                                 if kpi_id is not None and has_values:
+                                    kpi_id_int = int(kpi_id)
                                     try:
                                         conn.execute(
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
-                                            (int(branch_id), int(kpi_id)),
+                                            (int(branch_id), kpi_id_int),
                                         )
                                     except Exception:
                                         pass
+                                    if rt in ("year", "r12"):
+                                        history_rows = adapter.get_kpi_history(
+                                            bid, kpi_id_int, rt, "mean"
+                                        )
+                                        if history_rows:
+                                            upsert_kpi_observations(
+                                                conn,
+                                                cid,
+                                                kpi_id_int,
+                                                rt,
+                                                "mean",
+                                                history_rows,
+                                            )
                     conn.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                sync_failed = True
+                record_job(
+                    conn,
+                    "sync_kpis",
+                    company_id=cid,
+                    borsdata_id=bid,
+                    status="failed",
+                    error={"code": "kpi_contract_failed", "message": str(exc), "retryable": True},
+                )
 
         # Dividends (global calendar, not per-company) — filter by company if possible
         try:
@@ -444,6 +511,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         conn, "sync_dividends", company_id=cid, borsdata_id=bid, status="success"
                     )
                 except Exception as e:
+                    sync_failed = True
                     record_job(
                         conn,
                         "sync_dividends",
@@ -473,6 +541,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     pass
             conn.commit()
         except Exception as e:
+            sync_failed = True
             print(f"dividends sync failed: {e}", file=sys.stderr)
 
         # Stock splits (rolling 1-year window, MAX 1 year per API) — global fetch
@@ -482,6 +551,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 b2c = {bid: cid for cid, bid, _ in company_rows}
                 upsert_stock_splits(conn, splits, company_map=b2c)
         except Exception as e:
+            sync_failed = True
             print(f"stock_splits sync failed: {e}", file=sys.stderr)
 
         # Report calendar (weekly, but sync opportunistically)
@@ -491,6 +561,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 b2c = {bid: cid for cid, bid, _ in company_rows}
                 upsert_report_calendar(conn, cal, company_map=b2c)
         except Exception as e:
+            sync_failed = True
             print(f"report_calendar sync failed: {e}", file=sys.stderr)
 
         # Holdings snapshots (global) — insider, buyback, shorts (shorts is global snapshot)
@@ -520,9 +591,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         continue
                 conn.commit()
         except Exception as e:
+            sync_failed = True
             print(f"shorts sync failed: {e}", file=sys.stderr)
 
     conn.commit()
+    if sync_failed:
+        print("sync: failed (see stderr diagnostics)", file=sys.stderr)
+        return 1
     print("sync: complete", file=sys.stderr)
     return 0
 
@@ -561,6 +636,9 @@ def export_ranking_files(
                 "ranking_model",
                 "rank_eligible",
                 "eligibility_reasons",
+                "readiness_status",
+                "readiness_blockers",
+                "readiness_limitations",
                 "data_quality",
             ]
         )
@@ -578,6 +656,9 @@ def export_ranking_files(
                     score.ranking_model,
                     score.rank_eligible,
                     ";".join(score.eligibility_reasons),
+                    score.readiness_status,
+                    ";".join(score.readiness_blockers),
+                    ";".join(score.readiness_limitations),
                     score.data_quality,
                 ]
             )
@@ -680,14 +761,37 @@ def cmd_rank(args: argparse.Namespace) -> int:
         print("no companies to rank", file=sys.stderr)
         return 1
 
-    # Load results for each company (simplified - in real implementation, this would load
-    # financial results, valuations, etc. from the database)
-    # For now, we'll create empty results and let the ranking engine handle missing data
+    # Reconstruct deterministic inputs from stored observations. The rank
+    # command must not fetch live data or substitute an empty result map.
+    from alphaforge.cli.ranking_loader import load_results_for_company
+
     results_by_company: dict[int, dict] = {}
+    for company in companies:
+        results_by_company[company.id] = load_results_for_company(conn, company.id, as_of)
 
     # Run ranking
     engine = RankingEngine()
     ranking = engine.rank(companies, results_by_company)
+
+    # The readiness gate is deterministic and runs before any future model
+    # call. Persist its verdict alongside each score for auditability.
+    from alphaforge.core.gate.readiness import AgentReadinessGate
+
+    gate = AgentReadinessGate()
+    for score in ranking.scores:
+        loaded = results_by_company.get(score.company_id, {})
+        candidate = loaded.get("candidate")
+        if candidate is None:
+            score.readiness_status = "evidence_blocked"
+            score.readiness_blockers = ["ranking inputs unavailable"]
+            continue
+        candidate.ticker = score.ticker
+        assessment = gate.assess(candidate)
+        score.readiness_status = assessment.status
+        score.readiness_blockers = [f"{item.code}: {item.message}" for item in assessment.blockers]
+        score.readiness_limitations = [
+            f"{item.code}: {item.message}" for item in assessment.limitations
+        ]
 
     exports_dir = Path("exports") / as_of
     ranking_json_path, ranking_csv_path = export_ranking_files(

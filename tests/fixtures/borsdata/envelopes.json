@@ -1,0 +1,17 @@
+{
+  "kpi_history": {"kpiHistoryMetadatas": [
+    {"KpiId": 2, "p": 4, "v": 12.5, "y": 2024},
+    {"KpiId": 2, "p": 4, "v": 12.0, "y": 2023},
+    {"KpiId": 2, "p": 4, "v": 11.5, "y": 2022},
+    {"KpiId": 2, "p": 4, "v": 11.0, "y": 2021},
+    {"KpiId": 2, "p": 4, "v": 10.5, "y": 2020},
+    {"KpiId": 2, "p": 4, "v": 10.0, "y": 2019},
+    {"KpiId": 2, "p": 4, "v": 9.5, "y": 2018},
+    {"KpiId": 2, "p": 4, "v": 9.0, "y": 2017},
+    {"KpiId": 2, "p": 4, "v": 8.5, "y": 2016},
+    {"KpiId": 2, "p": 4, "v": 8.0, "y": 2015}
+  ]},
+  "report_metadata": {"reportMetadatas": [{"Property": "revenues", "NameSv": "Omsättning", "NameEn": "Revenue"}]},
+  "stock_splits": {"stockSplitList": [{"InsId": 101, "SplitDate": "2025-04-01", "SplitType": "S", "Ratio": "2:1"}]},
+  "plain_list": [{"Date": "2025-01-01", "C": 12.5}]
+}
