@@ -349,8 +349,12 @@ def upsert_kpi_observations(
         if r.get("v") is None and "v" in r:
             # keep null-filtered?
             pass
-        year = r.get("year")
-        report_period = r.get("reportPeriod") or r.get("report_period")
+        year = r.get("year") if "year" in r else r.get("y")
+        report_period = (
+            r.get("reportPeriod")
+            or r.get("report_period")
+            or r.get("p")
+        )
         observation_date = r.get("observationDate") or r.get("observation_date") or r.get("date")
         if period_type == "last":
             if not observation_date:
