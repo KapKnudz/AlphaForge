@@ -6,7 +6,6 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -15,20 +14,6 @@ def _get_settings(dsn: str | None = None) -> object:
     from alphaforge.config import Settings
 
     return Settings.from_env(dsn=dsn)
-
-
-def _seed_instruments(conn, adapter) -> tuple[int, str | None]:
-    """Refresh instruments and return (successful rows, error message)."""
-    from alphaforge.db.repositories import relink_watchlist, upsert_company
-
-    try:
-        instruments = adapter.get_instruments()
-        for instrument in instruments:
-            upsert_company(conn, instrument)
-        relink_watchlist(conn)
-        return len(instruments), None
-    except Exception as exc:
-        return 0, str(exc)
 
 
 def cmd_import_watchlist(args: argparse.Namespace) -> int:
@@ -45,17 +30,6 @@ def cmd_import_watchlist(args: argparse.Namespace) -> int:
         print(f"watchlist file not found: {file_path}", file=sys.stderr)
         return 1
     source_file = args.source_file or file_path.name
-
-    # When a live key is available, seed first so import order does not affect
-    # matching. Offline imports remain useful and are relinked on the next sync.
-    if os.environ.get("BORSDATA_API_KEY"):
-        from alphaforge.providers.borsdata.adapter import BorsdataAdapter
-
-        seeded, seed_error = _seed_instruments(conn, BorsdataAdapter())
-        if seed_error:
-            print(f"watchlist instrument seed failed: {seed_error}", file=sys.stderr)
-            return 1
-        print(f"watchlist instrument seed: {seeded} instruments", file=sys.stderr)
 
     # Read CSV — handles both semicolon and comma, ISIN;Name;Ticker;ISIN variations
     content = file_path.read_text(encoding="utf-8-sig")

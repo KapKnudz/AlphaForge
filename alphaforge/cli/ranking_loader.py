@@ -23,12 +23,6 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def _visible(value: Any, as_of: date) -> bool:
-    if value is None:
-        return False
-    return str(value)[:10] <= as_of.isoformat()
-
-
 def _report(row) -> Report:
     return Report(
         revenue=_number(row["revenue"]),
