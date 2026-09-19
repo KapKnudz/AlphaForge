@@ -161,13 +161,13 @@ def test_sync_persists_fixture_kpi_history_idempotently():
         def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
             return history_rows
 
-        def get_dividends(self):
+        def get_dividends(self, ins_ids=None):
             return []
 
         def get_stock_splits(self):
             return []
 
-        def get_report_calendar(self):
+        def get_report_calendar(self, ins_ids=None):
             return []
 
         def get_shorts(self):

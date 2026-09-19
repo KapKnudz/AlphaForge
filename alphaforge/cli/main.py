@@ -533,12 +533,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Dividends (global calendar, not per-company) — filter by company if possible
         try:
-            try:
-                div_rows = adapter.get_dividends(ins_ids)
-            except TypeError:
-                # Keep lightweight fixture providers and older adapters
-                # compatible while the production adapter uses instList.
-                div_rows = adapter.get_dividends()
+            div_rows = adapter.get_dividends(ins_ids)
             # dividends payload may contain insId; group similarly
             from collections import defaultdict
 
@@ -606,10 +601,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Report calendar (weekly, but sync opportunistically)
         try:
-            try:
-                cal = adapter.get_report_calendar(ins_ids)
-            except TypeError:
-                cal = adapter.get_report_calendar()
+            cal = adapter.get_report_calendar(ins_ids)
             if cal:
                 b2c = {bid: cid for cid, bid, _ in company_rows}
                 upsert_report_calendar(conn, cal, company_map=b2c)
