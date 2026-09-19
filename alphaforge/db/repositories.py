@@ -307,13 +307,7 @@ def upsert_prices(
 def upsert_dividends(conn: sqlite3.Connection, company_id: int, rows: list[dict[str, Any]]) -> int:
     count = 0
     for r in rows:
-        ex_date = (
-            r.get("exDate")
-            or r.get("ex_date")
-            or r.get("excludingDate")
-            or r.get("excluding_date")
-            or r.get("date")
-        )
+        ex_date = r.get("exDate") or r.get("ex_date") or r.get("date")
         amount = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
         if ex_date is None or amount is None:
             continue
