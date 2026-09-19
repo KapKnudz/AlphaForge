@@ -11,6 +11,12 @@
     {"KpiId": 2, "p": 4, "v": 8.5, "y": 2016},
     {"KpiId": 2, "p": 4, "v": 8.0, "y": 2015}
   ]},
+  "translation_metadata": {"TranslationMetadatas": [
+    {"TranslationKey": "branch", "NameSv": "Bransch", "NameEn": "Branch"}
+  ]},
+  "kpi_metadata": {"KpiHistoryMetadatas": [
+    {"KpiId": 2, "NameSv": "Omsättning", "NameEn": "Revenue", "Format": "number", "IsString": false}
+  ]},
   "report_metadata": {"reportMetadatas": [{"Property": "revenues", "NameSv": "Omsättning", "NameEn": "Revenue"}]},
   "stock_splits": {"stockSplitList": [{"InsId": 101, "SplitDate": "2025-04-01", "SplitType": "S", "Ratio": "2:1"}]},
   "plain_list": [{"Date": "2025-01-01", "C": 12.5}]
