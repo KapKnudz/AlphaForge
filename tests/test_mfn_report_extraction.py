@@ -45,6 +45,7 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
         <h1>Acme Year-End Report 2025</h1>
         <article class="release-body"><p>Revenue grew.<br>Cash was stable.</p></article>
         <footer>Navigation should not be evidence.</footer>
+        <a href="https://storage.mfn.se/uuid/Acme-Presentation.pdf">Presentation</a>
         <a href="https://storage.mfn.se/uuid/Acme-Annual-Report-2025.pdf">PDF</a>
       </body>
     </html>
@@ -61,6 +62,26 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
     assert articles[0]["storage_url"].endswith("Acme-Annual-Report-2025.pdf")
     assert articles[0]["content_text"] == "Revenue grew. Cash was stable."
     assert "Navigation should not be evidence." not in articles[0]["content_text"]
+
+
+def test_scrape_details_prefers_published_json_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <script type="application/ld+json">
+      {"@graph": [
+        {"@type": "WebPage", "dateCreated": "2026-05-01T08:00:00Z"},
+        {"@type": "NewsArticle", "datePublished": "2026-05-07T06:30:00Z"}
+      ]}
+    </script>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] == "2026-05-07T06:30:00Z"
 
 
 def test_scrape_details_normalises_human_timestamp():

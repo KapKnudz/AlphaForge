@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
@@ -37,6 +37,19 @@ _HTML_VOID_TAGS = frozenset(
         "wbr",
     }
 )
+_REPORT_ATTACHMENT_TERMS = (
+    "annual",
+    "årsredovis",
+    "year-end",
+    "year_end",
+    "interim",
+    "quarter",
+    "delårs",
+    "bokslut",
+    "report",
+    "rapport",
+)
+_NON_REPORT_ATTACHMENT_TERMS = ("presentation", "slides", "webcast")
 
 
 def _normalise_timestamp(value: str | None) -> str | None:
@@ -79,6 +92,8 @@ class _MfnHtmlParser(HTMLParser):
         self.h1_parts: list[str] = []
         self.body_parts: list[str] = []
         self.timestamps: list[str] = []
+        self.json_published_timestamps: list[str] = []
+        self.json_created_timestamps: list[str] = []
         self.json_parts: list[str] = []
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
@@ -164,10 +179,13 @@ class _MfnHtmlParser(HTMLParser):
 
         def walk(item: Any) -> None:
             if isinstance(item, dict):
-                for key in ("datePublished", "dateCreated", "published_at"):
+                for key in ("datePublished", "published_at"):
                     candidate = item.get(key)
                     if isinstance(candidate, str):
-                        self.timestamps.append(candidate)
+                        self.json_published_timestamps.append(candidate)
+                candidate = item.get("dateCreated")
+                if isinstance(candidate, str):
+                    self.json_created_timestamps.append(candidate)
                 for child in item.values():
                     walk(child)
             elif isinstance(item, list):
@@ -177,6 +195,15 @@ class _MfnHtmlParser(HTMLParser):
         walk(value)
 
 
+def _attachment_score(url: str) -> int:
+    name = unquote(urlsplit(url).path).lower()
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+        return 0
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+        return 2
+    return 1
+
+
 def _parse_html(html: str) -> dict[str, Any]:
     parser = _MfnHtmlParser()
     parser.feed(html)
@@ -184,17 +211,43 @@ def _parse_html(html: str) -> dict[str, Any]:
     pdf_links = [
         href for href in links if "storage.mfn.se/" in href.lower() and ".pdf" in href.lower()
     ]
+    selected_attachment = max(
+        enumerate(pdf_links), key=lambda item: (_attachment_score(item[1]), -item[0]), default=None
+    )
+    storage_url = (
+        selected_attachment[1]
+        if selected_attachment is not None and _attachment_score(selected_attachment[1])
+        else None
+    )
     title = " ".join(" ".join(parser.h1_parts).split())
     body = " ".join(" ".join(parser.body_parts).split())
     published_at = next(
         (normalised for raw in parser.timestamps if (normalised := _normalise_timestamp(raw))),
         None,
     )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.json_published_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.json_created_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
     return {
         "title": title,
         "body": body,
         "published_at": published_at,
-        "storage_url": pdf_links[0] if pdf_links else None,
+        "storage_url": storage_url,
     }
 
 
