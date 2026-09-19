@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from dotenv import load_dotenv
 
 from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
@@ -16,6 +17,7 @@ from alphaforge.db.repositories import relink_watchlist, upsert_company
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter, BorsdataContractError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "borsdata"
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 def test_report_list_period_arrays_are_flattened():
