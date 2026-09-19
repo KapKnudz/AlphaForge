@@ -90,6 +90,59 @@ def test_stock_price_envelope_rejects_malformed_rows():
             adapter.get_stock_prices(101)
 
 
+def test_values_envelopes_are_flattened_with_instrument_identity():
+    adapter = BorsdataAdapter(api_key="fixture")
+    envelopes = json.loads((FIXTURES / "envelopes.json").read_text())
+    dividend_payload = BorsdataAdapter._normalize_keys(envelopes["dividend_values"])
+    calendar_payload = BorsdataAdapter._normalize_keys(envelopes["report_calendar_values"])
+    with patch.object(adapter, "_get_json", side_effect=[dividend_payload, calendar_payload]):
+        dividends = adapter.get_dividends([29, 221])
+        calendar = adapter.get_report_calendar([29, 221])
+    assert dividends == [
+        {
+            "exDate": "2025-05-15",
+            "amountPaid": 1.25,
+            "currency": "SEK",
+            "dividendType": 0,
+            "insId": 29,
+        },
+        {
+            "exDate": "2025-06-10",
+            "amountPaid": 0.85,
+            "currency": "SEK",
+            "dividendType": 0,
+            "insId": 221,
+        },
+    ]
+    assert calendar == [
+        {"releaseDate": "2025-04-30", "reportType": "Q1", "insId": 29},
+        {"releaseDate": "2025-05-07", "reportType": "Q1", "insId": 221},
+    ]
+
+
+def test_values_envelopes_reject_rows_without_resource_fields():
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(
+        adapter,
+        "_get_json",
+        return_value={"values": [{"insId": 29, "values": [{"unexpected": True}]}]},
+    ):
+        with pytest.raises(BorsdataContractError):
+            adapter.get_dividends([29])
+
+
+def test_zero_dividend_markers_without_dates_are_ignored():
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(
+        adapter,
+        "_get_json",
+        return_value={
+            "values": [{"insId": 29, "values": [{"amountPaid": 0.0, "currency": "SEK"}]}]
+        },
+    ):
+        assert adapter.get_dividends([29]) == []
+
+
 def test_watchlist_rows_relink_without_replacing_source_row():
     conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
     migrate(conn)
@@ -106,7 +159,7 @@ def test_watchlist_rows_relink_without_replacing_source_row():
     assert conn.execute("SELECT instrument FROM companies").fetchone()[0] == 1
 
 
-def test_sync_persists_fixture_kpi_history_idempotently():
+def test_sync_persists_fixture_values_and_kpi_history_idempotently():
     import argparse
 
     from alphaforge.cli.main import cmd_sync
@@ -115,6 +168,16 @@ def test_sync_persists_fixture_kpi_history_idempotently():
     migrate(conn)
     payload = json.loads((FIXTURES / "envelopes.json").read_text())
     history_rows = BorsdataAdapter._normalize_keys(payload["kpi_history"])["kpiHistoryMetadatas"]
+    dividend_payload = BorsdataAdapter._normalize_keys(payload["dividend_values"])
+    calendar_payload = BorsdataAdapter._normalize_keys(payload["report_calendar_values"])
+    fixture_adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(
+        fixture_adapter,
+        "_get_json",
+        side_effect=[dividend_payload, calendar_payload],
+    ):
+        dividend_rows = fixture_adapter.get_dividends([29, 221, 424])
+        calendar_rows = fixture_adapter.get_report_calendar([29, 221, 424])
 
     class FixtureAdapter:
         def get_instruments(self):
@@ -162,13 +225,13 @@ def test_sync_persists_fixture_kpi_history_idempotently():
             return history_rows
 
         def get_dividends(self, ins_ids=None):
-            return []
+            return dividend_rows
 
         def get_stock_splits(self):
             return []
 
         def get_report_calendar(self, ins_ids=None):
-            return []
+            return calendar_rows
 
         def get_shorts(self):
             return []
@@ -194,8 +257,17 @@ def test_sync_persists_fixture_kpi_history_idempotently():
                 "SELECT count(*) FROM kpi_observations GROUP BY company_id ORDER BY company_id"
             ).fetchall()
         ] == [20, 20, 20]
+        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
+        assert conn.execute("SELECT count(DISTINCT company_id) FROM dividends").fetchone()[0] == 2
+        assert (
+            conn.execute("SELECT count(DISTINCT company_id) FROM report_calendar").fetchone()[0]
+            == 2
+        )
         assert cmd_sync(args) == 0
         assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
+        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
 
 
 @pytest.mark.integration

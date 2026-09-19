@@ -289,16 +289,36 @@ class BorsdataAdapter:
         # calendar array, while older responses return flat rows.
         flattened: list[dict[str, Any]] = []
         for row in rows:
-            nested = row.get("calendar") or row.get("reportCalendar")
+            nested_key = next(
+                (key for key in ("calendar", "reportCalendar", "values") if key in row),
+                None,
+            )
             instrument = row.get("insId") or row.get("instrumentId") or row.get("instrument")
-            if isinstance(nested, list):
+            if nested_key is not None:
+                nested = row[nested_key]
+                if not isinstance(nested, list):
+                    raise BorsdataContractError(
+                        f"/v1/instruments/report/calendar: {nested_key} is not an array"
+                    )
                 for event in nested:
-                    if isinstance(event, dict):
-                        item = dict(event)
-                        if instrument is not None:
-                            item.setdefault("insId", instrument)
-                        flattened.append(item)
+                    if not isinstance(event, dict):
+                        raise BorsdataContractError(
+                            "/v1/instruments/report/calendar: "
+                            f"{nested_key} contains non-object rows"
+                        )
+                    if not any(event.get(key) for key in ("releaseDate", "date")):
+                        raise BorsdataContractError(
+                            "/v1/instruments/report/calendar: nested row has no release date"
+                        )
+                    item = dict(event)
+                    if instrument is not None:
+                        item.setdefault("insId", instrument)
+                    flattened.append(item)
             else:
+                if not any(row.get(key) for key in ("releaseDate", "date")):
+                    raise BorsdataContractError(
+                        "/v1/instruments/report/calendar: response row has no release date"
+                    )
                 flattened.append(row)
         return flattened
 
@@ -342,34 +362,56 @@ class BorsdataAdapter:
 
     # ---- dividends (zero-row dropped at adapter) ----
 
+    @staticmethod
+    def _is_zero_dividend(row: dict[str, Any]) -> bool:
+        amount = row.get("amountPaid") if "amountPaid" in row else row.get("amount")
+        try:
+            return amount is not None and float(amount) == 0.0
+        except (TypeError, ValueError):
+            return False
+
     def get_dividends(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
         params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
         data = self._get_json("/v1/instruments/dividend/calendar", params=params)
         rows = self._unwrap_list(data, endpoint="/v1/instruments/dividend/calendar")
         flattened: list[dict[str, Any]] = []
         for row in rows:
-            nested = row.get("dividends") or row.get("dividendList")
+            nested_key = next(
+                (key for key in ("dividends", "dividendList", "values") if key in row),
+                None,
+            )
             instrument = row.get("insId") or row.get("instrumentId") or row.get("instrument")
-            if isinstance(nested, list):
+            if nested_key is not None:
+                nested = row[nested_key]
+                if not isinstance(nested, list):
+                    raise BorsdataContractError(
+                        f"/v1/instruments/dividend/calendar: {nested_key} is not an array"
+                    )
                 for dividend in nested:
-                    if isinstance(dividend, dict):
-                        item = dict(dividend)
-                        if instrument is not None:
-                            item.setdefault("insId", instrument)
-                        flattened.append(item)
+                    if not isinstance(dividend, dict):
+                        raise BorsdataContractError(
+                            "/v1/instruments/dividend/calendar: "
+                            f"{nested_key} contains non-object rows"
+                        )
+                    if self._is_zero_dividend(dividend):
+                        continue
+                    if not any(dividend.get(key) for key in ("exDate", "ex_date", "date")):
+                        raise BorsdataContractError(
+                            "/v1/instruments/dividend/calendar: nested row has no ex-date"
+                        )
+                    item = dict(dividend)
+                    if instrument is not None:
+                        item.setdefault("insId", instrument)
+                    flattened.append(item)
             else:
-                flattened.append(row)
-        # Drop zero-row: amountPaid 0.0 with currency = explicit "no distribution"
-        filtered: list[dict[str, Any]] = []
-        for r in flattened:
-            amt = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
-            try:
-                if amt is not None and float(amt) == 0.0:
+                if self._is_zero_dividend(row):
                     continue
-            except (TypeError, ValueError):
-                pass
-            filtered.append(r)
-        return filtered
+                if not any(row.get(key) for key in ("exDate", "ex_date", "date")):
+                    raise BorsdataContractError(
+                        "/v1/instruments/dividend/calendar: response row has no ex-date"
+                    )
+                flattened.append(row)
+        return flattened
 
     # ---- holdings ----
 
