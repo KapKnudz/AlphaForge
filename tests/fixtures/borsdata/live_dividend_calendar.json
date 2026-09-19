@@ -1,0 +1,40 @@
+{
+  "values": [
+    {
+      "insId": 29,
+      "values": [
+        {
+          "excludingDate": "2025-05-15",
+          "amountPaid": 1.25,
+          "currencyShortName": "SEK",
+          "distributionFrequency": 1,
+          "dividendType": 4
+        }
+      ]
+    },
+    {
+      "insId": 221,
+      "values": [
+        {
+          "excludingDate": "2025-06-10",
+          "amountPaid": 0.85,
+          "currencyShortName": "SEK",
+          "distributionFrequency": 1,
+          "dividendType": 4
+        }
+      ]
+    },
+    {
+      "insId": 424,
+      "values": [
+        {
+          "excludingDate": "2025-07-10",
+          "amountPaid": 0.0,
+          "currencyShortName": "SEK",
+          "distributionFrequency": 1,
+          "dividendType": 4
+        }
+      ]
+    }
+  ]
+}

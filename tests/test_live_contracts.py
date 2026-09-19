@@ -120,6 +120,35 @@ def test_values_envelopes_are_flattened_with_instrument_identity():
     ]
 
 
+def test_live_dividend_fields_are_canonicalized_and_zero_rows_filtered():
+    adapter = BorsdataAdapter(api_key="fixture")
+    payload = BorsdataAdapter._normalize_keys(
+        json.loads((FIXTURES / "live_dividend_calendar.json").read_text())
+    )
+    with patch.object(adapter, "_get_json", return_value=payload):
+        dividends = adapter.get_dividends([29, 221, 424])
+    assert dividends == [
+        {
+            "excludingDate": "2025-05-15",
+            "amountPaid": 1.25,
+            "currencyShortName": "SEK",
+            "distributionFrequency": 1,
+            "dividendType": 4,
+            "exDate": "2025-05-15",
+            "insId": 29,
+        },
+        {
+            "excludingDate": "2025-06-10",
+            "amountPaid": 0.85,
+            "currencyShortName": "SEK",
+            "distributionFrequency": 1,
+            "dividendType": 4,
+            "exDate": "2025-06-10",
+            "insId": 221,
+        },
+    ]
+
+
 def test_values_envelopes_reject_rows_without_resource_fields():
     adapter = BorsdataAdapter(api_key="fixture")
     with patch.object(
@@ -168,7 +197,9 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
     migrate(conn)
     payload = json.loads((FIXTURES / "envelopes.json").read_text())
     history_rows = BorsdataAdapter._normalize_keys(payload["kpi_history"])["kpiHistoryMetadatas"]
-    dividend_payload = BorsdataAdapter._normalize_keys(payload["dividend_values"])
+    dividend_payload = BorsdataAdapter._normalize_keys(
+        json.loads((FIXTURES / "live_dividend_calendar.json").read_text())
+    )
     calendar_payload = BorsdataAdapter._normalize_keys(payload["report_calendar_values"])
     fixture_adapter = BorsdataAdapter(api_key="fixture")
     with patch.object(
@@ -260,6 +291,14 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
         assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 2
         assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
         assert conn.execute("SELECT count(DISTINCT company_id) FROM dividends").fetchone()[0] == 2
+        persisted_dividend_rows = conn.execute(
+            """
+            SELECT c.borsdata_id, d.amount, d.dividend_type
+            FROM dividends d JOIN companies c ON c.id=d.company_id
+            ORDER BY c.borsdata_id
+            """
+        ).fetchall()
+        assert [tuple(row) for row in persisted_dividend_rows] == [(29, 1.25, 4), (221, 0.85, 4)]
         assert (
             conn.execute("SELECT count(DISTINCT company_id) FROM report_calendar").fetchone()[0]
             == 2

@@ -8,7 +8,7 @@ concurrent writer or a multi-version history appears (plan §3.4 promotion
 signal), switch to alembic with autogenerate and keep this module as
 the SQLite→Postgres translation entry point.
 
-Current version: SCHEMA_VERSION = 1 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 2 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 _run_migration() to apply it when user_version < NNN.
 """
@@ -42,14 +42,21 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, SCHEMA_VERSION)
         conn.commit()
         return
-    # Future migrations: if current < N: apply N and bump.
-    # Example:
-    # if current < 2:
-    #     conn.executescript(Path("db/migrations/002_add_foo.sql").read_text())
-    #     set_user_version(conn, 2)
-    #     conn.commit()
-    # For now, only version 1 exists — any 0 < current < 1 is impossible,
-    # but we handle it by re-applying idempotent DDL and bumping.
+    if current < 2:
+        candidates = [
+            Path("db/migrations/002_allow_dividend_type_4.sql"),
+            Path(__file__).resolve().parents[2]
+            / "db"
+            / "migrations"
+            / "002_allow_dividend_type_4.sql",
+        ]
+        migration_path = next((path for path in candidates if path.exists()), None)
+        if migration_path is None:
+            raise FileNotFoundError(f"dividend type migration not found (tried {candidates})")
+        conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 2)
+        conn.commit()
+        return
     _apply_initial_schema(conn)
     set_user_version(conn, SCHEMA_VERSION)
     conn.commit()

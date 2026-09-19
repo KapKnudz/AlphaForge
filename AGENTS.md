@@ -20,3 +20,7 @@ Use `docs/plans/2026-09-16-alphaforge-mvp.md` as the design authority. Do not vi
 - Keep semantic recall and open-ended retrieval out of the pinned thesis path. Freeze and hash the evidence packet before any model call, and require every material claim either to cite a catalogued source or to be recorded as a limitation.
 - Restrict agentic retrieval to evidence acquisition. Before the frozen path runs, turn its findings into a packet with canonical source ids, observation/publication/ingestion dates, and paragraph anchors.
 - Use the source-level evaluation anchor `CrewAI 1.15.22 (2026-09-18)` for a future framework re-check. Revisit it only for a genuinely new open-ended-tools or persistent-conversation requirement.
+
+## Provider contract pointers
+
+- Börsdata dividend sync accepts the live nested calendar shape, including `excludingDate` and `dividendType=4`; adapter, fixture, and SQLite migration coverage live in `alphaforge/providers/borsdata/adapter.py`, `tests/fixtures/borsdata/live_dividend_calendar.json`, and `db/migrations/002_allow_dividend_type_4.sql`.

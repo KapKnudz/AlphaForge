@@ -28,13 +28,45 @@ def mem_conn():
 
 
 def test_schema_user_version_and_wal(mem_conn):
-    assert get_user_version(mem_conn) == 1
+    assert get_user_version(mem_conn) == 2
     cur = mem_conn.execute("PRAGMA journal_mode;")
     mode = cur.fetchone()[0]
     # In-memory returns "memory" or "wal" — check that migrate set it (not delete)
     assert mode in ("wal", "memory")
     cur = mem_conn.execute("PRAGMA foreign_keys;")
     assert int(cur.fetchone()[0]) == 1
+
+
+def test_v1_dividend_constraint_migrates_for_type_4(mem_conn):
+    mem_conn.execute("DROP TABLE dividends")
+    mem_conn.executescript(
+        """
+        CREATE TABLE dividends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            ex_date TEXT NOT NULL,
+            amount REAL NOT NULL CHECK (amount >= 0),
+            currency TEXT NOT NULL,
+            dividend_type INTEGER NOT NULL CHECK (dividend_type IN (0,1,2)),
+            distribution_frequency TEXT,
+            fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, ex_date, dividend_type, amount)
+        ) STRICT;
+        PRAGMA user_version=1;
+        """
+    )
+    mem_conn.commit()
+    migrate(mem_conn)
+    company_id = mem_conn.execute(
+        "INSERT INTO companies (borsdata_id, name) VALUES (400, 'Type Four AB') RETURNING id"
+    ).fetchone()[0]
+    mem_conn.execute(
+        "INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type) VALUES (?, ?, ?, ?, ?)",
+        (company_id, "2025-05-15", 1.25, "SEK", 4),
+    )
+    mem_conn.commit()
+    assert get_user_version(mem_conn) == 2
+    assert mem_conn.execute("SELECT dividend_type FROM dividends").fetchone()[0] == 4
 
 
 def test_import_watchlist_isin_normalized_and_uniqueness(mem_conn, tmp_path):

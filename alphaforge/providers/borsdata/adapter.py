@@ -370,6 +370,27 @@ class BorsdataAdapter:
         except (TypeError, ValueError):
             return False
 
+    @staticmethod
+    def _dividend_ex_date(row: dict[str, Any]) -> Any:
+        return next(
+            (
+                row.get(key)
+                for key in ("exDate", "ex_date", "excludingDate", "excluding_date", "date")
+                if row.get(key)
+            ),
+            None,
+        )
+
+    @classmethod
+    def _canonicalize_dividend(cls, row: dict[str, Any]) -> dict[str, Any]:
+        """Map Börsdata's live ``excludingDate`` field to the domain ex-date."""
+        item = dict(row)
+        if "exDate" not in item:
+            ex_date = cls._dividend_ex_date(item)
+            if ex_date is not None:
+                item["exDate"] = ex_date
+        return item
+
     def get_dividends(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
         params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
         data = self._get_json("/v1/instruments/dividend/calendar", params=params)
@@ -395,22 +416,22 @@ class BorsdataAdapter:
                         )
                     if self._is_zero_dividend(dividend):
                         continue
-                    if not any(dividend.get(key) for key in ("exDate", "ex_date", "date")):
+                    if self._dividend_ex_date(dividend) is None:
                         raise BorsdataContractError(
                             "/v1/instruments/dividend/calendar: nested row has no ex-date"
                         )
-                    item = dict(dividend)
+                    item = self._canonicalize_dividend(dividend)
                     if instrument is not None:
                         item.setdefault("insId", instrument)
                     flattened.append(item)
             else:
                 if self._is_zero_dividend(row):
                     continue
-                if not any(row.get(key) for key in ("exDate", "ex_date", "date")):
+                if self._dividend_ex_date(row) is None:
                     raise BorsdataContractError(
                         "/v1/instruments/dividend/calendar: response row has no ex-date"
                     )
-                flattened.append(row)
+                flattened.append(self._canonicalize_dividend(row))
         return flattened
 
     # ---- holdings ----
