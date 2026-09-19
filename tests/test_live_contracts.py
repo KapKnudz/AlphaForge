@@ -65,6 +65,85 @@ def test_watchlist_rows_relink_without_replacing_source_row():
     assert conn.execute("SELECT instrument FROM companies").fetchone()[0] == 1
 
 
+def test_sync_persists_fixture_kpi_history_idempotently():
+    import argparse
+
+    from alphaforge.cli.main import cmd_sync
+
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    payload = json.loads((FIXTURES / "envelopes.json").read_text())
+    history_rows = BorsdataAdapter._normalize_keys(payload["kpi_history"])["kpiHistoryMetadatas"]
+
+    class FixtureAdapter:
+        def get_instruments(self):
+            return [
+                {"insId": ins_id, "name": f"Company {ins_id}", "ticker": ticker, "instrument": 1, "branchId": 1}
+                for ins_id, ticker in ((101, "BEIA B"), (102, "SYSR"), (103, "INWI"))
+            ]
+
+        def get_branches(self):
+            return []
+
+        def get_sectors(self):
+            return []
+
+        def get_countries(self):
+            return []
+
+        def get_translation_metadata(self):
+            return []
+
+        def get_kpi_metadata(self):
+            return []
+
+        def get_report_metadata(self):
+            return []
+
+        def get_reports(self, ins_ids, *, original=0):
+            return []
+
+        def get_stock_prices(self, ins_id, *, max_count=None):
+            return []
+
+        def get_kpi_summary(self, ins_id, report_type):
+            if report_type in ("year", "r12"):
+                return {"kpis": [{"kpiId": 2, "values": [12.5]}]}
+            return {"kpis": []}
+
+        def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            return history_rows
+
+        def get_dividends(self):
+            return []
+
+        def get_stock_splits(self):
+            return []
+
+        def get_report_calendar(self):
+            return []
+
+        def get_shorts(self):
+            return []
+
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:", all=True, company=None, ticker=None, allow_empty_companies=True
+    )
+    with (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.db.migrations.migrate", return_value=None),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", FixtureAdapter),
+    ):
+        assert cmd_sync(args) == 0
+        first_count = conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0]
+        assert first_count == 6
+        assert conn.execute(
+            "SELECT count(DISTINCT company_id) FROM kpi_observations"
+        ).fetchone()[0] == 3
+        assert cmd_sync(args) == 0
+        assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("BORSDATA_API_KEY"), reason="BORSDATA_API_KEY not set")
 def test_live_instruments_contract():

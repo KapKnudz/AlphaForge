@@ -371,6 +371,25 @@ def upsert_kpi_observations(
         else:
             if year is None:
                 continue
+            year_int = int(year)
+            report_period_int = int(report_period) if report_period is not None else None
+            if report_period_int is None:
+                existing = conn.execute(
+                    """
+                    SELECT id FROM kpi_observations
+                    WHERE company_id=? AND kpi_id=? AND period_type=? AND price_type=?
+                      AND year=? AND report_period IS NULL
+                    LIMIT 1
+                    """,
+                    (company_id, kpi_id, period_type, price_type, year_int),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE kpi_observations SET value=? WHERE id=?",
+                        (val_f, int(existing[0])),
+                    )
+                    count += 1
+                    continue
             conn.execute(
                 """
                 INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, value)
@@ -383,8 +402,8 @@ def upsert_kpi_observations(
                     kpi_id,
                     period_type,
                     price_type,
-                    int(year),
-                    int(report_period) if report_period is not None else None,
+                    year_int,
+                    report_period_int,
                     val_f,
                 ),
             )

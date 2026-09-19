@@ -131,6 +131,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         upsert_company,
         upsert_dividends,
         upsert_financial_periods,
+        upsert_kpi_observations,
         upsert_prices,
         upsert_report_calendar,
         upsert_stock_splits,
@@ -449,13 +450,27 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 elif values is not None:
                                     has_values = True
                                 if kpi_id is not None and has_values:
+                                    kpi_id_int = int(kpi_id)
                                     try:
                                         conn.execute(
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
-                                            (int(branch_id), int(kpi_id)),
+                                            (int(branch_id), kpi_id_int),
                                         )
                                     except Exception:
                                         pass
+                                    if rt in ("year", "r12"):
+                                        history_rows = adapter.get_kpi_history(
+                                            bid, kpi_id_int, rt, "mean"
+                                        )
+                                        if history_rows:
+                                            upsert_kpi_observations(
+                                                conn,
+                                                cid,
+                                                kpi_id_int,
+                                                rt,
+                                                "mean",
+                                                history_rows,
+                                            )
                     conn.commit()
             except Exception as exc:
                 sync_failed = True
