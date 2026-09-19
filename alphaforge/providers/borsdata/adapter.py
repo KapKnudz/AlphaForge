@@ -298,8 +298,7 @@ class BorsdataAdapter:
                 nested = row[nested_key]
                 if not isinstance(nested, list):
                     raise BorsdataContractError(
-                        "/v1/instruments/report/calendar: "
-                        f"{nested_key} is not an array"
+                        f"/v1/instruments/report/calendar: {nested_key} is not an array"
                     )
                 for event in nested:
                     if not isinstance(event, dict):
@@ -386,7 +385,7 @@ class BorsdataAdapter:
                 nested = row[nested_key]
                 if not isinstance(nested, list):
                     raise BorsdataContractError(
-                        "/v1/instruments/dividend/calendar: " f"{nested_key} is not an array"
+                        f"/v1/instruments/dividend/calendar: {nested_key} is not an array"
                     )
                 for dividend in nested:
                     if not isinstance(dividend, dict):

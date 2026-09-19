@@ -99,8 +99,20 @@ def test_values_envelopes_are_flattened_with_instrument_identity():
         dividends = adapter.get_dividends([29, 221])
         calendar = adapter.get_report_calendar([29, 221])
     assert dividends == [
-        {"exDate": "2025-05-15", "amountPaid": 1.25, "currency": "SEK", "dividendType": 0, "insId": 29},
-        {"exDate": "2025-06-10", "amountPaid": 0.85, "currency": "SEK", "dividendType": 0, "insId": 221},
+        {
+            "exDate": "2025-05-15",
+            "amountPaid": 1.25,
+            "currency": "SEK",
+            "dividendType": 0,
+            "insId": 29,
+        },
+        {
+            "exDate": "2025-06-10",
+            "amountPaid": 0.85,
+            "currency": "SEK",
+            "dividendType": 0,
+            "insId": 221,
+        },
     ]
     assert calendar == [
         {"releaseDate": "2025-04-30", "reportType": "Q1", "insId": 29},
@@ -124,7 +136,9 @@ def test_zero_dividend_markers_without_dates_are_ignored():
     with patch.object(
         adapter,
         "_get_json",
-        return_value={"values": [{"insId": 29, "values": [{"amountPaid": 0.0, "currency": "SEK"}]}]},
+        return_value={
+            "values": [{"insId": 29, "values": [{"amountPaid": 0.0, "currency": "SEK"}]}]
+        },
     ):
         assert adapter.get_dividends([29]) == []
 

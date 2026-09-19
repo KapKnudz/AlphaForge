@@ -8,7 +8,7 @@
 - SQLite URL parsing must distinguish repository-relative paths (`sqlite:///data/...`, `sqlite://./data/...`) from explicit absolute paths (`sqlite:////tmp/...`).
 - Watchlist rows are intentionally importable before instruments exist; the sync must seed instruments, relink those rows, and then scope work to matched watchlist companies.
 - A first `sync --company` must resolve its company after instrument seeding and fail if it cannot; no green no-op.
-- Live Börsdata uses named envelopes (`reportList`, `KpiId`, `stockSplitList`, and `list`) and nested report arrays. Unknown HTTP-200 shapes must fail the sync rather than become empty data.
+- Börsdata response-shape handling follows the adapter contract in the authoritative MVP plan (§1.2 and §2.4), including nested values envelopes. Unknown HTTP-200 shapes must fail the sync rather than become empty data.
 - Ranking must load PIT-filtered financials, prices, KPIs, dividends, split/calendar context, and evidence from SQLite. Missing inputs are limitations, not numeric zeroes; ineligible rows are held out of the meaningful score ordering.
 
 ## Implementation sequence
