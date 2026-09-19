@@ -41,7 +41,8 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
       <head><meta property="article:published_time" content="2026-05-07T06:30:00+02:00"></head>
       <body>
         <h1>Acme Year-End Report 2025</h1>
-        <article class="release-body"><p>Revenue grew.</p><p>Cash was stable.</p></article>
+        <article class="release-body"><p>Revenue grew.<br>Cash was stable.</p></article>
+        <footer>Navigation should not be evidence.</footer>
         <a href="https://storage.mfn.se/uuid/Acme-Annual-Report-2025.pdf">PDF</a>
       </body>
     </html>
@@ -56,7 +57,38 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
     assert len(articles) == 1
     assert articles[0]["published_at"] == "2026-05-07T04:30:00Z"
     assert articles[0]["storage_url"].endswith("Acme-Annual-Report-2025.pdf")
-    assert "Revenue grew." in articles[0]["content_text"]
+    assert articles[0]["content_text"] == "Revenue grew. Cash was stable."
+    assert "Navigation should not be evidence." not in articles[0]["content_text"]
+
+
+def test_scrape_details_normalises_human_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <time>7 May 2026</time>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] == "2026-05-07T00:00:00"
+
+
+def test_scrape_details_discards_unparseable_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <time>not a publication date</time>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] is None
 
 
 def test_bilingual_dedupe_uses_pdf_identity_and_keeps_suppressed_provenance():

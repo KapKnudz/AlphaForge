@@ -19,6 +19,24 @@ from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 
 BASE_URL = "https://mfn.se"
 MAX_ARTICLES = 24
+_HTML_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
 def _normalise_timestamp(value: str | None) -> str | None:
@@ -30,7 +48,14 @@ def _normalise_timestamp(value: str | None) -> str | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return text
+        for date_format in ("%d %B %Y", "%d %b %Y"):
+            try:
+                parsed = datetime.strptime(text, date_format)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
     if parsed.tzinfo is None:
         return parsed.isoformat(timespec="seconds")
     return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -78,7 +103,7 @@ class _MfnHtmlParser(HTMLParser):
         classes = values.get("class", "").lower().split()
         if lower_tag == "article" or "release-body" in classes:
             self._body_depth = max(self._body_depth, 1)
-        elif self._body_depth:
+        elif self._body_depth and lower_tag not in _HTML_VOID_TAGS:
             self._body_depth += 1
         if lower_tag == "time":
             self._time_active = True
@@ -116,7 +141,7 @@ class _MfnHtmlParser(HTMLParser):
             self._json_active = False
             self._extract_json_dates("".join(self.json_parts))
             self.json_parts = []
-        if self._body_depth:
+        if self._body_depth and lower_tag not in _HTML_VOID_TAGS:
             self._body_depth -= 1
 
     def handle_data(self, data: str) -> None:
