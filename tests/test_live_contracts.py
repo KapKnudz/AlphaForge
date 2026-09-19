@@ -92,7 +92,7 @@ def test_sync_persists_fixture_kpi_history_idempotently():
         def get_instruments(self):
             return [
                 {"insId": ins_id, "name": f"Company {ins_id}", "ticker": ticker, "instrument": 1, "branchId": 1}
-                for ins_id, ticker in ((101, "BEIA B"), (102, "SYSR"), (103, "INWI"))
+                for ins_id, ticker in ((29, "BEIA B"), (221, "SYSR"), (424, "INWI"))
             ]
 
         def get_branches(self):
@@ -149,10 +149,13 @@ def test_sync_persists_fixture_kpi_history_idempotently():
     ):
         assert cmd_sync(args) == 0
         first_count = conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0]
-        assert first_count == 6
+        assert first_count == 60
         assert conn.execute(
             "SELECT count(DISTINCT company_id) FROM kpi_observations"
         ).fetchone()[0] == 3
+        assert [row[0] for row in conn.execute(
+            "SELECT count(*) FROM kpi_observations GROUP BY company_id ORDER BY company_id"
+        ).fetchall()] == [20, 20, 20]
         assert cmd_sync(args) == 0
         assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
 
