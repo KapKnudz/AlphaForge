@@ -48,11 +48,35 @@ def test_live_envelopes_and_pascal_casing_are_recognized():
         assert adapter.get_stock_prices(101) == [{"date": "2025-01-01", "c": 12.5}]
 
 
+def test_metadata_envelopes_are_recognized():
+    adapter = BorsdataAdapter(api_key="fixture")
+    envelopes = json.loads((FIXTURES / "envelopes.json").read_text())
+    with patch.object(
+        adapter,
+        "_get_json",
+        side_effect=[
+            BorsdataAdapter._normalize_keys(envelopes["translation_metadata"]),
+            BorsdataAdapter._normalize_keys(envelopes["kpi_metadata"]),
+            BorsdataAdapter._normalize_keys(envelopes["report_metadata"]),
+        ],
+    ):
+        assert adapter.get_translation_metadata()[0]["translationKey"] == "branch"
+        assert adapter.get_kpi_metadata()[0]["kpiId"] == 2
+        assert adapter.get_report_metadata()[0]["property"] == "revenues"
+
+
 def test_unrecognized_200_shape_is_explicit_error():
     adapter = BorsdataAdapter(api_key="fixture")
     with patch.object(adapter, "_get_json", return_value={"unexpected": {"rows": []}}):
         with pytest.raises(BorsdataContractError):
             adapter.get_instruments()
+
+
+def test_metadata_envelope_rejects_malformed_rows():
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(adapter, "_get_json", return_value={"translationMetadatas": [None]}):
+        with pytest.raises(BorsdataContractError):
+            adapter.get_translation_metadata()
 
 
 def test_stock_price_envelope_rejects_malformed_rows():
