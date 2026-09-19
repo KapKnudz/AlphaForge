@@ -20,9 +20,20 @@ from alphaforge.core.ranking.types import (
 from alphaforge.core.types import DataQuality, RankingModel
 
 
+def _has_material_data(value, fields: tuple[str, ...]) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(value.get(field) is not None for field in fields)
+    return any(getattr(value, field, None) is not None for field in fields)
+
+
 def _rank_eligibility(ranking_model, financial, valuation, sector_data):
     reasons = []
-    if financial is None:
+    if not _has_material_data(
+        financial,
+        ("revenue", "operating_margin", "net_margin", "equity", "net_income"),
+    ):
         reasons.append("financial data not available")
 
     # Unpack the new {current, histories} structure, falling back for plain-dict callers.
@@ -57,7 +68,9 @@ def _rank_eligibility(ranking_model, financial, valuation, sector_data):
         for kpi_id, label in required.items():
             if sector_kpis.get(kpi_id) is None:
                 reasons.append(f"bank {label} not available")
-    elif valuation is None:
+    elif not _has_material_data(
+        valuation, ("pe", "ev_ebit", "pb", "ps", "pfcf", "market_cap", "enterprise_value")
+    ):
         reasons.append("valuation data not available")
 
     return not reasons, reasons
@@ -250,12 +263,33 @@ class RankingEngine:
                 candidate_reason=candidate_reason,
                 ranking_model=ranking_model,
                 rank_eligible=rank_eligible,
+                ranking_section=(
+                    "ranked"
+                    if rank_eligible
+                    else (
+                        "unranked_method_unsupported"
+                        if ranking_model != RankingModel.GENERAL
+                        else "unranked_missing_data"
+                    )
+                ),
                 eligibility_reasons=eligibility_reasons,
                 scoring_audit=scoring_audit,
             )
             scores.append(cs)
 
-        scores.sort(key=lambda s: (s.rank_eligible, s.total_score), reverse=True)
+        # Never let database/input order decide a tie.  Eligible companies are
+        # ordered by score; ties and the explicit unranked sections use stable
+        # identity keys.  Ineligible numeric scores are diagnostic only.
+        scores.sort(
+            key=lambda s: (
+                0 if s.rank_eligible else 1,
+                -s.total_score if s.rank_eligible else 0.0,
+                s.ranking_section,
+                s.ticker.casefold(),
+                s.name.casefold(),
+                s.company_id,
+            )
+        )
 
         if self.ranking_repository is not None:
             eligible_count = sum(1 for s in scores if s.rank_eligible)

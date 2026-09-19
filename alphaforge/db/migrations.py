@@ -34,6 +34,8 @@ def set_user_version(conn: sqlite3.Connection, version: int) -> None:
 def migrate(conn: sqlite3.Connection) -> None:
     current = get_user_version(conn)
     if current >= SCHEMA_VERSION:
+        _ensure_schema_extensions(conn)
+        conn.commit()
         return
     if current == 0:
         _apply_initial_schema(conn)
@@ -51,6 +53,20 @@ def migrate(conn: sqlite3.Connection) -> None:
     _apply_initial_schema(conn)
     set_user_version(conn, SCHEMA_VERSION)
     conn.commit()
+
+
+def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
+    """Apply additive objects to databases created by earlier v1 builds."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS translation_metadata (
+            translation_key TEXT PRIMARY KEY,
+            name_sv TEXT,
+            name_en TEXT,
+            fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ) STRICT;
+        """
+    )
 
 
 def _apply_initial_schema(conn: sqlite3.Connection) -> None:

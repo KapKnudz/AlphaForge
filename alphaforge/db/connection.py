@@ -20,10 +20,9 @@ def get_connection(
             _apply_pragmas(conn)
             return conn
     else:
-        from alphaforge.config import DEFAULT_DSN
+        from alphaforge.config import Settings
 
-        raw = DEFAULT_DSN.removeprefix("sqlite://")
-        db_path = Path(raw)
+        db_path = Settings.from_env().sqlite_path
 
     if db_path != Path(":memory:"):
         db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 # Keep the default relative to the repository/worktree.  ``sqlite:///data`` is
 # interpreted as an absolute ``/data`` path by sqlite URL parsers.
-DEFAULT_DSN = "sqlite://./data/alphaforge.db"
+DEFAULT_DSN = "sqlite:///data/alphaforge.db"
 SCHEMA_VERSION = 1
 
 
@@ -47,14 +47,17 @@ class Settings:
         if not self.is_sqlite:
             raise ValueError(f"DSN is not sqlite: {self.dsn}")
         raw = self.dsn.removeprefix("sqlite://")
-        # handle sqlite:////absolute and sqlite:///relative and sqlite:///:memory:
-        if raw == "/:memory:" or raw == ":memory:":
+        # Keep the deliberately simple DSN contract explicit:
+        #   sqlite:///data/x.db   -> repository-relative data/x.db
+        #   sqlite://./data/x.db  -> repository-relative data/x.db
+        #   sqlite:////tmp/x.db   -> absolute /tmp/x.db
+        # A URL parser that treats every leading slash as absolute turns the
+        # documented default into /data, which is unwritable on many hosts.
+        if raw in {"/:memory:", ":memory:"}:
             return Path(":memory:")
-        # sqlite:///data/alphaforge.db -> data/alphaforge.db
-        # sqlite:////tmp/x.db -> /tmp/x.db
-        if raw.startswith("/"):
-            return Path(raw)
-        return Path(raw)
+        if raw.startswith("//"):
+            return Path(raw[1:])
+        return Path(raw.removeprefix("./").removeprefix("/"))
 
     def sqlite_path_for_test(self) -> Path:
         p = self.sqlite_path

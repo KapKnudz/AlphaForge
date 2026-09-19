@@ -302,6 +302,13 @@ CREATE TABLE IF NOT EXISTS countries (
     name_en             TEXT
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS translation_metadata (
+    translation_key     TEXT PRIMARY KEY,
+    name_sv             TEXT,
+    name_en             TEXT,
+    fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS kpi_metadata (
     kpi_id              INTEGER PRIMARY KEY,
     name_sv             TEXT NOT NULL,

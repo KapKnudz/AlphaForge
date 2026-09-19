@@ -271,8 +271,14 @@ def upsert_prices(
     count = 0
     for r in rows:
         price_date = r.get("price_Date") or r.get("price_date") or r.get("d") or r.get("date")
-        close = r.get("close") or r.get("c") or r.get("price")
-        volume = r.get("volume") or r.get("vol") or r.get("v")
+        close = next(
+            (r.get(key) for key in ("close", "c", "price") if r.get(key) is not None),
+            None,
+        )
+        volume = next(
+            (r.get(key) for key in ("volume", "vol", "v") if r.get(key) is not None),
+            None,
+        )
         if price_date is None or close is None:
             continue
         if isinstance(price_date, str) and len(price_date) > 10:
@@ -312,7 +318,7 @@ def upsert_dividends(conn: sqlite3.Connection, company_id: int, rows: list[dict[
             pass
         if isinstance(ex_date, str) and len(ex_date) > 10:
             ex_date = ex_date[:10]
-        currency = r.get("currency") or "SEK"
+        currency = r.get("currency") or r.get("currencyShortName") or "SEK"
         dividend_type = int(
             r.get("dividendType") if "dividendType" in r else r.get("dividend_type", 0)
         )
@@ -452,10 +458,13 @@ def upsert_stock_splits(
     count = 0
     for r in rows:
         borsdata_id = r.get("insId") or r.get("instrumentId") or r.get("borsdata_id")
-        split_type = r.get("splitType") or r.get("type") or "S"
+        split_type = str(r.get("splitType") or r.get("type") or "S").upper()
+        split_type = {"SPLIT": "S", "FORWARD": "S", "REVERSE": "RS", "REVERSE_SPLIT": "RS"}.get(
+            split_type, split_type
+        )
         ratio = r.get("ratio") or r.get("splitRatio") or "1:1"
         split_date = r.get("splitDate") or r.get("date")
-        if borsdata_id is None or split_date is None:
+        if borsdata_id is None or split_date is None or split_type not in {"S", "RS"}:
             continue
         if isinstance(split_date, str) and len(split_date) > 10:
             split_date = split_date[:10]
