@@ -51,8 +51,8 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
         <h1>Acme Year-End Report 2025</h1>
         <article class="release-body"><p>Revenue grew.<br>Cash was stable.</p></article>
         <footer>Navigation should not be evidence.</footer>
-        <a href="https://storage.mfn.se/uuid/Acme-Presentation.pdf">Presentation</a>
-        <a href="https://storage.mfn.se/uuid/Acme-Annual-Report-2025.pdf">PDF</a>
+        <a href="https://storage.mfn.se/uuid/id1.pdf">Presentation</a>
+        <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
       </body>
     </html>
     """
@@ -65,7 +65,7 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
         articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
     assert len(articles) == 1
     assert articles[0]["published_at"] == "2026-05-07T04:30:00Z"
-    assert articles[0]["storage_url"].endswith("Acme-Annual-Report-2025.pdf")
+    assert articles[0]["storage_url"].endswith("id2.pdf")
     assert articles[0]["content_text"] == "Revenue grew. Cash was stable."
     assert "Navigation should not be evidence." not in articles[0]["content_text"]
 
@@ -209,6 +209,50 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
         assert sum(row["duplicate_of"] is None for row in rows) == 1
         assert rows[0]["checksum"] == rows[1]["checksum"] == "identical-pdf"
         assert "bilingual_group_id" in json.loads(rows[0]["raw_metadata"])
+    finally:
+        conn.close()
+
+
+def test_cross_run_checksum_dedupes_bilingual_documents():
+    conn = _connection()
+    try:
+        service = ResearchDocumentIngestionService(conn)
+        first = service.persist_articles(
+            None,
+            [
+                {
+                    "title": "Annual Report 2025",
+                    "source_url": "https://mfn.test/a/reports/en",
+                    "content_text": "English report",
+                    "pdf_checksum": "same-pdf",
+                    "report_kind": "annual",
+                    "fiscal_period": "2025",
+                    "lang": "en",
+                }
+            ],
+        )
+        second = service.persist_articles(
+            None,
+            [
+                {
+                    "title": "Årsredovisning 2025",
+                    "source_url": "https://mfn.test/a/reports/sv",
+                    "content_text": "Svensk rapport",
+                    "pdf_checksum": "same-pdf",
+                    "report_kind": "annual",
+                    "fiscal_period": "2025",
+                    "lang": "sv",
+                }
+            ],
+        )
+        row = conn.execute(
+            "SELECT duplicate_of FROM research_documents WHERE source_url=?",
+            ("https://mfn.test/a/reports/sv",),
+        ).fetchone()
+        assert first.inserted == 1
+        assert second.inserted == 0
+        assert second.suppressed == 1
+        assert row[0] is not None
     finally:
         conn.close()
 

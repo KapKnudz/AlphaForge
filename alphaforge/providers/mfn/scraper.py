@@ -223,8 +223,8 @@ class _MfnHtmlParser(HTMLParser):
         walk(value)
 
 
-def _attachment_score(url: str) -> int:
-    name = unquote(urlsplit(url).path).lower()
+def _attachment_score(url: str, label: str = "") -> int:
+    name = f"{unquote(urlsplit(url).path)} {label}".lower()
     if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
         return 0
     if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
@@ -235,16 +235,20 @@ def _attachment_score(url: str) -> int:
 def _parse_html(html: str) -> dict[str, Any]:
     parser = _MfnHtmlParser()
     parser.feed(html)
-    links = [href for href, _text in parser.links]
     pdf_links = [
-        href for href in links if "storage.mfn.se/" in href.lower() and ".pdf" in href.lower()
+        (href, text)
+        for href, text in parser.links
+        if "storage.mfn.se/" in href.lower() and ".pdf" in href.lower()
     ]
     selected_attachment = max(
-        enumerate(pdf_links), key=lambda item: (_attachment_score(item[1]), -item[0]), default=None
+        enumerate(pdf_links),
+        key=lambda item: (_attachment_score(*item[1]), -item[0]),
+        default=None,
     )
     storage_url = (
-        selected_attachment[1]
-        if selected_attachment is not None and _attachment_score(selected_attachment[1])
+        selected_attachment[1][0]
+        if selected_attachment is not None
+        and _attachment_score(*selected_attachment[1])
         else None
     )
     title = " ".join(" ".join(parser.h1_parts).split())

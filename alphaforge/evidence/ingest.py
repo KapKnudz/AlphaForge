@@ -191,6 +191,19 @@ def _document_exists(conn: Any, company_id: int | None, source_url: str) -> bool
     )
 
 
+def _document_for_checksum(conn: Any, company_id: int | None, checksum: str | None) -> Any:
+    if not checksum:
+        return None
+    return conn.execute(
+        """
+        SELECT id, source_url FROM research_documents
+        WHERE company_id IS ? AND checksum=?
+        ORDER BY id LIMIT 1
+        """,
+        (company_id, checksum),
+    ).fetchone()
+
+
 @dataclass(frozen=True)
 class PdfExtraction:
     text: str
@@ -238,15 +251,29 @@ class ResearchDocumentIngestionService:
                 or doc.get("attachment_checksum")
                 or (hashlib.sha256(body.encode()).hexdigest() if body else None)
             )
-            metadata = _metadata_json(doc, language=language, checksum=checksum)
+            existing_checksum = _document_for_checksum(self.conn, company_id, checksum)
+            duplicate_of = (
+                existing_checksum[0]
+                if existing_checksum is not None and existing_checksum[1] != source_url
+                else None
+            )
+            if duplicate_of is not None:
+                metadata = _metadata_json(
+                    {**doc, "ingest_status": "superseded_by_checksum"},
+                    language=language,
+                    checksum=checksum,
+                )
+            else:
+                metadata = _metadata_json(doc, language=language, checksum=checksum)
             if not _document_exists(self.conn, company_id, source_url):
                 try:
                     cur = self.conn.execute(
                         """
                         INSERT INTO research_documents
                             (company_id, source_url, source_type, title, published_at, content_text,
-                             page_count, pages_included, page_truncated, ingested_lang, checksum, raw_metadata)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             page_count, pages_included, page_truncated, duplicate_of,
+                             ingested_lang, checksum, raw_metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(company_id, source_url) DO NOTHING
                         """,
                         (
@@ -259,13 +286,17 @@ class ResearchDocumentIngestionService:
                             doc.get("page_count"),
                             doc.get("pages_included"),
                             doc.get("page_truncated"),
+                            duplicate_of,
                             language,
                             checksum,
                             metadata,
                         ),
                     )
                     if cur.rowcount and cur.rowcount > 0:
-                        inserted += 1
+                        if duplicate_of is None:
+                            inserted += 1
+                        else:
+                            suppressed += 1
                 except Exception:
                     pass
             for suppressed_doc in doc.get("_suppressed_variants", []):
