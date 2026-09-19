@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 2 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 3 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -56,10 +56,26 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(migration_path.read_text(encoding="utf-8"))
         set_user_version(conn, 2)
         conn.commit()
-        return
-    _apply_initial_schema(conn)
-    set_user_version(conn, SCHEMA_VERSION)
-    conn.commit()
+        current = 2
+    if current < 3:
+        candidates = [
+            Path("db/migrations/003_allow_bilingual_pdf_checksums.sql"),
+            Path(__file__).resolve().parents[2]
+            / "db"
+            / "migrations"
+            / "003_allow_bilingual_pdf_checksums.sql",
+        ]
+        migration_path = next((path for path in candidates if path.exists()), None)
+        if migration_path is None:
+            raise FileNotFoundError(f"bilingual checksum migration not found (tried {candidates})")
+        conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 3)
+        conn.commit()
+        current = 3
+    if current < SCHEMA_VERSION:
+        _apply_initial_schema(conn)
+        set_user_version(conn, SCHEMA_VERSION)
+        conn.commit()
 
 
 def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:

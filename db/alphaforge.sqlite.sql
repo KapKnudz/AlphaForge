@@ -165,9 +165,9 @@ CREATE TABLE IF NOT EXISTS research_documents (
     ingested_lang       TEXT,
     checksum            TEXT,
     raw_metadata        TEXT CHECK (raw_metadata IS NULL OR json_valid(raw_metadata)),
-    UNIQUE (checksum),
     UNIQUE (company_id, source_url)
 ) STRICT;
+CREATE INDEX IF NOT EXISTS idx_research_documents_checksum ON research_documents(checksum);
 
 CREATE TABLE IF NOT EXISTS theses (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,

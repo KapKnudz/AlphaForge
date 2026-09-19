@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 CATEGORY_KEYWORDS_SE: dict[str, list[str]] = {
     "earnings": [
         "delårsrapport",
@@ -42,6 +44,8 @@ REPORT_TERMS_SE: list[str] = [
     "year-end report",
     "interim report",
     "annual report",
+    "quarterly report",
+    "year end report",
 ]
 
 REPORT_TITLE_TERMS: list[str] = REPORT_TERMS_SE
@@ -77,6 +81,29 @@ def classify_importance(title: str, body: str = "") -> str:
     return "low"
 
 
+def report_kind(title: str) -> str | None:
+    """Return the deterministic MFN report class, excluding schedule notices."""
+    lower = " ".join(title.lower().split())
+    if any(
+        term in lower
+        for term in ("årsredovisning", "annual report", "year-end report", "year end report")
+    ):
+        return "annual"
+    if any(
+        term in lower
+        for term in REPORT_TERMS_SE
+        if term not in {"årsredovisning", "annual report", "year-end report", "year end report"}
+    ):
+        return "quarterly"
+    if re.search(r"\bq[1-4]\b", lower) and any(
+        word in lower for word in ("report", "rapport", "kommuniké")
+    ):
+        return "quarterly"
+    return None
+
+
 def is_report(title: str) -> bool:
-    lower = title.lower()
-    return any(term.lower() in lower for term in REPORT_TERMS_SE)
+    lower = " ".join(title.lower().split())
+    if any(term in lower for term in ("report schedule", "rapportkalender", "financial calendar")):
+        return False
+    return report_kind(title) is not None
