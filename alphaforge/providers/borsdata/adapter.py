@@ -375,7 +375,7 @@ class BorsdataAdapter:
         return next(
             (
                 row.get(key)
-                for key in ("exDate", "ex_date", "excludingDate", "excluding_date", "date")
+                for key in ("exDate", "ex_date", "excludingDate", "date")
                 if row.get(key)
             ),
             None,
