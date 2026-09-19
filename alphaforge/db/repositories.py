@@ -29,7 +29,9 @@ def upsert_company(conn: sqlite3.Connection, borsdata_ins: dict[str, Any]) -> in
     market_id = borsdata_ins.get("marketId") or borsdata_ins.get("market_id")
     country_id = borsdata_ins.get("countryId") or borsdata_ins.get("country_id")
     listing_date = borsdata_ins.get("listingDate")
-    stock_price_currency = borsdata_ins.get("stockPriceCurrency") or borsdata_ins.get("stock_price_currency")
+    stock_price_currency = borsdata_ins.get("stockPriceCurrency") or borsdata_ins.get(
+        "stock_price_currency"
+    )
     report_currency = borsdata_ins.get("reportCurrency") or borsdata_ins.get("report_currency")
     raw_payload = json.dumps(borsdata_ins, ensure_ascii=False)
     conn.execute(
@@ -350,11 +352,7 @@ def upsert_kpi_observations(
             # keep null-filtered?
             pass
         year = r.get("year") if "year" in r else r.get("y")
-        report_period = (
-            r.get("reportPeriod")
-            or r.get("report_period")
-            or r.get("p")
-        )
+        report_period = r.get("reportPeriod") or r.get("report_period") or r.get("p")
         observation_date = r.get("observationDate") or r.get("observation_date") or r.get("date")
         if period_type == "last":
             if not observation_date:

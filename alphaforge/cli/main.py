@@ -201,7 +201,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 borsdata_id=None,
                 status="failed" if sync_failed else "success",
                 error=(
-                    {"code": "instrument_upsert_failed", "message": "one or more instruments failed"}
+                    {
+                        "code": "instrument_upsert_failed",
+                        "message": "one or more instruments failed",
+                    }
                     if sync_failed
                     else None
                 ),
@@ -785,9 +788,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         candidate.ticker = score.ticker
         assessment = gate.assess(candidate)
         score.readiness_status = assessment.status
-        score.readiness_blockers = [
-            f"{item.code}: {item.message}" for item in assessment.blockers
-        ]
+        score.readiness_blockers = [f"{item.code}: {item.message}" for item in assessment.blockers]
         score.readiness_limitations = [
             f"{item.code}: {item.message}" for item in assessment.limitations
         ]

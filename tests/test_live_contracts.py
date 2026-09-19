@@ -32,12 +32,16 @@ def test_report_list_period_arrays_are_flattened():
 def test_live_envelopes_and_pascal_casing_are_recognized():
     adapter = BorsdataAdapter(api_key="fixture")
     envelopes = json.loads((FIXTURES / "envelopes.json").read_text())
-    with patch.object(adapter, "_get_json", side_effect=[
-        BorsdataAdapter._normalize_keys(envelopes["kpi_history"]),
-        BorsdataAdapter._normalize_keys(envelopes["report_metadata"]),
-        BorsdataAdapter._normalize_keys(envelopes["stock_splits"]),
-        BorsdataAdapter._normalize_keys(envelopes["plain_list"]),
-    ]):
+    with patch.object(
+        adapter,
+        "_get_json",
+        side_effect=[
+            BorsdataAdapter._normalize_keys(envelopes["kpi_history"]),
+            BorsdataAdapter._normalize_keys(envelopes["report_metadata"]),
+            BorsdataAdapter._normalize_keys(envelopes["stock_splits"]),
+            BorsdataAdapter._normalize_keys(envelopes["plain_list"]),
+        ],
+    ):
         assert adapter.get_kpi_history(101, 2, "year", "mean")[0]["kpiId"] == 2
         assert adapter.get_report_metadata()[0]["property"] == "revenues"
         assert adapter.get_stock_splits()[0]["insId"] == 101
@@ -91,7 +95,13 @@ def test_sync_persists_fixture_kpi_history_idempotently():
     class FixtureAdapter:
         def get_instruments(self):
             return [
-                {"insId": ins_id, "name": f"Company {ins_id}", "ticker": ticker, "instrument": 1, "branchId": 1}
+                {
+                    "insId": ins_id,
+                    "name": f"Company {ins_id}",
+                    "ticker": ticker,
+                    "instrument": 1,
+                    "branchId": 1,
+                }
                 for ins_id, ticker in ((29, "BEIA B"), (221, "SYSR"), (424, "INWI"))
             ]
 
@@ -150,12 +160,16 @@ def test_sync_persists_fixture_kpi_history_idempotently():
         assert cmd_sync(args) == 0
         first_count = conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0]
         assert first_count == 60
-        assert conn.execute(
-            "SELECT count(DISTINCT company_id) FROM kpi_observations"
-        ).fetchone()[0] == 3
-        assert [row[0] for row in conn.execute(
-            "SELECT count(*) FROM kpi_observations GROUP BY company_id ORDER BY company_id"
-        ).fetchall()] == [20, 20, 20]
+        assert (
+            conn.execute("SELECT count(DISTINCT company_id) FROM kpi_observations").fetchone()[0]
+            == 3
+        )
+        assert [
+            row[0]
+            for row in conn.execute(
+                "SELECT count(*) FROM kpi_observations GROUP BY company_id ORDER BY company_id"
+            ).fetchall()
+        ] == [20, 20, 20]
         assert cmd_sync(args) == 0
         assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
 

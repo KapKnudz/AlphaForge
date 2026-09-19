@@ -82,7 +82,12 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         (company_id, cutoff.isoformat()),
     ).fetchall()
     if not period_rows or not price_rows:
-        return {"financial": None, "valuation": None, "fundamental_kpis": {}, "research_evidence": {}}
+        return {
+            "financial": None,
+            "valuation": None,
+            "fundamental_kpis": {},
+            "research_evidence": {},
+        }
 
     reports = [_report(row) for row in period_rows]
     current_report = reports[-1]
@@ -97,11 +102,17 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
 
     historical_raw: list[RawValuation] = []
     for row, report in zip(period_rows[:-1], historical_reports, strict=False):
-        candidates = [p for p in price_rows if str(p["price_date"])[:10] <= str(row["period_end"])[:10]]
+        candidates = [
+            p for p in price_rows if str(p["price_date"])[:10] <= str(row["period_end"])[:10]
+        ]
         if candidates:
-            historical_raw.append(compute_raw_valuation(_price(candidates[-1], stock_currency), report))
+            historical_raw.append(
+                compute_raw_valuation(_price(candidates[-1], stock_currency), report)
+            )
     pe_history = [item.pe for item in historical_raw if item.pe is not None and item.pe > 0]
-    ev_ebit_history = [item.ev_ebit for item in historical_raw if item.ev_ebit is not None and item.ev_ebit > 0]
+    ev_ebit_history = [
+        item.ev_ebit for item in historical_raw if item.ev_ebit is not None and item.ev_ebit > 0
+    ]
     pb_history = [item.pb for item in historical_raw if item.pb is not None and item.pb > 0]
     historical = HistoricalValuation(
         pe_history=pe_history,
@@ -111,7 +122,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         avg_ev_ebit=sum(ev_ebit_history) / len(ev_ebit_history) if ev_ebit_history else None,
         avg_pb=sum(pb_history) / len(pb_history) if pb_history else None,
         median_pe=sorted(pe_history)[len(pe_history) // 2] if pe_history else None,
-        median_ev_ebit=sorted(ev_ebit_history)[len(ev_ebit_history) // 2] if ev_ebit_history else None,
+        median_ev_ebit=sorted(ev_ebit_history)[len(ev_ebit_history) // 2]
+        if ev_ebit_history
+        else None,
         median_pb=sorted(pb_history)[len(pb_history) // 2] if pb_history else None,
     )
     current = CurrentValuation(
@@ -128,7 +141,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     )
     dividends = conn.execute(
         "SELECT amount FROM dividends WHERE company_id=? AND ex_date <= ? AND ex_date > ?",
-        (company_id, cutoff.isoformat(), date(cutoff.year - 1, cutoff.month, cutoff.day).isoformat()),
+        (
+            company_id,
+            cutoff.isoformat(),
+            date(cutoff.year - 1, cutoff.month, cutoff.day).isoformat(),
+        ),
     ).fetchall()
     if dividends and latest_price.close > 0:
         current.dividend_yield = sum(float(row[0]) for row in dividends) / latest_price.close * 100
@@ -149,10 +166,13 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     ).fetchall():
         kpis[int(row[0])] = float(row[1])
 
-    docs = [dict(row) for row in conn.execute(
-        "SELECT id, source_url, title, published_at FROM research_documents WHERE company_id=? AND published_at IS NOT NULL AND published_at <= ?",
-        (company_id, cutoff.isoformat()),
-    ).fetchall()]
+    docs = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, source_url, title, published_at FROM research_documents WHERE company_id=? AND published_at IS NOT NULL AND published_at <= ?",
+            (company_id, cutoff.isoformat()),
+        ).fetchall()
+    ]
     reverse_dcf = {
         "status": "available" if current_raw.market_cap is not None else "unavailable",
         "current_price": latest_price.close,

@@ -111,11 +111,29 @@ class BorsdataAdapter:
             # A 200 object with none of these is a contract failure, not empty
             # data: silently treating it as empty corrupts the database.
             keys = (
-                "instruments", "reports", "markets", "branches", "sectors", "countries",
-                "kpis", "stockPricesList", "stockPrices", "dividends", "insider",
-                "buyback", "shorts", "list", "stockSplits", "stockSplitList", "reportCalendar",
-                "translationMetadata", "kpiMetadata", "kpiMetadatas", "reportMetadata",
-                "reportMetadatas", "values",
+                "instruments",
+                "reports",
+                "markets",
+                "branches",
+                "sectors",
+                "countries",
+                "kpis",
+                "stockPricesList",
+                "stockPrices",
+                "dividends",
+                "insider",
+                "buyback",
+                "shorts",
+                "list",
+                "stockSplits",
+                "stockSplitList",
+                "reportCalendar",
+                "translationMetadata",
+                "kpiMetadata",
+                "kpiMetadatas",
+                "reportMetadata",
+                "reportMetadatas",
+                "values",
             )
             for key in keys:
                 if key in data:
@@ -206,7 +224,9 @@ class BorsdataAdapter:
         if not isinstance(data, dict) or "reportList" not in data:
             # Older responses use a direct reports array.
             if isinstance(data, dict) and "reports" in data:
-                return BorsdataAdapter._report_rows(data["reports"], endpoint=endpoint, field="reports")
+                return BorsdataAdapter._report_rows(
+                    data["reports"], endpoint=endpoint, field="reports"
+                )
             raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
         flattened: list[dict[str, Any]] = []
         report_lists = data["reportList"]
@@ -216,7 +236,11 @@ class BorsdataAdapter:
             report_lists, endpoint=endpoint, field="reportList"
         )
         for instrument in report_lists:
-            for key, period_type in (("reportsYear", "year"), ("reportsQuarter", "quarter"), ("reportsR12", "r12")):
+            for key, period_type in (
+                ("reportsYear", "year"),
+                ("reportsQuarter", "quarter"),
+                ("reportsR12", "r12"),
+            ):
                 rows = instrument.get(key, [])
                 if isinstance(rows, dict):
                     rows = [rows]
@@ -275,7 +299,9 @@ class BorsdataAdapter:
         endpoint = f"/v1/instruments/{ins_id}/stockprices"
         if isinstance(data, dict):
             if "stockPricesList" in data:
-                rows = self._price_rows(data["stockPricesList"], endpoint=endpoint, field="stockPricesList")
+                rows = self._price_rows(
+                    data["stockPricesList"], endpoint=endpoint, field="stockPricesList"
+                )
             elif "stockPrices" in data:
                 rows = self._price_rows(data["stockPrices"], endpoint=endpoint, field="stockPrices")
             else:
