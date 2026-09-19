@@ -61,7 +61,7 @@ Operational acceptance: 2–3 pilot companies from the curated watchlist complet
   4. `GET /v1/instruments/{id}/kpis/{kpiId}/{reportType}/{priceType}/history` — `year/mean|high|low` and `r12/…` supported, **`quarter/mean` → 400 not supported**, 20-year depth, `v` null-filtered client-side.
   5. `GET /v1/instruments/reports` — annual+r12+quarterly, `instList` batch ≤50 (client-enforced, backend permissive), `period 5` = annual, `r12` rolling, `report_Date` nullable (unpublished stub), ~30–40d publication lag, `currency/currency_ratio/broken_Fiscal_Year` fields, stub-zero quarantine needed (2620/2649 `revenues 0.0, report_Date null`).
   6. `GET /v1/instruments/{id}/stockprices` — daily OHLC+volume, 10-y default (2 516 rows) vs any `maxCount` → 5 027 rows (20-y) **anomaly: maxCount is ignored by backend as of probe — sync must fetch full then slice locally**.
-  7. `GET /v1/instruments/dividend/calendar` — ex-date calendar, `dividendType 0/1/2`, zero-row (`amountPaid 0.0` with currency = explicit "no distribution", dropped at adapter), duplicate ex-date with two types occurs.
+  7. `GET /v1/instruments/dividend/calendar` — ex-date calendar, live rows may use `excludingDate` (canonicalized to the domain `exDate`) and `dividendType 0/1/2/4`, zero-row (`amountPaid 0.0` with currency = explicit "no distribution", dropped at adapter), duplicate ex-date with two types occurs.
   8. `GET /v1/holdings/insider` — raw buys/sells, client keeps only `type 19/25` non-misc non-program → **−10 to −60% loss** per instrument after filter.
   9. `GET /v1/holdings/buyback` — treasury deltas, sparse for large caps, rich for property.
   10. `GET /v1/holdings/shorts` — global snapshot (one row per covered instrument, 427/1 709 ≈ 25% coverage, `shortsProc` negative convention, trends 1w/1m/3m/6m, **snapshot not history**).
@@ -760,7 +760,7 @@ CREATE TABLE IF NOT EXISTS dividends (
     ex_date             DATE NOT NULL,
     amount              REAL NOT NULL CHECK (amount >= 0),
     currency            TEXT NOT NULL,
-    dividend_type       INTEGER NOT NULL CHECK (dividend_type IN (0,1,2)),
+    dividend_type       INTEGER NOT NULL CHECK (dividend_type IN (0,1,2,4)),
     distribution_frequency TEXT,
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (company_id, ex_date, dividend_type, amount)
