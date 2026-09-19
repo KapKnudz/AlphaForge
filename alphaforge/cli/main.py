@@ -527,6 +527,213 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def export_ranking_files(
+    ranking, as_of: str, model_version: str, exports_dir: Path
+) -> tuple[Path, Path]:
+    from dataclasses import asdict
+
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    ranking_data = {
+        "as_of": as_of,
+        "model_version": model_version,
+        "company_count": len(ranking.scores),
+        "eligible_count": sum(1 for s in ranking.scores if s.rank_eligible),
+        "scores": [asdict(s) for s in ranking.scores],
+    }
+
+    ranking_json_path = exports_dir / "ranking.json"
+    ranking_json_path.write_text(json.dumps(ranking_data, indent=2, ensure_ascii=False))
+
+    ranking_csv_path = exports_dir / "ranking.csv"
+    with open(ranking_csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "rank",
+                "ticker",
+                "name",
+                "total_score",
+                "quality_score",
+                "growth_score",
+                "valuation_score",
+                "balance_sheet_score",
+                "ranking_model",
+                "rank_eligible",
+                "eligibility_reasons",
+                "data_quality",
+            ]
+        )
+        for i, score in enumerate(ranking.scores, 1):
+            writer.writerow(
+                [
+                    i,
+                    score.ticker,
+                    score.name,
+                    score.total_score,
+                    score.quality_score,
+                    score.growth_score,
+                    score.valuation_score,
+                    score.balance_sheet_score,
+                    score.ranking_model,
+                    score.rank_eligible,
+                    ";".join(score.eligibility_reasons),
+                    score.data_quality,
+                ]
+            )
+
+    return ranking_json_path, ranking_csv_path
+
+
+def cmd_rank(args: argparse.Namespace) -> int:
+    import hashlib
+    import json
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from alphaforge.config import Settings
+    from alphaforge.core.ranking.engine import RankingEngine
+    from alphaforge.db.connection import get_connection
+    from alphaforge.db.migrations import migrate
+    from alphaforge.db.repositories import save_ranking_run
+
+    settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
+    conn = get_connection(settings)
+    migrate(conn)
+
+    as_of = args.as_of
+    watchlist_path = args.watchlist
+
+    # Load companies from watchlist or DB
+    companies = []
+    if watchlist_path:
+        # Load from CSV
+        import csv
+
+        file_path = Path(watchlist_path)
+        if not file_path.exists():
+            print(f"watchlist file not found: {file_path}", file=sys.stderr)
+            return 1
+        content = file_path.read_text(encoding="utf-8-sig")
+        delimiter = ";" if content.count(";") > content.count(",") else ","
+        reader = csv.DictReader(content.splitlines(), delimiter=delimiter)
+        for row in reader:
+            norm = {}
+            for k, v in row.items():
+                if k is None:
+                    continue
+                norm[k.strip().lower()] = (v or "").strip()
+            ticker = norm.get("ticker") or norm.get("instrument") or ""
+            if ticker:
+                cur = conn.execute(
+                    "SELECT id, name, ticker, branch_id FROM companies WHERE ticker=? COLLATE NOCASE",
+                    (ticker,),
+                )
+                r = cur.fetchone()
+                if r:
+                    from dataclasses import dataclass
+
+                    @dataclass
+                    class Company:
+                        id: int
+                        name: str
+                        ticker: str
+                        branch_id: int | None
+
+                    companies.append(
+                        Company(
+                            id=int(r[0]),
+                            name=r[1] or "",
+                            ticker=r[2] or ticker,
+                            branch_id=r[3],
+                        )
+                    )
+    else:
+        # Load from DB watchlist
+        cur = conn.execute(
+            """
+            SELECT c.id, c.name, c.ticker, c.branch_id
+            FROM companies c
+            JOIN watchlist w ON c.id = w.company_id
+            """
+        )
+        from dataclasses import dataclass
+
+        @dataclass
+        class Company:
+            id: int
+            name: str
+            ticker: str
+            branch_id: int | None
+
+        for r in cur.fetchall():
+            companies.append(
+                Company(
+                    id=int(r[0]),
+                    name=r[1] or "",
+                    ticker=r[2] or "",
+                    branch_id=r[3],
+                )
+            )
+
+    if not companies:
+        print("no companies to rank", file=sys.stderr)
+        return 1
+
+    # Load results for each company (simplified - in real implementation, this would load
+    # financial results, valuations, etc. from the database)
+    # For now, we'll create empty results and let the ranking engine handle missing data
+    results_by_company: dict[int, dict] = {}
+
+    # Run ranking
+    engine = RankingEngine()
+    ranking = engine.rank(companies, results_by_company)
+
+    exports_dir = Path("exports") / as_of
+    ranking_json_path, ranking_csv_path = export_ranking_files(
+        ranking,
+        as_of,
+        engine.RANKING_MODEL_VERSION,
+        exports_dir,
+    )
+
+    # Save ranking run to DB
+    # Generate hashes for reproducibility
+    scores_bytes = json.dumps([asdict(s) for s in ranking.scores], sort_keys=True).encode()
+    packet_hash = hashlib.sha256(scores_bytes).hexdigest()
+
+    universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()
+    universe_hash = hashlib.sha256(universe_bytes).hexdigest()
+
+    eligible_count = sum(1 for s in ranking.scores if s.rank_eligible)
+    run_id = save_ranking_run(
+        conn,
+        as_of=as_of,
+        model_version=engine.RANKING_MODEL_VERSION,
+        packet_hash=packet_hash,
+        universe_hash=universe_hash,
+        company_count=len(ranking.scores),
+        eligible_count=eligible_count,
+        scores=[asdict(s) for s in ranking.scores],
+        inputs_summary={
+            "ranking_type": "deterministic_watchlist",
+            "total_companies": len(companies),
+            "eligible_count": eligible_count,
+            "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
+        },
+    )
+
+    print(
+        f"rank: {len(ranking.scores)} companies ranked, "
+        f"{eligible_count} eligible, "
+        f"exports written to {exports_dir}/",
+        file=sys.stderr,
+    )
+    print(f"ranking_run_id={run_id}")
+    print(f"packet_hash={packet_hash}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="alphaforge")
     p.add_argument("--dsn", dest="dsn", default=None, help="ALPHAFORGE_DSN override")
@@ -550,6 +757,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync.add_argument("--allow-empty-companies", action="store_true", help=argparse.SUPPRESS)
     sync.set_defaults(func=cmd_sync)
+
+    rank = sub.add_parser(
+        "rank",
+        help="Rank watchlist companies (exports full universe with eligibility flags)",
+    )
+    rank.add_argument(
+        "--as-of",
+        dest="as_of",
+        required=True,
+        help="as_of YYYY-MM-DD for ranking",
+    )
+    rank.add_argument(
+        "--watchlist",
+        default=None,
+        help="Watchlist CSV path (optional, uses DB watchlist if omitted)",
+    )
+    rank.set_defaults(func=cmd_rank)
 
     return p
 

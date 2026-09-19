@@ -473,3 +473,42 @@ def record_job(
         (job_type, company_id, borsdata_id, status, err_json),
     )
     conn.commit()
+
+
+def save_ranking_run(
+    conn: sqlite3.Connection,
+    *,
+    as_of: str,
+    model_version: str,
+    packet_hash: str | None,
+    universe_hash: str | None,
+    company_count: int,
+    eligible_count: int,
+    scores: list[dict[str, Any]],
+    inputs_summary: dict[str, Any] | None = None,
+) -> int:
+    import json as _json
+
+    scores_json = _json.dumps(scores, ensure_ascii=False)
+    inputs_json = _json.dumps(inputs_summary, ensure_ascii=False) if inputs_summary else None
+    conn.execute(
+        """
+        INSERT INTO ranking_runs
+            (as_of, model_version, packet_hash, universe_hash, company_count, eligible_count, scores, inputs_summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            as_of,
+            model_version,
+            packet_hash,
+            universe_hash,
+            company_count,
+            eligible_count,
+            scores_json,
+            inputs_json,
+        ),
+    )
+    conn.commit()
+    cur = conn.execute("SELECT last_insert_rowid()")
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
