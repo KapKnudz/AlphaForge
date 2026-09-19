@@ -23,6 +23,8 @@ def test_discover_feed_excludes_news_and_report_schedules():
     <a class="title-link item-link" href="/a/acme/q1">Q1 2026 Interim Report</a>
     <a class="title-link item-link" href="/a/acme/news">Acme wins a new contract</a>
     <a class="title-link item-link" href="/a/acme/calendar">Report Schedule 2026</a>
+    <a class="title-link item-link" href="/about/annual-report">Annual Report navigation</a>
+    <a class="title-link item-link" href="https://storage.mfn.se/acme/Annual-Report-2026.pdf">Annual Report 2026</a>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")

@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
@@ -198,6 +198,14 @@ def _parse_html(html: str) -> dict[str, Any]:
     }
 
 
+def _is_mfn_release_url(url: str, base_url: str) -> bool:
+    candidate = urlsplit(url)
+    base = urlsplit(base_url)
+    if candidate.scheme != base.scheme or candidate.netloc.lower() != base.netloc.lower():
+        return False
+    return candidate.path.startswith(("/a/", "/cision/"))
+
+
 def _report_identity_seed(article: dict[str, Any]) -> dict[str, Any]:
     title = article.get("title") or ""
     return {
@@ -242,7 +250,12 @@ class MfnScraper:
         for href, raw_title in parser.links:
             title = " ".join(raw_title.split())
             absolute = urljoin(f"{self.base_url}/", href)
-            if not absolute or not title or absolute in seen:
+            if (
+                not absolute
+                or not title
+                or absolute in seen
+                or not _is_mfn_release_url(absolute, self.base_url)
+            ):
                 continue
             if reports_only and not is_report(title):
                 continue
