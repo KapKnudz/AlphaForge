@@ -1,16 +1,16 @@
 """Migration shim — PRAGMA user_version.
 
 Choice: PRAGMA user_version (single integer in SQLite header) over a runner
-(alembic/dbmate) because the MVP has one schema version, zero history,
-and no concurrent migration writers. The runner would add a dependency
-and a migrations directory for no incremental benefit. If a second
-concurrent writer or a multi-version history appears (plan §3.4 promotion
-signal), switch to alembic with autogenerate and keep this module as
-the SQLite→Postgres translation entry point.
+(alembic/dbmate) because the MVP has a small linear schema history and no
+concurrent migration writers. A full runner would add a dependency without
+incremental benefit at this scale. If concurrent writers or a larger or
+branched migration history appears (plan §3.4 promotion signal), switch to
+alembic with autogenerate and keep this module as the SQLite→Postgres
+translation entry point.
 
 Current version: SCHEMA_VERSION = 2 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
-_run_migration() to apply it when user_version < NNN.
+migrate() to apply it when user_version < NNN.
 """
 
 from __future__ import annotations
