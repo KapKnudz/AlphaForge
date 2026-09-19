@@ -83,7 +83,11 @@ class AgentReadinessGate:
 
         reverse_dcf = candidate.full_results.get("reverse_dcf") or {}
         if _field(reverse_dcf, "status") != "available":
-            limitations.extend(_reverse_dcf_blockers(reverse_dcf))
+            # A model call cannot produce a trustworthy analysis without a
+            # usable valuation input. Keep the reason typed and visible rather
+            # than allowing a research document alone to make the candidate
+            # ready.
+            blockers.extend(_reverse_dcf_blockers(reverse_dcf))
 
         valuation = candidate.full_results.get("valuation") or {}
         guardrail_low = _field(valuation, "ev_ebit_guardrail_low")

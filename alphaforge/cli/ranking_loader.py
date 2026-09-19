@@ -8,6 +8,7 @@ from typing import Any
 
 from alphaforge.core.financial.calculator import FinancialCalculator
 from alphaforge.core.financial.mapper import FinancialMapper
+from alphaforge.core.financial.per_share import adjust_historical_shares
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
@@ -23,7 +24,7 @@ def _number(value: Any) -> float | None:
         return None
 
 
-def _report(row) -> Report:
+def _report(row, *, shares_override: float | None = None) -> Report:
     return Report(
         revenue=_number(row["revenue"]),
         operating_profit=_number(row["operating_profit"]),
@@ -34,7 +35,9 @@ def _report(row) -> Report:
         equity=_number(row["equity"]),
         total_assets=_number(row["total_assets"]),
         total_debt=_number(row["total_debt"]),
-        shares_outstanding=_number(row["shares_outstanding"]),
+        shares_outstanding=(
+            shares_override if shares_override is not None else _number(row["shares_outstanding"])
+        ),
         gross_income=_number(row["gross_income"]),
         operating_cash_flow=_number(row["operating_cash_flow"]),
         cash=_number(row["cash"]),
@@ -67,8 +70,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         """
         SELECT * FROM financial_periods
         WHERE company_id=? AND is_placeholder=0
-          AND period_end <= ?
-          AND report_date IS NOT NULL AND report_date <= ?
+          AND substr(period_end, 1, 10) <= ?
+          AND report_date IS NOT NULL AND substr(report_date, 1, 10) <= ?
         ORDER BY period_end ASC, report_date ASC
         """,
         (company_id, cutoff.isoformat(), cutoff.isoformat()),
@@ -76,7 +79,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     price_rows = conn.execute(
         """
         SELECT * FROM prices
-        WHERE company_id=? AND price_date <= ?
+        WHERE company_id=? AND substr(price_date, 1, 10) <= ?
         ORDER BY price_date ASC
         """,
         (company_id, cutoff.isoformat()),
@@ -89,7 +92,27 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             "research_evidence": {},
         }
 
-    reports = [_report(row) for row in period_rows]
+    # Börsdata prices are split-adjusted but report share counts are not. Keep
+    # the raw row in the database and adjust only historical calculation input
+    # into the latest report's share basis.
+    split_rows = conn.execute(
+        "SELECT split_type, ratio, split_date FROM stock_splits WHERE company_id=? ORDER BY split_date",
+        (company_id,),
+    ).fetchall()
+    split_events = [(row[0], row[1], row[2]) for row in split_rows]
+    comparison_date = str(period_rows[-1]["period_end"])[:10]
+    reports = []
+    for index, row in enumerate(period_rows):
+        raw_shares = _number(row["shares_outstanding"])
+        adjusted = raw_shares
+        if index < len(period_rows) - 1 and raw_shares is not None and split_events:
+            adjusted = adjust_historical_shares(
+                raw_shares,
+                str(row["period_end"])[:10],
+                comparison_date,
+                split_events,
+            )
+        reports.append(_report(row, shares_override=adjusted))
     current_report = reports[-1]
     historical_reports = reports[:-1]
     financial_mapper = FinancialMapper()
@@ -140,7 +163,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         dividend_yield=None,
     )
     dividends = conn.execute(
-        "SELECT amount FROM dividends WHERE company_id=? AND ex_date <= ? AND ex_date > ?",
+        "SELECT amount FROM dividends WHERE company_id=? AND substr(ex_date, 1, 10) <= ? AND substr(ex_date, 1, 10) > ?",
         (
             company_id,
             cutoff.isoformat(),
@@ -157,7 +180,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         SELECT kpi_id, value FROM kpi_observations
         WHERE company_id=? AND value IS NOT NULL
           AND (
-              (observation_date IS NOT NULL AND observation_date <= ?)
+              (observation_date IS NOT NULL AND substr(observation_date, 1, 10) <= ?)
               OR (observation_date IS NULL AND year < ?)
           )
         ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC
@@ -169,7 +192,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     docs = [
         dict(row)
         for row in conn.execute(
-            "SELECT id, source_url, title, published_at FROM research_documents WHERE company_id=? AND published_at IS NOT NULL AND published_at <= ?",
+            "SELECT id, source_url, title, published_at FROM research_documents WHERE company_id=? AND published_at IS NOT NULL AND substr(published_at, 1, 10) <= ?",
             (company_id, cutoff.isoformat()),
         ).fetchall()
     ]

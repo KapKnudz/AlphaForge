@@ -121,9 +121,14 @@ class BorsdataAdapter:
                 "stockPricesList",
                 "stockPrices",
                 "dividends",
+                "dividendList",
                 "insider",
+                "insiderList",
                 "buyback",
+                "buybackList",
                 "shorts",
+                "shortsList",
+                "calendarList",
                 "list",
                 "stockSplits",
                 "stockSplitList",
@@ -276,9 +281,26 @@ class BorsdataAdapter:
                 sleep_between_batches()
         return out
 
-    def get_report_calendar(self) -> list[dict[str, Any]]:
-        data = self._get_json("/v1/instruments/report/calendar")
-        return self._unwrap_list(data, endpoint="/v1/instruments/report/calendar")
+    def get_report_calendar(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
+        params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
+        data = self._get_json("/v1/instruments/report/calendar", params=params)
+        rows = self._unwrap_list(data, endpoint="/v1/instruments/report/calendar")
+        # The live endpoint may return one object per instrument with a nested
+        # calendar array, while older responses return flat rows.
+        flattened: list[dict[str, Any]] = []
+        for row in rows:
+            nested = row.get("calendar") or row.get("reportCalendar")
+            instrument = row.get("insId") or row.get("instrumentId") or row.get("instrument")
+            if isinstance(nested, list):
+                for event in nested:
+                    if isinstance(event, dict):
+                        item = dict(event)
+                        if instrument is not None:
+                            item.setdefault("insId", instrument)
+                        flattened.append(item)
+            else:
+                flattened.append(row)
+        return flattened
 
     def get_stock_splits(self, *, from_date: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
@@ -320,12 +342,26 @@ class BorsdataAdapter:
 
     # ---- dividends (zero-row dropped at adapter) ----
 
-    def get_dividends(self) -> list[dict[str, Any]]:
-        data = self._get_json("/v1/instruments/dividend/calendar")
+    def get_dividends(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
+        params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
+        data = self._get_json("/v1/instruments/dividend/calendar", params=params)
         rows = self._unwrap_list(data, endpoint="/v1/instruments/dividend/calendar")
+        flattened: list[dict[str, Any]] = []
+        for row in rows:
+            nested = row.get("dividends") or row.get("dividendList")
+            instrument = row.get("insId") or row.get("instrumentId") or row.get("instrument")
+            if isinstance(nested, list):
+                for dividend in nested:
+                    if isinstance(dividend, dict):
+                        item = dict(dividend)
+                        if instrument is not None:
+                            item.setdefault("insId", instrument)
+                        flattened.append(item)
+            else:
+                flattened.append(row)
         # Drop zero-row: amountPaid 0.0 with currency = explicit "no distribution"
         filtered: list[dict[str, Any]] = []
-        for r in rows:
+        for r in flattened:
             amt = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
             try:
                 if amt is not None and float(amt) == 0.0:

@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 
@@ -166,11 +167,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
         for ins in instruments:
             try:
                 cid = upsert_company(conn, ins)
-                # For sync --all with no prior companies, expand company_rows
-                if args.all and cid and not any(c[0] == cid for c in company_rows):
-                    company_rows.append(
-                        (cid, int(ins.get("insId") or ins.get("id") or 0), ins.get("ticker"))
-                    )
                 # Log currency surface for Swedish watchlist (country_id=1)
                 # Live: 203 mismatched Nordics; we log for all instruments
                 if ins.get("countryId") == 1 or ins.get("country_id") == 1 or True:
@@ -229,8 +225,25 @@ def cmd_sync(args: argparse.Namespace) -> int:
         )
 
     # Instruments now exist, so relink rows imported before the sync and only
-    # then resolve a requested ticker.
+    # then resolve a requested ticker.  ``--all`` means the imported watchlist
+    # when one exists; a database with no watchlist retains the useful bootstrap
+    # behavior of syncing the complete seeded instrument universe.
     relink_watchlist(conn)
+    if args.all:
+        matched = conn.execute(
+            """
+            SELECT c.id, c.borsdata_id, c.ticker
+            FROM companies c JOIN watchlist w ON w.company_id=c.id
+            ORDER BY c.ticker COLLATE NOCASE, c.id
+            """
+        ).fetchall()
+        if matched:
+            company_rows = [(int(r[0]), int(r[1]), r[2]) for r in matched]
+        elif not company_rows:
+            all_rows = conn.execute(
+                "SELECT id, borsdata_id, ticker FROM companies ORDER BY ticker COLLATE NOCASE, id"
+            ).fetchall()
+            company_rows = [(int(r[0]), int(r[1]), r[2]) for r in all_rows]
     if args.company or args.ticker:
         requested = args.company or args.ticker
         cur = conn.execute(
@@ -271,8 +284,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
     # Reference dictionaries (should-adds) — seed once
     try:
         for name, getter in [
-            ("branches", adapter.get_branches),
             ("sectors", adapter.get_sectors),
+            ("branches", adapter.get_branches),
             ("countries", adapter.get_countries),
         ]:
             rows = getter()
@@ -312,9 +325,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # translationmetadata
         try:
             trows = adapter.get_translation_metadata()
-            # translationmetadata rows contain branch/sector translations; upsert if needed
-            for _r in trows:
-                pass
+            for translation in trows:
+                key = translation.get("translationKey") or translation.get("key")
+                if key:
+                    conn.execute(
+                        "INSERT INTO translation_metadata (translation_key, name_sv, name_en) VALUES (?, ?, ?) ON CONFLICT(translation_key) DO UPDATE SET name_sv=excluded.name_sv, name_en=excluded.name_en",
+                        (key, translation.get("nameSv"), translation.get("nameEn")),
+                    )
+            conn.commit()
         except Exception as exc:
             sync_failed = True
             print(f"translation metadata sync failed: {exc}", file=sys.stderr)
@@ -337,7 +355,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 conn.execute(
                     "INSERT INTO report_metadata (property, name_sv, name_en, format) VALUES (?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET name_sv=excluded.name_sv, name_en=excluded.name_en",
                     (
-                        rm.get("property") or rm.get("name") or "",
+                        rm.get("property") or rm.get("reportPropery") or rm.get("name") or "",
                         rm.get("nameSv") or "",
                         rm.get("nameEn") or "",
                         rm.get("format"),
@@ -364,14 +382,33 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
                 grouped: dict[int, list[dict]] = defaultdict(list)
                 for rep in reports:
-                    iid = rep.get("insId") or rep.get("instrumentId")
+                    iid = rep.get("insId") or rep.get("instrumentId") or rep.get("instrument")
                     if iid is not None:
                         grouped[int(iid)].append(rep)
                 # Map borsdata_id → company_id
                 b2c = {bid: cid for cid, bid, _ in company_rows}
-                for bid, reps in grouped.items():
-                    cid = b2c.get(int(bid))
-                    if cid is None:
+                for cid, bid, _ticker in company_rows:
+                    reps = grouped.get(int(bid), [])
+                    if not reps:
+                        # A requested company with no company-level response is
+                        # not a successful sync.  For a fleet run, retain the
+                        # row-level diagnostic without making an empty provider
+                        # response abort every other watchlist company.
+                        missing_error = {
+                            "code": "company_reports_missing",
+                            "message": f"no report rows returned for instrument {bid}",
+                            "retryable": True,
+                        }
+                        record_job(
+                            conn,
+                            "sync_reports",
+                            company_id=cid,
+                            borsdata_id=bid,
+                            status="failed" if args.company or args.ticker else "partial",
+                            error=missing_error,
+                        )
+                        if args.company or args.ticker:
+                            sync_failed = True
                         continue
                     try:
                         upsert_financial_periods(conn, cid, reps)
@@ -454,6 +491,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     has_values = True
                                 if kpi_id is not None and has_values:
                                     kpi_id_int = int(kpi_id)
+                                    if (
+                                        rt in ("year", "r12")
+                                        and isinstance(values, list)
+                                        and all(isinstance(item, dict) for item in values)
+                                    ):
+                                        upsert_kpi_observations(
+                                            conn, cid, kpi_id_int, rt, "mean", values
+                                        )
                                     try:
                                         conn.execute(
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
@@ -488,7 +533,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Dividends (global calendar, not per-company) — filter by company if possible
         try:
-            div_rows = adapter.get_dividends()
+            try:
+                div_rows = adapter.get_dividends(ins_ids)
+            except TypeError:
+                # Keep lightweight fixture providers and older adapters
+                # compatible while the production adapter uses instList.
+                div_rows = adapter.get_dividends()
             # dividends payload may contain insId; group similarly
             from collections import defaultdict
 
@@ -556,7 +606,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Report calendar (weekly, but sync opportunistically)
         try:
-            cal = adapter.get_report_calendar()
+            try:
+                cal = adapter.get_report_calendar(ins_ids)
+            except TypeError:
+                cal = adapter.get_report_calendar()
             if cal:
                 b2c = {bid: cid for cid, bid, _ in company_rows}
                 upsert_report_calendar(conn, cal, company_map=b2c)
@@ -578,13 +631,25 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     if cid is None:
                         continue
                     try:
+                        observation_date = (
+                            s.get("observationDate")
+                            or s.get("date")
+                            or s.get("observation_date")
+                            or ""
+                        )
+                        observation_date = str(observation_date)[:10] or date.today().isoformat()
                         conn.execute(
-                            "INSERT INTO company_short_snapshots (company_id, observation_date, shorts_proc, shorts_holders, shorts_milj, source) VALUES (?, date('now'), ?, ?, ?, 'borsdata') ON CONFLICT(company_id, observation_date) DO UPDATE SET shorts_proc=excluded.shorts_proc",
+                            "INSERT INTO company_short_snapshots (company_id, observation_date, shorts_proc, shorts_holders, shorts_milj, source) VALUES (?, ?, ?, ?, ?, 'borsdata') ON CONFLICT(company_id, observation_date) DO UPDATE SET shorts_proc=excluded.shorts_proc, shorts_holders=excluded.shorts_holders, shorts_milj=excluded.shorts_milj",
                             (
                                 cid,
-                                s.get("shortsProc") or s.get("shorts_proc"),
-                                s.get("holders"),
-                                s.get("milj"),
+                                observation_date,
+                                s.get("shortsProc")
+                                if s.get("shortsProc") is not None
+                                else s.get("shorts_proc"),
+                                s.get("holders")
+                                if s.get("holders") is not None
+                                else s.get("shortsHolders"),
+                                s.get("milj") if s.get("milj") is not None else s.get("shortsMilj"),
                             ),
                         )
                     except Exception:
@@ -614,6 +679,7 @@ def export_ranking_files(
         "model_version": model_version,
         "company_count": len(ranking.scores),
         "eligible_count": sum(1 for s in ranking.scores if s.rank_eligible),
+        "unranked_count": sum(1 for s in ranking.scores if not s.rank_eligible),
         "scores": [asdict(s) for s in ranking.scores],
     }
 
@@ -635,6 +701,7 @@ def export_ranking_files(
                 "balance_sheet_score",
                 "ranking_model",
                 "rank_eligible",
+                "ranking_section",
                 "eligibility_reasons",
                 "readiness_status",
                 "readiness_blockers",
@@ -645,7 +712,7 @@ def export_ranking_files(
         for i, score in enumerate(ranking.scores, 1):
             writer.writerow(
                 [
-                    i,
+                    i if score.rank_eligible else "",
                     score.ticker,
                     score.name,
                     score.total_score,
@@ -655,6 +722,7 @@ def export_ranking_files(
                     score.balance_sheet_score,
                     score.ranking_model,
                     score.rank_eligible,
+                    score.ranking_section,
                     ";".join(score.eligibility_reasons),
                     score.readiness_status,
                     ";".join(score.readiness_blockers),

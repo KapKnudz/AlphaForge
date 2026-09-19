@@ -25,11 +25,18 @@ class CompanyScore:
     candidate_reason: str | None = None
     ranking_model: RankingModel = RankingModel.GENERAL
     rank_eligible: bool = True
+    # Ineligible scores are diagnostic only.  They are kept in an explicit
+    # section so a missing-data 0.0 can never look like an economic rank.
+    ranking_section: str = "ranked"
     eligibility_reasons: list[str] = field(default_factory=list)
     readiness_status: str | None = None
     readiness_blockers: list[str] = field(default_factory=list)
     readiness_limitations: list[str] = field(default_factory=list)
     scoring_audit: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.rank_eligible and self.ranking_section == "ranked":
+            self.ranking_section = "unranked_missing_data"
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +56,7 @@ class CompanyScore:
             "candidate_reason": self.candidate_reason,
             "ranking_model": self.ranking_model,
             "rank_eligible": self.rank_eligible,
+            "ranking_section": self.ranking_section,
             "eligibility_reasons": self.eligibility_reasons,
             "readiness_status": self.readiness_status,
             "readiness_blockers": self.readiness_blockers,
