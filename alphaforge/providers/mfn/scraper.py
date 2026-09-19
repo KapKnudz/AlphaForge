@@ -119,14 +119,18 @@ class _MfnHtmlParser(HTMLParser):
         self.links: list[tuple[str, str]] = []
         self.h1_parts: list[str] = []
         self.body_parts: list[str] = []
+        self.release_body_parts: list[str] = []
+        self.release_body_seen = False
         self.timestamps: list[str] = []
+        self.generic_timestamps: list[str] = []
         self.json_published_timestamps: list[str] = []
         self.json_created_timestamps: list[str] = []
         self.json_parts: list[str] = []
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
         self._h1_active = False
-        self._body_depth = 0
+        self._article_depth = 0
+        self._release_body_depth = 0
         self._time_active = False
         self._time_parts: list[str] = []
         self._json_active = False
@@ -144,10 +148,15 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "h1":
             self._h1_active = True
         classes = values.get("class", "").lower().split()
-        if lower_tag == "article" or "release-body" in classes:
-            self._body_depth = max(self._body_depth, 1)
-        elif self._body_depth and lower_tag not in _HTML_VOID_TAGS:
-            self._body_depth += 1
+        if lower_tag == "article":
+            self._article_depth = max(self._article_depth, 1)
+        elif self._article_depth and lower_tag not in _HTML_VOID_TAGS:
+            self._article_depth += 1
+        if "release-body" in classes:
+            self.release_body_seen = True
+            self._release_body_depth = max(self._release_body_depth, 1)
+        elif self._release_body_depth and lower_tag not in _HTML_VOID_TAGS:
+            self._release_body_depth += 1
         if lower_tag == "time":
             self._time_active = True
             self._time_parts = []
@@ -177,23 +186,28 @@ class _MfnHtmlParser(HTMLParser):
             self._h1_active = False
         if lower_tag == "time":
             if self._time_parts:
-                self.timestamps.append(" ".join(self._time_parts))
+                self.generic_timestamps.append(" ".join(self._time_parts))
             self._time_active = False
             self._time_parts = []
         if lower_tag == "script" and self._json_active:
             self._json_active = False
             self._extract_json_dates("".join(self.json_parts))
             self.json_parts = []
-        if self._body_depth and lower_tag not in _HTML_VOID_TAGS:
-            self._body_depth -= 1
+        if lower_tag not in _HTML_VOID_TAGS:
+            if self._article_depth:
+                self._article_depth -= 1
+            if self._release_body_depth:
+                self._release_body_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._anchor_href is not None:
             self._anchor_parts.append(data)
         if self._h1_active:
             self.h1_parts.append(data)
-        if self._body_depth:
+        if self._article_depth:
             self.body_parts.append(data)
+        if self._release_body_depth:
+            self.release_body_parts.append(data)
         if self._time_active:
             self._time_parts.append(data)
         if self._json_active:
@@ -252,7 +266,8 @@ def _parse_html(html: str) -> dict[str, Any]:
         else None
     )
     title = " ".join(" ".join(parser.h1_parts).split())
-    body = " ".join(" ".join(parser.body_parts).split())
+    body_parts = parser.release_body_parts if parser.release_body_seen else parser.body_parts
+    body = " ".join(" ".join(body_parts).split())
     published_at = next(
         (normalised for raw in parser.timestamps if (normalised := _normalise_timestamp(raw))),
         None,
@@ -262,6 +277,15 @@ def _parse_html(html: str) -> dict[str, Any]:
             (
                 normalised
                 for raw in parser.json_published_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.generic_timestamps
                 if (normalised := _normalise_timestamp(raw))
             ),
             None,

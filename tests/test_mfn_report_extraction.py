@@ -49,7 +49,11 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
       <head><meta property="article:published_time" content="2026-05-07T06:30:00+02:00"></head>
       <body>
         <h1>Acme Year-End Report 2025</h1>
-        <article class="release-body"><p>Revenue grew.<br>Cash was stable.</p></article>
+        <article>
+          <header>Wrapper navigation should not be evidence.</header>
+          <div class="release-body"><p>Revenue grew.<br>Cash was stable.</p></div>
+          <aside>Aside navigation should not be evidence.</aside>
+        </article>
         <footer>Navigation should not be evidence.</footer>
         <a href="https://storage.mfn.se/uuid/id1.pdf">Presentation</a>
         <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
@@ -67,12 +71,13 @@ def test_scrape_details_extracts_timestamp_body_and_pdf():
     assert articles[0]["published_at"] == "2026-05-07T04:30:00Z"
     assert articles[0]["storage_url"].endswith("id2.pdf")
     assert articles[0]["content_text"] == "Revenue grew. Cash was stable."
-    assert "Navigation should not be evidence." not in articles[0]["content_text"]
+    assert "navigation" not in articles[0]["content_text"].lower()
 
 
 def test_scrape_details_prefers_published_json_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
+    <time class="updated">1 May 2026</time>
     <script type="application/ld+json">
       {"@graph": [
         {"@type": "WebPage", "dateCreated": "2026-05-01T08:00:00Z"},
