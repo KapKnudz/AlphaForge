@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -187,7 +188,7 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
         assert sum(row["duplicate_of"] is not None for row in rows) == 1
         assert sum(row["duplicate_of"] is None for row in rows) == 1
         assert rows[0]["checksum"] == rows[1]["checksum"] == "identical-pdf"
-        assert "bilingual_group_id" in rows[0]["raw_metadata"]
+        assert "bilingual_group_id" in json.loads(rows[0]["raw_metadata"])
     finally:
         conn.close()
 
@@ -202,7 +203,7 @@ def test_pypdf_extraction_keeps_all_page_anchors():
     writer.write(stream)
     result = ResearchDocumentIngestionService(None).extract_pdf_pages(stream.getvalue())
     assert result.page_count == 51
-    assert result.pages_included == "0-50"
+    assert result.pages_included == "1-51"
     assert result.page_truncated == 0
     assert result.scanned is True
     assert len(result.pages) == 51

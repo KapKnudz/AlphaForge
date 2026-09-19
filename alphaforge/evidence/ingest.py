@@ -347,7 +347,7 @@ class ResearchDocumentIngestionService:
             return PdfExtraction(
                 text=anchored,
                 page_count=page_count,
-                pages_included=f"0-{page_count - 1}" if page_count else "",
+                pages_included=f"1-{page_count}" if page_count else "",
                 page_truncated=0,
                 scanned=scanned,
                 pages=tuple(pages),
