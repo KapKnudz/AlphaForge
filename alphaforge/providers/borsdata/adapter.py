@@ -72,6 +72,22 @@ class BorsdataAdapter:
             raise BorsdataContractError(f"{endpoint}: {field} contains non-object rows")
         return rows
 
+    @staticmethod
+    def _report_rows(rows: Any, *, endpoint: str, field: str) -> list[dict[str, Any]]:
+        rows = BorsdataAdapter._object_rows(rows, endpoint=endpoint, field=field)
+        period_fields = (
+            "period_End",
+            "report_End_Date",
+            "period_end",
+            "periodEnd",
+            "report_Date",
+            "reportDate",
+            "date",
+        )
+        if any(not any(row.get(key) for key in period_fields) for row in rows):
+            raise BorsdataContractError(f"{endpoint}: {field} contains a row without a period end")
+        return rows
+
     def _unwrap_list(self, data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         if data is None:
             return []
@@ -173,11 +189,11 @@ class BorsdataAdapter:
     def _flatten_report_envelope(data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         """Flatten live ``reportList`` period arrays into canonical report rows."""
         if isinstance(data, list):
-            return BorsdataAdapter._object_rows(data, endpoint=endpoint, field="response")
+            return BorsdataAdapter._report_rows(data, endpoint=endpoint, field="response")
         if not isinstance(data, dict) or "reportList" not in data:
             # Older responses use a direct reports array.
             if isinstance(data, dict) and "reports" in data:
-                return BorsdataAdapter._object_rows(data["reports"], endpoint=endpoint, field="reports")
+                return BorsdataAdapter._report_rows(data["reports"], endpoint=endpoint, field="reports")
             raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
         flattened: list[dict[str, Any]] = []
         report_lists = data["reportList"]
@@ -191,7 +207,7 @@ class BorsdataAdapter:
                 rows = instrument.get(key, [])
                 if isinstance(rows, dict):
                     rows = [rows]
-                rows = BorsdataAdapter._object_rows(rows, endpoint=endpoint, field=key)
+                rows = BorsdataAdapter._report_rows(rows, endpoint=endpoint, field=key)
                 for row in rows:
                     item = dict(row)
                     item.setdefault("period_type", period_type)

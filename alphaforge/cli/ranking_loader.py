@@ -158,7 +158,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "current_price": latest_price.close,
         "current_revenue": current_report.revenue,
         "current_shares": current_report.shares_outstanding,
-        "current_net_debt": current_report.total_debt,
+        "current_net_debt": (
+            current_report.total_debt - current_report.cash
+            if current_report.total_debt is not None and current_report.cash is not None
+            else None
+        ),
         "price_currency": latest_price.currency,
         "financial_currency": current_report.currency or stock_currency,
     }
