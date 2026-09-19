@@ -64,13 +64,19 @@ class BorsdataAdapter:
             }
         return value
 
+    @staticmethod
+    def _object_rows(rows: Any, *, endpoint: str, field: str) -> list[dict[str, Any]]:
+        if not isinstance(rows, list):
+            raise BorsdataContractError(f"{endpoint}: {field} is not an array")
+        if not all(isinstance(item, dict) for item in rows):
+            raise BorsdataContractError(f"{endpoint}: {field} contains non-object rows")
+        return rows
+
     def _unwrap_list(self, data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         if data is None:
             return []
         if isinstance(data, list):
-            if not all(isinstance(item, dict) for item in data):
-                raise BorsdataContractError(f"{endpoint}: list response contains non-object rows")
-            return data
+            return self._object_rows(data, endpoint=endpoint, field="response")
         if isinstance(data, dict):
             # Börsdata has used several envelope names for the same resource.
             # A 200 object with none of these is a contract failure, not empty
@@ -83,8 +89,8 @@ class BorsdataAdapter:
                 "reportMetadatas", "values",
             )
             for key in keys:
-                if key in data and isinstance(data[key], list):
-                    return [item for item in data[key] if isinstance(item, dict)]
+                if key in data:
+                    return self._object_rows(data[key], endpoint=endpoint, field=key)
             if "instrument" in data:
                 return [data]
         raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
@@ -167,38 +173,35 @@ class BorsdataAdapter:
     def _flatten_report_envelope(data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         """Flatten live ``reportList`` period arrays into canonical report rows."""
         if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
+            return BorsdataAdapter._object_rows(data, endpoint=endpoint, field="response")
         if not isinstance(data, dict) or "reportList" not in data:
             # Older responses use a direct reports array.
-            if isinstance(data, dict) and isinstance(data.get("reports"), list):
-                return [row for row in data["reports"] if isinstance(row, dict)]
+            if isinstance(data, dict) and "reports" in data:
+                return BorsdataAdapter._object_rows(data["reports"], endpoint=endpoint, field="reports")
             raise BorsdataContractError(f"{endpoint}: unrecognized 200 response shape")
         flattened: list[dict[str, Any]] = []
         report_lists = data["reportList"]
         if isinstance(report_lists, dict):
             report_lists = [report_lists]
-        if not isinstance(report_lists, list):
-            raise BorsdataContractError(f"{endpoint}: reportList is not an array")
+        report_lists = BorsdataAdapter._object_rows(
+            report_lists, endpoint=endpoint, field="reportList"
+        )
         for instrument in report_lists:
-            if not isinstance(instrument, dict):
-                continue
             for key, period_type in (("reportsYear", "year"), ("reportsQuarter", "quarter"), ("reportsR12", "r12")):
                 rows = instrument.get(key, [])
                 if isinstance(rows, dict):
                     rows = [rows]
-                if not isinstance(rows, list):
-                    raise BorsdataContractError(f"{endpoint}: {key} is not an array")
+                rows = BorsdataAdapter._object_rows(rows, endpoint=endpoint, field=key)
                 for row in rows:
-                    if isinstance(row, dict):
-                        item = dict(row)
-                        item.setdefault("period_type", period_type)
-                        item.setdefault(
-                            "insId",
-                            instrument.get("insId")
-                            or instrument.get("instrumentId")
-                            or instrument.get("instrument"),
-                        )
-                        flattened.append(item)
+                    item = dict(row)
+                    item.setdefault("period_type", period_type)
+                    item.setdefault(
+                        "insId",
+                        instrument.get("insId")
+                        or instrument.get("instrumentId")
+                        or instrument.get("instrument"),
+                    )
+                    flattened.append(item)
         return flattened
 
     # ---- reports (batch ≤50, original=0) ----

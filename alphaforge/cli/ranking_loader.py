@@ -139,10 +139,13 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         """
         SELECT kpi_id, value FROM kpi_observations
         WHERE company_id=? AND value IS NOT NULL
-          AND (observation_date IS NULL OR observation_date <= ?)
+          AND (
+              (observation_date IS NOT NULL AND observation_date <= ?)
+              OR (observation_date IS NULL AND year < ?)
+          )
         ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC
         """,
-        (company_id, cutoff.isoformat()),
+        (company_id, cutoff.isoformat(), cutoff.year),
     ).fetchall():
         kpis[int(row[0])] = float(row[1])
 

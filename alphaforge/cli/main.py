@@ -311,8 +311,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
             # translationmetadata rows contain branch/sector translations; upsert if needed
             for _r in trows:
                 pass
-        except Exception:
-            pass
+        except Exception as exc:
+            sync_failed = True
+            print(f"translation metadata sync failed: {exc}", file=sys.stderr)
         # kpi/report metadata caches
         try:
             kpis_meta = adapter.get_kpi_metadata()
@@ -339,10 +340,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     ),
                 )
             conn.commit()
-        except Exception:
-            pass
+        except Exception as exc:
+            sync_failed = True
+            print(f"metadata cache sync failed: {exc}", file=sys.stderr)
     except Exception as e:
-        print(f"reference dictionaries sync failed (non-fatal): {e}", file=sys.stderr)
+        sync_failed = True
+        print(f"reference dictionaries sync failed: {e}", file=sys.stderr)
 
     # Per-company sync with failure isolation — each company wrapped individually
     # Reports (batch 50 inside adapter)
