@@ -2,5 +2,5 @@
   "kpi_history": {"kpiHistoryMetadatas": [{"KpiId": 2, "year": 2024, "v": 12.5}]},
   "report_metadata": {"reportMetadatas": [{"Property": "revenues", "NameSv": "Omsättning", "NameEn": "Revenue"}]},
   "stock_splits": {"stockSplitList": [{"InsId": 101, "SplitDate": "2025-04-01", "SplitType": "S", "Ratio": "2:1"}]},
-  "plain_list": [{"KpiId": 2, "V": 12.5}]
+  "plain_list": [{"Date": "2025-01-01", "C": 12.5}]
 }

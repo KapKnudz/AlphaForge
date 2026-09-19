@@ -88,6 +88,19 @@ class BorsdataAdapter:
             raise BorsdataContractError(f"{endpoint}: {field} contains a row without a period end")
         return rows
 
+    @staticmethod
+    def _price_rows(rows: Any, *, endpoint: str, field: str) -> list[dict[str, Any]]:
+        rows = BorsdataAdapter._object_rows(rows, endpoint=endpoint, field=field)
+        date_fields = ("price_Date", "price_date", "d", "date")
+        close_fields = ("close", "c", "price")
+        if any(
+            not any(row.get(key) is not None for key in date_fields)
+            or not any(row.get(key) is not None for key in close_fields)
+            for row in rows
+        ):
+            raise BorsdataContractError(f"{endpoint}: {field} contains an incomplete price row")
+        return rows
+
     def _unwrap_list(self, data: Any, *, endpoint: str) -> list[dict[str, Any]]:
         if data is None:
             return []
@@ -259,17 +272,18 @@ class BorsdataAdapter:
         # Do NOT send maxCount; fetch full.
         data = self._get_json(f"/v1/instruments/{ins_id}/stockprices", params=params or None)
         rows: list[dict[str, Any]] = []
+        endpoint = f"/v1/instruments/{ins_id}/stockprices"
         if isinstance(data, dict):
-            if "stockPricesList" in data and isinstance(data["stockPricesList"], list):
-                rows = data["stockPricesList"]
-            elif "stockPrices" in data and isinstance(data["stockPrices"], list):
-                rows = data["stockPrices"]
-            elif isinstance(data, list):
-                rows = data  # type: ignore[assignment]
+            if "stockPricesList" in data:
+                rows = self._price_rows(data["stockPricesList"], endpoint=endpoint, field="stockPricesList")
+            elif "stockPrices" in data:
+                rows = self._price_rows(data["stockPrices"], endpoint=endpoint, field="stockPrices")
+            else:
+                rows = self._unwrap_list(data, endpoint=endpoint)
         elif isinstance(data, list):
-            rows = data
+            rows = self._price_rows(data, endpoint=endpoint, field="response")
         else:
-            rows = self._unwrap_list(data, endpoint=f"/v1/instruments/{ins_id}/stockprices")
+            rows = self._unwrap_list(data, endpoint=endpoint)
         # Sort by date (n ascending = oldest first as per API), then slice tail if requested
         # Börsdata returns 10y default sorted asc; we keep order and slice locally.
         if max_count is not None and len(rows) > max_count:

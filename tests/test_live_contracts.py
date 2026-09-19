@@ -39,7 +39,7 @@ def test_live_envelopes_and_pascal_casing_are_recognized():
         assert adapter.get_kpi_history(101, 2, "year", "mean")[0]["kpiId"] == 2
         assert adapter.get_report_metadata()[0]["property"] == "revenues"
         assert adapter.get_stock_splits()[0]["insId"] == 101
-        assert adapter.get_stock_prices(101) == [{"kpiId": 2, "v": 12.5}]
+        assert adapter.get_stock_prices(101) == [{"date": "2025-01-01", "c": 12.5}]
 
 
 def test_unrecognized_200_shape_is_explicit_error():
@@ -47,6 +47,17 @@ def test_unrecognized_200_shape_is_explicit_error():
     with patch.object(adapter, "_get_json", return_value={"unexpected": {"rows": []}}):
         with pytest.raises(BorsdataContractError):
             adapter.get_instruments()
+
+
+def test_stock_price_envelope_rejects_malformed_rows():
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(
+        adapter,
+        "_get_json",
+        return_value={"stockPricesList": [{"date": "2025-01-01"}]},
+    ):
+        with pytest.raises(BorsdataContractError):
+            adapter.get_stock_prices(101)
 
 
 def test_watchlist_rows_relink_without_replacing_source_row():
