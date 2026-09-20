@@ -76,7 +76,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
-        conn.commit()
+    _ensure_schema_extensions(conn)
+    conn.commit()
 
 
 def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
