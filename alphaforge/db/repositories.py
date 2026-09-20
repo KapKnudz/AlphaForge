@@ -1226,7 +1226,6 @@ def append_jev_shadow_audit(conn: Any, audit: dict[str, Any]) -> int:
             str(audit.get("action") or "shadow_only"),
         ),
     )
-    conn.commit()
     return int(getattr(cursor, "lastrowid", 0) or 0)
 
 

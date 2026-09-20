@@ -478,6 +478,7 @@ class JevShadowSidecar:
     ) -> None:
         self.config = config or JevShadowConfig.from_env()
         self.client = client
+        self._owns_client = False
         self.client_factory = client_factory
         self.audit_sink = audit_sink
         self.conn = conn
@@ -563,6 +564,7 @@ class JevShadowSidecar:
             return None
         if self.client_factory is not None:
             self.client = self.client_factory(self.config)
+            self._owns_client = True
             return self.client
         try:
             from typesafe_sdk import RetryPolicy, TypeSafeClient
@@ -585,7 +587,21 @@ class JevShadowSidecar:
             retry=retry,
             timeout=self.config.timeout_seconds,
         )
+        self._owns_client = True
         return self.client
+
+    def close(self) -> None:
+        if not self._owns_client or self.client is None:
+            return
+        client = self.client
+        self.client = None
+        self._owns_client = False
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
     def _classify(
         self,
@@ -694,6 +710,8 @@ class JevShadowSidecar:
             active_budget.record_usage(input_tokens)
             if returned_model != self.config.model_version:
                 raise _JevResponseError("model_version_mismatch")
+            if active_budget.input_tokens > active_budget.max_input_tokens:
+                raise _JevResponseError("token_budget_exceeded")
             if input_tokens is not None and input_tokens > self.config.max_input_tokens:
                 raise _JevResponseError("token_budget_exceeded")
             if active_budget.cost_usd > self.config.max_cost_usd:
@@ -790,6 +808,8 @@ class JevShadowSidecar:
                 error_code=error_code,
                 audit=audit,
             )
+        finally:
+            self.close()
 
     def _finish(
         self,
@@ -890,7 +910,10 @@ class JevShadowSidecar:
                 # The signal must never affect deterministic application output.
                 safe_audit["audit_persist_error"] = "audit_persist_failed"
         if self.audit_sink is not None:
-            self.audit_sink(_json_copy(safe_audit))
+            try:
+                self.audit_sink(_json_copy(safe_audit))
+            except Exception:
+                safe_audit["audit_sink_error"] = "audit_sink_failed"
         return safe_audit
 
 
