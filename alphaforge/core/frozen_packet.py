@@ -26,22 +26,70 @@ def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
     without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
     if canonical_packet_hash(without_hash) != packet_hash:
         return False
-    sources = packet.get("sources")
-    if not isinstance(sources, list) or not sources:
+    if packet.get("schema_version") != "evidence-packet-v1":
         return False
+    if not isinstance(packet.get("company_id"), int) or isinstance(packet.get("company_id"), bool):
+        return False
+    if not isinstance(packet.get("as_of"), str) or not packet["as_of"]:
+        return False
+    sources = packet.get("sources")
+    catalog = packet.get("evidence_catalog")
+    catalog_ids = catalog.get("canonical_source_ids") if isinstance(catalog, dict) else None
+    if not isinstance(sources, list) or not sources or not isinstance(catalog_ids, list):
+        return False
+    source_ids: list[str] = []
     for source in sources:
         if not isinstance(source, dict):
             return False
-        if not source.get("source_id") or not source.get("publication_date"):
+        source_id = source.get("source_id")
+        if not isinstance(source_id, str) or not source_id:
+            return False
+        if source_id in source_ids:
+            return False
+        source_ids.append(source_id)
+        if not isinstance(source.get("source_url"), str) or not source["source_url"]:
+            return False
+        if not isinstance(source.get("publication_date"), str) or not source["publication_date"]:
+            return False
+        if not isinstance(source.get("ingestion_date"), str) or not source["ingestion_date"]:
             return False
         if source.get("publication_timestamp_authoritative") is not True:
             return False
         attachment = source.get("attachment")
+        extraction = source.get("extraction")
         pages = source.get("pages")
-        if not isinstance(attachment, dict) or not attachment.get("sha256"):
+        if (
+            not isinstance(attachment, dict)
+            or not isinstance(attachment.get("source_url"), str)
+            or not attachment["source_url"]
+            or not isinstance(attachment.get("sha256"), str)
+            or not attachment["sha256"]
+        ):
+            return False
+        if (
+            not isinstance(extraction, dict)
+            or not isinstance(extraction.get("extractor"), str)
+            or not extraction["extractor"]
+            or not isinstance(extraction.get("text_checksum"), str)
+            or not extraction["text_checksum"]
+            or not isinstance(extraction.get("page_count"), int)
+            or isinstance(extraction["page_count"], bool)
+            or extraction["page_count"] < 1
+        ):
             return False
         if not isinstance(pages, list) or not pages:
             return False
-        if any(not isinstance(page, dict) or not page.get("anchor") for page in pages):
-            return False
-    return True
+        for page in pages:
+            if not isinstance(page, dict):
+                return False
+            if not isinstance(page.get("page_number"), int) or isinstance(page["page_number"], bool):
+                return False
+            if page["page_number"] < 1:
+                return False
+            if not isinstance(page.get("anchor"), str) or not page["anchor"]:
+                return False
+            if not isinstance(page.get("text"), str):
+                return False
+            if not isinstance(page.get("text_checksum"), str) or not page["text_checksum"]:
+                return False
+    return set(catalog_ids) == set(source_ids) and len(catalog_ids) == len(source_ids)

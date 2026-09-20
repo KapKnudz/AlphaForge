@@ -68,51 +68,81 @@ def canonical_release_url(url: str) -> str:
     return f"{parsed.netloc}{path}"
 
 
-def _bilingual_group_key(doc: dict[str, Any]) -> str:
-    event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
-    if event_id:
-        return f"event:{event_id}"
+def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     issuer = str(doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id") or "").lower()
     kind = str(doc.get("report_kind") or "").lower()
     period = _fiscal_period(doc)
+    published = str(doc.get("published_at") or "")[:10]
+    keys: set[str] = set()
+    event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
+    if event_id:
+        keys.add(f"event:{event_id}")
     attachment_checksum = (
         doc.get("pdf_checksum") or doc.get("attachment_checksum") or doc.get("document_checksum")
     )
     if attachment_checksum:
-        return f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}"
+        keys.add(f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}")
     body = doc.get("content_text") or doc.get("body")
     if body:
         normalized_body = " ".join(str(body).split()).casefold()
         body_checksum = hashlib.sha256(normalized_body.encode()).hexdigest()
-        return f"body:{issuer}|{kind}|{period}|{body_checksum}"
+        keys.add(f"body:{issuer}|{kind}|{period}|{body_checksum}")
     filename = _attachment_filename(doc)
     if filename and (issuer or period):
-        return f"attachment:{issuer}|{kind}|{period}|{filename}"
+        keys.add(f"attachment:{issuer}|{kind}|{period}|{filename}")
     canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
-    published = str(doc.get("published_at") or "")[:10]
     if canonical:
-        return f"url:{issuer}|{canonical}|{published}"
-    title = re.sub(
-        r"\b(inbjudan|invitation to|publicerar|has published)\b",
-        "",
-        str(doc.get("title") or ""),
-        flags=re.IGNORECASE,
-    )
-    title_key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    return f"title:{issuer}|{kind}|{period}|{title_key}"
+        keys.add(f"url:{issuer}|{canonical}|{published}")
+    if (issuer or period) and (kind or period):
+        keys.add(f"report:{issuer}|{kind}|{period}")
+    elif (issuer or period) and published:
+        keys.add(f"report:{issuer}|{kind}|{published}")
+    if not keys:
+        title = re.sub(
+            r"\b(inbjudan|invitation to|publicerar|has published)\b",
+            "",
+            str(doc.get("title") or ""),
+            flags=re.IGNORECASE,
+        )
+        title_key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        keys.add(f"title:{issuer}|{kind}|{period}|{title_key}")
+    return keys
 
 
 def bilingual_dedupe(
     docs: list[dict[str, Any]], *, packet_majority: str | None = None
 ) -> list[dict[str, Any]]:
     """Select one report edition while retaining suppressed provenance."""
-    from collections import defaultdict
+    groups: list[list[dict[str, Any]]] = []
+    key_groups: dict[str, int] = {}
+    parents: list[int] = []
 
-    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    def find(group_index: int) -> int:
+        while parents[group_index] != group_index:
+            parents[group_index] = parents[parents[group_index]]
+            group_index = parents[group_index]
+        return group_index
+
     for doc in docs:
-        group_key = _bilingual_group_key(doc)
-        doc["_bilingual_group_id"] = hashlib.sha256(group_key.encode()).hexdigest()[:24]
-        groups[group_key].append(doc)
+        keys = _bilingual_identity_keys(doc)
+        owners = {find(key_groups[key]) for key in keys if key in key_groups}
+        if not owners:
+            group_index = len(groups)
+            groups.append([])
+            parents.append(group_index)
+        else:
+            group_index = min(owners)
+            for owner in owners:
+                owner = find(owner)
+                if owner == group_index:
+                    continue
+                parents[owner] = group_index
+                groups[group_index].extend(groups[owner])
+                groups[owner] = []
+            group_index = find(group_index)
+        groups[group_index].append(doc)
+        for key in keys:
+            key_groups[key] = group_index
 
     preferred_language = packet_majority if packet_majority in {"sv", "en"} else "en"
     selection_rule = (
@@ -121,7 +151,13 @@ def bilingual_dedupe(
         else "deterministic_en_fallback"
     )
     out: list[dict[str, Any]] = []
-    for variants in groups.values():
+    for variants in groups:
+        if not variants:
+            continue
+        group_keys = sorted({key for variant in variants for key in _bilingual_identity_keys(variant)})
+        group_id = hashlib.sha256(group_keys[0].encode()).hexdigest()[:24]
+        for variant in variants:
+            variant["_bilingual_group_id"] = group_id
         variants_sorted = sorted(
             variants,
             key=lambda value: (

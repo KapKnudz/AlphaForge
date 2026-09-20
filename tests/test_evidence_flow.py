@@ -409,16 +409,37 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
     candidate = SimpleNamespace(**base)
     assert gate.assess(candidate).status == "evidence_blocked"
     packet = {
+        "schema_version": "evidence-packet-v1",
         "frozen": True,
+        "company_id": 1,
+        "as_of": "2026-05-01",
         "sources": [
             {
                 "source_id": "document:1",
+                "source_url": "https://mfn.test/report/1",
                 "publication_date": "2026-05-01T00:00:00Z",
                 "publication_timestamp_authoritative": True,
-                "attachment": {"sha256": "abc"},
-                "pages": [{"anchor": "document:1#page:1"}],
+                "ingestion_date": "2026-05-02T00:00:00Z",
+                "attachment": {
+                    "source_url": "https://storage.mfn.test/report/1.pdf",
+                    "sha256": "abc",
+                },
+                "extraction": {
+                    "extractor": "pypdf",
+                    "text_checksum": "def",
+                    "page_count": 1,
+                },
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "anchor": "document:1#page:1",
+                        "text": "Evidence",
+                        "text_checksum": "ghi",
+                    }
+                ],
             }
         ],
+        "evidence_catalog": {"canonical_source_ids": ["document:1"]},
         "limitations": [],
     }
     packet["packet_hash"] = __import__("hashlib").sha256(

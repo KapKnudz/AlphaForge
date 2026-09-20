@@ -934,6 +934,7 @@ def persist_evidence_document(
                 page_count=excluded.page_count,
                 pages_included=excluded.pages_included,
                 page_truncated=excluded.page_truncated,
+                duplicate_of=NULL,
                 ingested_lang=excluded.ingested_lang,
                 checksum=excluded.checksum,
                 raw_metadata=excluded.raw_metadata

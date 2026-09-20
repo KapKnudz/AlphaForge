@@ -128,6 +128,7 @@ def build_frozen_evidence_packet(
     company_id: int,
     as_of: str,
     mapping: dict[str, Any] | None = None,
+    additional_limitations: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
@@ -269,7 +270,7 @@ def build_frozen_evidence_packet(
         "evidence_catalog": {
             "canonical_source_ids": [source["source_id"] for source in sources]
         },
-        "limitations": sorted(limitations),
+        "limitations": sorted(limitations | set(additional_limitations or [])),
     }
     base["packet_hash"] = canonical_packet_hash(base)
     return base
@@ -493,11 +494,17 @@ class OneCompanyEvidenceFlow:
                 suppressed_variants=article.get("_suppressed_variants", []),
             )
             result.downloaded += 1
+        packet_limitations = [
+            f"evidence_flow_{code}:{count}"
+            for code, count in sorted(result.skipped.items())
+            if code not in {"non_report_release", "future_dated_release"}
+        ]
         packet = build_frozen_evidence_packet(
             self.conn,
             company_id=company_id,
             as_of=as_of,
             mapping=mapping,
+            additional_limitations=packet_limitations,
         )
         if not validate_frozen_packet(packet):
             return EvidenceFlowResult(
