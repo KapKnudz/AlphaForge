@@ -132,9 +132,22 @@ def bilingual_dedupe(
             group_index = parents[group_index]
         return group_index
 
+    def strong_keys(keys: set[str]) -> set[str]:
+        return {
+            key for key in keys if not key.startswith("attachment:") and not key.startswith("title:")
+        }
+
     for doc in docs:
         keys = _bilingual_identity_keys(doc)
-        owners = {find(key_groups[key]) for key in keys if key in key_groups}
+        strong = strong_keys(keys)
+        owners = {find(key_groups[key]) for key in strong if key in key_groups}
+        if not owners and not strong:
+            weak_owners = {find(key_groups[key]) for key in keys if key in key_groups}
+            owners = {
+                owner
+                for owner in weak_owners
+                if not any(strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner])
+            }
         if not owners:
             group_index = len(groups)
             groups.append([])

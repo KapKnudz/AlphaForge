@@ -963,9 +963,12 @@ def persist_evidence_document(
         "fiscal_period",
         "observation_date",
         "lang_confidence",
+        "_bilingual_group_id",
     ):
         if article.get(key) is not None:
             metadata[key] = article[key]
+    if article.get("_bilingual_group_id") is not None:
+        metadata["bilingual_group_id"] = article["_bilingual_group_id"]
     metadata["authoritative_publication_timestamp"] = True
     metadata["attachment_sha256"] = checksum
     metadata["bilingual_selection_rule"] = article.get(
@@ -1102,6 +1105,8 @@ def persist_evidence_document(
                 continue
             sibling_meta = dict(sibling.get("raw_metadata") or {})
             sibling_meta["duplicate_of_source_url"] = source_url
+            if sibling.get("_bilingual_group_id") is not None:
+                sibling_meta["bilingual_group_id"] = sibling["_bilingual_group_id"]
             sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
             sibling_checksum = sibling.get("pdf_checksum") or sibling.get("attachment_checksum")
             conn.execute(
