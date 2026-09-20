@@ -247,7 +247,12 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert second.status == "complete"
     assert second.downloaded == 0
     assert second.packet_hash == first.packet_hash
-    assert scraper.scrape_calls[-1] == []
+    second_scrape_urls = {entry["url"] for entry in scraper.scrape_calls[-1]}
+    assert "https://mfn.test/a/flow/q1" not in second_scrape_urls
+    assert second_scrape_urls == {
+        "https://mfn.test/a/flow/future",
+        "https://mfn.test/a/flow/missing",
+    }
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
 
 

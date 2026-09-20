@@ -786,10 +786,12 @@ def find_complete_evidence_document(
         SELECT d.* FROM research_documents d
         WHERE d.company_id=? AND d.source_url=?
           AND EXISTS (
-              SELECT 1 FROM research_attachments a WHERE a.document_id=d.id
+              SELECT 1 FROM research_attachments a
+              WHERE a.document_id=COALESCE(d.duplicate_of, d.id)
           )
           AND EXISTS (
-              SELECT 1 FROM document_extractions e WHERE e.document_id=d.id
+              SELECT 1 FROM document_extractions e
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
           )
         """,
         (company_id, source_url),
