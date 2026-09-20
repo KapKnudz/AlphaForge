@@ -984,7 +984,22 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         max_retries=args.max_retries,
     )
     flow = OneCompanyEvidenceFlow(conn, limits=limits)
-    result = flow.run(company_id, as_of=args.as_of, dry_run=args.dry_run)
+    shadow_citation = None
+    if args.shadow_source_id and args.shadow_anchor and args.shadow_excerpt:
+        shadow_citation = {
+            "source_id": args.shadow_source_id,
+            "anchor": args.shadow_anchor,
+            "excerpt": args.shadow_excerpt,
+        }
+    result = flow.run(
+        company_id,
+        as_of=args.as_of,
+        dry_run=args.dry_run,
+        shadow_citation=shadow_citation,
+        shadow_claim=args.shadow_claim,
+        shadow_missing_item=args.shadow_missing_item,
+        shadow_specialist_requirement=args.shadow_specialist_requirement,
+    )
     output = result.diagnostic()
     if args.diagnostic and result.packet is not None:
         output["sources"] = len(result.packet.get("sources", []))
@@ -1072,6 +1087,12 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--max-pdf-bytes", type=int, default=25 * 1024 * 1024)
     evidence.add_argument("--max-pages", type=int, default=50)
     evidence.add_argument("--max-retries", type=int, default=3)
+    evidence.add_argument("--shadow-source-id", default=None)
+    evidence.add_argument("--shadow-anchor", default=None)
+    evidence.add_argument("--shadow-excerpt", default=None)
+    evidence.add_argument("--shadow-claim", default=None)
+    evidence.add_argument("--shadow-missing-item", default=None)
+    evidence.add_argument("--shadow-specialist-requirement", default=None)
     evidence.set_defaults(func=cmd_evidence)
 
     return p

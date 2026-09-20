@@ -209,12 +209,6 @@ def _packet_error(packet: Any) -> tuple[dict[str, Any] | None, str | None]:
     return _json_copy(packet), None
 
 
-def _packet_context(packet: dict[str, Any], packet_hash: str) -> dict[str, Any]:
-    # Sending the frozen packet itself makes the model input content-addressed;
-    # the hash is repeated explicitly so a captured request is auditable.
-    return {"packet_hash": packet_hash, "packet": _json_copy(packet)}
-
-
 def _source_for(packet: dict[str, Any], source_id: str) -> tuple[dict[str, Any] | None, str | None]:
     catalog = packet.get("evidence_catalog")
     catalog_ids = catalog.get("canonical_source_ids") if isinstance(catalog, dict) else None
@@ -325,11 +319,10 @@ def _citation_precheck(
     }, None
 
 
-def _coverage_facts(packet: dict[str, Any]) -> tuple[Any, str | None, str | None]:
-    for key in ("coverage_facts", "coverage", "evidence_coverage"):
-        value = packet.get(key)
-        if isinstance(value, (dict, list)):
-            return _json_copy(value), _sha256_json(value), None
+def _coverage_facts(packet: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    value = packet.get("coverage_facts")
+    if isinstance(value, dict):
+        return _json_copy(value), _sha256_json(value), None
     return None, None, "coverage_facts_missing"
 
 
@@ -366,12 +359,11 @@ def _choice_question(feature: FeatureName) -> tuple[str, Any, tuple[str, ...], s
             "question_version": question_version,
             "question": (
                 "Classify the relation between the claim and the cited excerpt using only "
-                "the supplied source context. Select insufficient_context when the excerpt "
-                "does not contain enough context for a reliable relation."
+                "the supplied excerpt. Select insufficient_context when the excerpt does not "
+                "contain enough context for a reliable relation."
             ),
             "claim_field": "`claim`",
             "excerpt_field": "`citation.excerpt`",
-            "source_context_field": "`citation.source_context`",
         }
         criteria = {
             "supports": "The cited source context supports the claim.",
@@ -504,13 +496,12 @@ class JevShadowSidecar:
             identity={"source_id": citation.get("source_id"), "anchor": citation.get("anchor")},
             precheck=lambda frozen: _citation_precheck(frozen, citation, claim),
             state_builder=lambda frozen, checked: {
-                **_packet_context(frozen, frozen["packet_hash"]),
+                "packet_hash": frozen["packet_hash"],
                 "claim": claim,
                 "citation": {
                     "source_id": checked["source_id"],
                     "anchor": checked["anchor"],
                     "excerpt": checked["excerpt"],
-                    "source_context": checked["source_text"],
                 },
             },
             budget=budget,
@@ -549,7 +540,7 @@ class JevShadowSidecar:
             identity=identity,
             precheck=precheck,
             state_builder=lambda frozen, checked: {
-                **_packet_context(frozen, frozen["packet_hash"]),
+                "packet_hash": frozen["packet_hash"],
                 "missing_item": checked["missing_item"],
                 "specialist_requirement": checked["specialist_requirement"],
                 "coverage_facts": checked["coverage_facts"],

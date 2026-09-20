@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -115,6 +115,20 @@ def download_pdf(
         content=content,
         sha256=hashlib.sha256(content).hexdigest(),
     )
+
+
+def _coverage_facts(sources: list[dict[str, Any]], limitations: set[str]) -> dict[str, Any]:
+    return {
+        "source_count": len(sources),
+        "source_ids": [source["source_id"] for source in sources],
+        "report_kinds": sorted(
+            {str(source["report_kind"]) for source in sources if source.get("report_kind")}
+        ),
+        "languages": sorted(
+            {str(source["language"]) for source in sources if source.get("language")}
+        ),
+        "limitations": sorted(limitations),
+    }
 
 
 def _observation_date(article: dict[str, Any]) -> str | None:
@@ -296,6 +310,10 @@ def build_frozen_evidence_packet(
         "evidence_catalog": {"canonical_source_ids": [source["source_id"] for source in sources]},
         "limitations": sorted(limitations | set(additional_limitations or [])),
     }
+    base["coverage_facts"] = _coverage_facts(
+        sources,
+        set(base["limitations"]),
+    )
     base["packet_hash"] = canonical_packet_hash(base)
     return base
 
@@ -368,6 +386,10 @@ class OneCompanyEvidenceFlow:
         *,
         as_of: str,
         dry_run: bool = False,
+        shadow_citation: Mapping[str, Any] | None = None,
+        shadow_claim: str | None = None,
+        shadow_missing_item: str | Mapping[str, Any] | None = None,
+        shadow_specialist_requirement: str | None = None,
     ) -> EvidenceFlowResult:
         row = self.conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
         if row is None:
@@ -618,6 +640,20 @@ class OneCompanyEvidenceFlow:
                 skipped=result.skipped,
                 message="canonical packet failed its self-hash or contains no complete source",
             )
+        if shadow_citation is not None or shadow_missing_item is not None:
+            try:
+                from alphaforge.llm import run_shadow_signals
+
+                run_shadow_signals(
+                    packet,
+                    citation=shadow_citation,
+                    claim=shadow_claim,
+                    missing_item=shadow_missing_item,
+                    specialist_requirement=shadow_specialist_requirement,
+                    conn=self.conn,
+                )
+            except Exception:
+                pass
         persist_evidence_packet(self.conn, company_id=company_id, as_of=as_of, packet=packet)
         result.status = "complete"
         result.packet = packet

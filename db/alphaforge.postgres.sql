@@ -131,3 +131,17 @@ CREATE TABLE IF NOT EXISTS jev_shadow_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_jev_shadow_audit_packet ON jev_shadow_audit(packet_hash, observed_at);
 CREATE INDEX IF NOT EXISTS idx_jev_shadow_audit_feature ON jev_shadow_audit(feature, observed_at);
+
+CREATE OR REPLACE FUNCTION reject_jev_shadow_audit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'jev_shadow_audit is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS jev_shadow_audit_no_mutation ON jev_shadow_audit;
+CREATE TRIGGER jev_shadow_audit_no_mutation
+BEFORE UPDATE OR DELETE ON jev_shadow_audit
+FOR EACH ROW EXECUTE FUNCTION reject_jev_shadow_audit_mutation();
