@@ -778,6 +778,25 @@ def find_research_document(conn: Any, company_id: int, source_url: str) -> dict[
     return dict(row) if row is not None else None
 
 
+def find_complete_evidence_document(
+    conn: Any, company_id: int, source_url: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT d.* FROM research_documents d
+        WHERE d.company_id=? AND d.source_url=?
+          AND EXISTS (
+              SELECT 1 FROM research_attachments a WHERE a.document_id=d.id
+          )
+          AND EXISTS (
+              SELECT 1 FROM document_extractions e WHERE e.document_id=d.id
+          )
+        """,
+        (company_id, source_url),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def find_attachment_by_url(
     conn: Any, source_url: str, company_id: int | None = None
 ) -> dict[str, Any] | None:

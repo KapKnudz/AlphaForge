@@ -94,7 +94,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             "research_evidence": {
                 "documents": [],
                 "evidence_packet": evidence_packet,
-                "evidence_lane": True,
+                "evidence_lane": bool(evidence_packet),
             },
         }
 
@@ -222,7 +222,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         research_evidence={
             "documents": docs,
             "evidence_packet": evidence_packet,
-            "evidence_lane": True,
+            "evidence_lane": bool(evidence_packet),
         },
         full_results={"valuation": valuation, "reverse_dcf": reverse_dcf},
     )

@@ -237,6 +237,10 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         first = flow.run(company_id, as_of="2026-09-20")
     assert first.status == "complete"
     assert first.skipped == {"future_dated_release": 1, "missing_publication_timestamp": 1}
+    feed_check = conn.execute(
+        "SELECT discovered_count, unseen_count FROM mfn_feed_checks ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
     with patch("alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")):
         second = flow.run(company_id, as_of="2026-09-20")
@@ -245,6 +249,31 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert second.packet_hash == first.packet_hash
     assert scraper.scrape_calls[-1] == []
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+
+
+def test_flow_rechecks_document_without_complete_evidence_artifacts():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/incomplete",
+        "title": "Flow AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/incomplete.pdf",
+        "lang": "en",
+    }
+    conn.execute(
+        "INSERT INTO research_documents (company_id, source_url, source_type, title, published_at) VALUES (?, ?, 'mfn', ?, ?)",
+        (company_id, article["source_url"], article["title"], article["published_at"]),
+    )
+    conn.commit()
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([article]),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-21", dry_run=True)
+    assert result.status == "dry_run"
+    assert result.discovered == 1
+    assert result.eligible == 1
 
 
 def test_flow_preserves_bilingual_sibling_and_scanned_limitations():

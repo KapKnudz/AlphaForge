@@ -14,10 +14,11 @@ from typing import Any
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
     find_attachment_by_url,
-    find_research_document,
+    find_complete_evidence_document,
     get_verified_mfn_mapping,
     persist_evidence_document,
     persist_evidence_packet,
+    record_mfn_feed_check,
 )
 from alphaforge.evidence.ingest import ResearchDocumentIngestionService, bilingual_dedupe
 from alphaforge.evidence.mfn_taxonomy import is_report
@@ -365,9 +366,18 @@ class OneCompanyEvidenceFlow:
             for entry in unique_feed
             if not (
                 (entry_url := entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url"))
-                and find_research_document(self.conn, company_id, entry_url) is not None
+                and find_complete_evidence_document(self.conn, company_id, entry_url) is not None
             )
         ]
+        if not dry_run:
+            record_mfn_feed_check(
+                self.conn,
+                company_id,
+                mapping["mfn_slug"],
+                len(unique_feed),
+                len(unseen_feed),
+            )
+            self.conn.commit()
         details = self.scraper.scrape_details(unseen_feed, reports_only=True)
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
