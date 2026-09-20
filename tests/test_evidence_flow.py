@@ -270,6 +270,11 @@ def test_flow_rechecks_document_without_complete_evidence_artifacts():
         "INSERT INTO research_documents (company_id, source_url, source_type, title, published_at) VALUES (?, ?, 'mfn', ?, ?)",
         (company_id, article["source_url"], article["title"], article["published_at"]),
     )
+    incomplete_document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO research_attachments (document_id, source_url, byte_size, sha256, magic_valid) VALUES (?, ?, 4, 'incomplete', 1)",
+        (incomplete_document_id, article["attachment_url"]),
+    )
     conn.commit()
     result = OneCompanyEvidenceFlow(
         conn,
@@ -297,6 +302,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-en.pdf",
+            "body": "Material disclosure from the release body.",
             "lang": "en",
         },
     ]
@@ -315,6 +321,12 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     packet = result.packet
     assert len(packet["sources"]) == 1
     assert packet["sources"][0]["language"] == "en"
+    assert packet["sources"][0]["body"]["paragraphs"] == [
+        {
+            "anchor": f"{packet['sources'][0]['source_id']}#paragraph:1",
+            "text": "Material disclosure from the release body.",
+        }
+    ]
     assert packet["sources"][0]["bilingual_siblings"][0]["language"] == "sv"
     assert "scanned_pdf_no_ocr" in packet["limitations"]
     assert "page_resource_limit" in packet["limitations"]

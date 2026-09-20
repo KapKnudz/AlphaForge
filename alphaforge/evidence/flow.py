@@ -13,7 +13,7 @@ from typing import Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
-    find_attachment_by_url,
+    find_complete_evidence_attachment,
     find_complete_evidence_document,
     get_verified_mfn_mapping,
     persist_evidence_document,
@@ -130,7 +130,7 @@ def build_frozen_evidence_packet(
     rows = conn.execute(
         """
         SELECT d.id AS document_id, d.source_url, d.title, d.published_at,
-               d.fetched_at, d.ingested_lang, d.raw_metadata,
+               d.fetched_at, d.ingested_lang, d.raw_metadata, d.content_text AS release_body,
                a.source_url AS attachment_url, a.content_type, a.byte_size,
                a.sha256 AS attachment_sha256,
                e.extractor, e.text_checksum, e.page_count, e.pages_included,
@@ -181,8 +181,11 @@ def build_frozen_evidence_packet(
                     raw_metadata = loaded
             except (TypeError, ValueError):
                 limitations.add("invalid_document_metadata")
+        source_id = f"document:{document_id}"
+        body_text = str(row["release_body"] or "").strip()
+        body_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", body_text) if paragraph.strip()]
         source = {
-            "source_id": f"document:{document_id}",
+            "source_id": source_id,
             "source_url": row["source_url"],
             "title": row["title"] or "",
             "report_kind": raw_metadata.get("report_kind"),
@@ -194,6 +197,16 @@ def build_frozen_evidence_packet(
                 raw_metadata.get("authoritative_publication_timestamp")
             ),
             "ingestion_date": row["fetched_at"],
+            "body": {
+                "text": body_text,
+                "paragraphs": [
+                    {
+                        "anchor": f"{source_id}#paragraph:{index}",
+                        "text": paragraph,
+                    }
+                    for index, paragraph in enumerate(body_paragraphs, start=1)
+                ],
+            },
             "attachment": {
                 "source_url": row["attachment_url"],
                 "content_type": row["content_type"],
@@ -411,7 +424,9 @@ class OneCompanyEvidenceFlow:
             if not attachment_url:
                 result.skipped["missing_pdf_attachment"] = result.skipped.get("missing_pdf_attachment", 0) + 1
                 continue
-            existing = find_attachment_by_url(self.conn, str(attachment_url), company_id)
+            existing = find_complete_evidence_attachment(
+                self.conn, str(attachment_url), company_id
+            )
             if existing is not None:
                 continue
             try:

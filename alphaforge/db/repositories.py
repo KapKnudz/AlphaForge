@@ -799,6 +799,23 @@ def find_complete_evidence_document(
     return dict(row) if row is not None else None
 
 
+def find_complete_evidence_attachment(
+    conn: Any, source_url: str, company_id: int | None = None
+) -> dict[str, Any] | None:
+    company_clause = " AND d.company_id=?" if company_id is not None else ""
+    parameters: tuple[Any, ...] = (source_url, company_id) if company_id is not None else (source_url,)
+    row = conn.execute(
+        f"""
+        SELECT a.* FROM research_attachments a
+        JOIN research_documents d ON d.id=a.document_id
+        JOIN document_extractions e ON e.document_id=d.id
+        WHERE a.source_url=?{company_clause} ORDER BY a.id LIMIT 1
+        """,
+        parameters,
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def find_attachment_by_url(
     conn: Any, source_url: str, company_id: int | None = None
 ) -> dict[str, Any] | None:
