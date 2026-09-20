@@ -628,6 +628,8 @@ def upsert_mfn_issuer_mapping(
         raise ValueError(f"invalid MFN mapping status: {status}")
     if status == "mapped" and not (mfn_slug and source_url and verified_at):
         raise ValueError("a mapped MFN issuer requires slug, source_url, and verified_at")
+    if status == "mapped" and not identity_evidence:
+        raise ValueError("a mapped MFN issuer requires nonempty identity_evidence")
     evidence_json = (
         json.dumps(identity_evidence, ensure_ascii=False, sort_keys=True)
         if identity_evidence is not None
@@ -685,6 +687,8 @@ def get_verified_mfn_mapping(conn: Any, company_id: int) -> dict[str, Any] | Non
             result["identity_evidence"] = json.loads(raw_evidence)
         except ValueError:
             result["identity_evidence"] = None
+    if not result.get("identity_evidence"):
+        return None
     return result
 
 

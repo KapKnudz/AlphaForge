@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
     find_attachment_by_url,
     get_verified_mfn_mapping,
@@ -94,14 +95,6 @@ def download_pdf(
     )
 
 
-def _canonical_json(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _packet_hash(packet_without_hash: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json(packet_without_hash).encode("utf-8")).hexdigest()
-
-
 def _observation_date(article: dict[str, Any]) -> str | None:
     for key in ("observation_date", "period_end", "report_period_end"):
         value = article.get(key)
@@ -118,36 +111,6 @@ def _observation_date(article: dict[str, Any]) -> str | None:
     if any(term in title for term in ("annual", "year-end", "year end", "årsredovisning", "bokslut")):
         return f"{year}-12-31"
     return None
-
-
-def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
-    if not isinstance(packet, dict) or packet.get("frozen") is not True:
-        return False
-    packet_hash = packet.get("packet_hash")
-    if not isinstance(packet_hash, str) or not packet_hash:
-        return False
-    without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
-    if _packet_hash(without_hash) != packet_hash:
-        return False
-    sources = packet.get("sources")
-    if not isinstance(sources, list) or not sources:
-        return False
-    for source in sources:
-        if not isinstance(source, dict):
-            return False
-        if not source.get("source_id") or not source.get("publication_date"):
-            return False
-        if source.get("publication_timestamp_authoritative") is not True:
-            return False
-        attachment = source.get("attachment")
-        pages = source.get("pages")
-        if not isinstance(attachment, dict) or not attachment.get("sha256"):
-            return False
-        if not isinstance(pages, list) or not pages:
-            return False
-        if any(not isinstance(page, dict) or not page.get("anchor") for page in pages):
-            return False
-    return True
 
 
 def build_frozen_evidence_packet(
@@ -283,7 +246,7 @@ def build_frozen_evidence_packet(
         },
         "limitations": sorted(limitations),
     }
-    base["packet_hash"] = _packet_hash(base)
+    base["packet_hash"] = canonical_packet_hash(base)
     return base
 
 

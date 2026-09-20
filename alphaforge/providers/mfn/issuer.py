@@ -26,6 +26,13 @@ from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 BASE_URL = "https://mfn.se"
 _RELEASE_SEGMENTS = {"a", "cision", "release", "releases"}
 _INDEX_SEGMENTS = {"all", "company", "companies", "issuer", "issuers", "search"}
+_EXTERNAL_IDENTITY_ATTRIBUTE_KEYS = {
+    "ticker",
+    "isin",
+    "borsdataid",
+    "insid",
+    "instrumentid",
+}
 
 
 def _now() -> str:
@@ -40,9 +47,18 @@ def _normalise(value: Any) -> str:
 
 def _exact_identifier_values(company: dict[str, Any]) -> set[str]:
     values: set[str] = set()
-    for key in ("ticker", "isin", "borsdata_id", "insId", "id"):
+    for key in ("ticker", "isin", "borsdata_id", "insId"):
         value = company.get(key)
         if value not in (None, ""):
+            values.add(_normalise(value))
+    return values
+
+
+def _explicit_identity_values(attrs: dict[str, str]) -> set[str]:
+    values: set[str] = set()
+    for key, value in attrs.items():
+        normalised_key = re.sub(r"[^a-z0-9]", "", key.lower()).removeprefix("data")
+        if normalised_key in _EXTERNAL_IDENTITY_ATTRIBUTE_KEYS and value:
             values.add(_normalise(value))
     return values
 
@@ -141,37 +157,26 @@ def parse_mfn_issuer_candidates(
     else:
         links = list(_json_links(payload))
     identifiers = _exact_identifier_values(company)
-    exact_name = _normalise(company.get("name"))
     candidates: dict[tuple[str, str], dict[str, Any]] = {}
     for href, label, attrs in links:
         absolute = urljoin(surface_url, href)
         slug = _candidate_slug(absolute, base_url)
         if not slug:
             continue
-        searchable = " ".join([label, *attrs.values(), slug])
-        normalised_searchable = _normalise(searchable)
-        matched_identifiers = sorted(value for value in identifiers if value and value in normalised_searchable.split())
-        # ISIN/ticker are exact tokens; numeric identifiers can appear in a
-        # longer label, so check them as bounded values as well.
+        candidate_identifiers = _explicit_identity_values(attrs)
+        matched_identifiers = sorted(identifiers.intersection(candidate_identifiers))
         if not matched_identifiers:
-            for value in identifiers:
-                if value and re.search(rf"(?<![a-z0-9]){re.escape(value)}(?![a-z0-9])", normalised_searchable):
-                    matched_identifiers.append(value)
-        matched_name = bool(exact_name and exact_name == _normalise(label))
-        if not matched_identifiers and not matched_name:
             continue
-        match_basis = "exact_identifier" if matched_identifiers else "exact_name_on_mfn_surface"
         key = (slug.lower(), absolute)
         candidates[key] = {
             "mfn_slug": slug,
             "source_url": absolute,
             "discovery_source": discovery_source,
-            "match_basis": match_basis,
+            "match_basis": "exact_identifier",
             "identity_evidence": {
                 "surface_url": surface_url,
                 "label": label,
                 "matched_identifiers": matched_identifiers,
-                "matched_name": matched_name,
             },
         }
     return sorted(candidates.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"]))
@@ -298,12 +303,17 @@ def apply_reviewed_mapping_seed(conn: Any, path: str) -> int:
     records = load_reviewed_mapping_seed(path)
     applied = 0
     for record in records:
-        if not record.get("reviewed", True):
+        if record.get("reviewed") is not True:
             continue
         company_id = record.get("company_id")
         if company_id is None:
             raise ValueError("each reviewed MFN mapping seed requires company_id")
         status = record.get("status", "mapped")
+        identity_evidence = record.get("identity_evidence")
+        if status == "mapped" and not identity_evidence:
+            raise ValueError(
+                "each reviewed mapped MFN seed requires identity_evidence with operator provenance or reason"
+            )
         upsert_mfn_issuer_mapping(
             conn,
             int(company_id),
@@ -312,7 +322,7 @@ def apply_reviewed_mapping_seed(conn: Any, path: str) -> int:
             source_url=record.get("source_url"),
             discovery_source=record.get("discovery_source", "reviewed_seed"),
             verified_at=record.get("verified_at") or (_now() if status == "mapped" else None),
-            identity_evidence=record.get("identity_evidence") or {"seed_file": path},
+            identity_evidence=identity_evidence,
         )
         applied += 1
     return applied
