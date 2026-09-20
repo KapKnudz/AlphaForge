@@ -770,14 +770,6 @@ def persist_mfn_issuer_candidates(
     return count
 
 
-def find_research_document(conn: Any, company_id: int, source_url: str) -> dict[str, Any] | None:
-    row = conn.execute(
-        "SELECT * FROM research_documents WHERE company_id=? AND source_url=?",
-        (company_id, source_url),
-    ).fetchone()
-    return dict(row) if row is not None else None
-
-
 def find_complete_evidence_document(
     conn: Any, company_id: int, source_url: str
 ) -> dict[str, Any] | None:
@@ -791,6 +783,12 @@ def find_complete_evidence_document(
           )
           AND EXISTS (
               SELECT 1 FROM document_extractions e
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              JOIN document_extractions e ON e.id=p.extraction_id
               WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
           )
         """,
@@ -809,30 +807,11 @@ def find_complete_evidence_attachment(
         SELECT a.* FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
         JOIN document_extractions e ON e.document_id=d.id
+        JOIN document_pages p ON p.extraction_id=e.id
         WHERE a.source_url=?{company_clause} ORDER BY a.id LIMIT 1
         """,
         parameters,
     ).fetchone()
-    return dict(row) if row is not None else None
-
-
-def find_attachment_by_url(
-    conn: Any, source_url: str, company_id: int | None = None
-) -> dict[str, Any] | None:
-    if company_id is None:
-        row = conn.execute(
-            "SELECT * FROM research_attachments WHERE source_url=? ORDER BY id LIMIT 1",
-            (source_url,),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT a.* FROM research_attachments a
-            JOIN research_documents d ON d.id=a.document_id
-            WHERE a.source_url=? AND d.company_id=? ORDER BY a.id LIMIT 1
-            """,
-            (source_url, company_id),
-        ).fetchone()
     return dict(row) if row is not None else None
 
 

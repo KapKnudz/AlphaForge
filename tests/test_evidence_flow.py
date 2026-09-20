@@ -275,6 +275,10 @@ def test_flow_rechecks_document_without_complete_evidence_artifacts():
         "INSERT INTO research_attachments (document_id, source_url, byte_size, sha256, magic_valid) VALUES (?, ?, 4, 'incomplete', 1)",
         (incomplete_document_id, article["attachment_url"]),
     )
+    conn.execute(
+        "INSERT INTO document_extractions (document_id, extractor, page_count, page_truncated, scanned) VALUES (?, 'pypdf', 0, 0, 0)",
+        (incomplete_document_id,),
+    )
     conn.commit()
     result = OneCompanyEvidenceFlow(
         conn,
