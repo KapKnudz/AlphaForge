@@ -143,12 +143,18 @@ class _FakeScraper:
 
     def __init__(self, articles):
         self.articles = articles
+        self.scrape_calls = []
 
     def discover_feed(self, mfn_slug, *, reports_only=True):
         return [{"url": article["source_url"], "title": article["title"]} for article in self.articles]
 
     def scrape_details(self, entries, *, reports_only=True):
-        return list(self.articles)
+        self.scrape_calls.append(list(entries))
+        urls = {
+            entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
+            for entry in entries
+        }
+        return [article for article in self.articles if article["source_url"] in urls]
 
 
 def _mapped_company(conn):
@@ -225,7 +231,8 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         headers={"Content-Type": "application/pdf"},
         content=_pdf(),
     )
-    flow = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper(articles))
+    scraper = _FakeScraper(articles)
+    flow = OneCompanyEvidenceFlow(conn, scraper=scraper)
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         first = flow.run(company_id, as_of="2026-09-20")
     assert first.status == "complete"
@@ -236,6 +243,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert second.status == "complete"
     assert second.downloaded == 0
     assert second.packet_hash == first.packet_hash
+    assert scraper.scrape_calls[-1] == []
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
 
 

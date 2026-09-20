@@ -14,6 +14,7 @@ from typing import Any
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
     find_attachment_by_url,
+    find_research_document,
     get_verified_mfn_mapping,
     persist_evidence_document,
     persist_evidence_packet,
@@ -359,7 +360,15 @@ class OneCompanyEvidenceFlow:
             if url:
                 seen_feed_urls.add(url)
             unique_feed.append(entry)
-        details = self.scraper.scrape_details(unique_feed, reports_only=True)
+        unseen_feed = [
+            entry
+            for entry in unique_feed
+            if not (
+                (entry_url := entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url"))
+                and find_research_document(self.conn, company_id, entry_url) is not None
+            )
+        ]
+        details = self.scraper.scrape_details(unseen_feed, reports_only=True)
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
