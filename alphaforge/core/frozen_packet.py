@@ -83,7 +83,9 @@ def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
         for page in pages:
             if not isinstance(page, dict):
                 return False
-            if not isinstance(page.get("page_number"), int) or isinstance(page["page_number"], bool):
+            if not isinstance(page.get("page_number"), int) or isinstance(
+                page["page_number"], bool
+            ):
                 return False
             if page["page_number"] < 1 or page["page_number"] in page_numbers:
                 return False

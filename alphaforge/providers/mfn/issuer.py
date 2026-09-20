@@ -43,6 +43,8 @@ def _canonical_issuer_url(url: str) -> str:
             "",
         )
     )
+
+
 _RELEASE_SEGMENTS = {"a", "cision", "release", "releases"}
 _INDEX_SEGMENTS = {"all", "company", "companies", "issuer", "issuers", "search"}
 _EXTERNAL_IDENTITY_ATTRIBUTE_KEYS = {
@@ -143,10 +145,18 @@ def _candidate_slug(url: str, base_url: str) -> str | None:
 def _json_links(payload: Any) -> Iterable[tuple[str, str, dict[str, str]]]:
     if isinstance(payload, dict):
         for key, value in payload.items():
-            if key.lower() in {"url", "source_url", "issuer_url", "profile_url", "href"} and isinstance(value, str):
-                yield value, str(payload.get("name") or payload.get("title") or ""), {
-                    str(k): str(v) for k, v in payload.items() if v is not None
-                }
+            if key.lower() in {
+                "url",
+                "source_url",
+                "issuer_url",
+                "profile_url",
+                "href",
+            } and isinstance(value, str):
+                yield (
+                    value,
+                    str(payload.get("name") or payload.get("title") or ""),
+                    {str(k): str(v) for k, v in payload.items() if v is not None},
+                )
             else:
                 yield from _json_links(value)
     elif isinstance(payload, list):
@@ -195,13 +205,16 @@ def parse_mfn_issuer_candidates(
             "match_basis": "exact_identifier",
             "identity_evidence": {
                 "provenance": surface_url,
-                "reason": "matched explicit external identifier(s): " + ", ".join(matched_identifiers),
+                "reason": "matched explicit external identifier(s): "
+                + ", ".join(matched_identifiers),
                 "surface_url": surface_url,
                 "label": label,
                 "matched_identifiers": matched_identifiers,
             },
         }
-    return sorted(candidates.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"]))
+    return sorted(
+        candidates.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"])
+    )
 
 
 @dataclass(frozen=True)
@@ -232,7 +245,12 @@ class MfnIssuerResolver:
         search surfaces, bounded to a small deterministic set.
         """
         if surfaces is None:
-            query_values = [company.get("name"), company.get("ticker"), company.get("isin"), company.get("borsdata_id")]
+            query_values = [
+                company.get("name"),
+                company.get("ticker"),
+                company.get("isin"),
+                company.get("borsdata_id"),
+            ]
             urls = [self.base_url]
             for value in query_values:
                 if value not in (None, ""):
@@ -265,10 +283,15 @@ class MfnIssuerResolver:
                 )
             )
         unique = {
-            (candidate["mfn_slug"].lower(), _canonical_issuer_url(candidate["source_url"])): candidate
+            (
+                candidate["mfn_slug"].lower(),
+                _canonical_issuer_url(candidate["source_url"]),
+            ): candidate
             for candidate in candidates
         }
-        ordered = tuple(sorted(unique.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"])))
+        ordered = tuple(
+            sorted(unique.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"]))
+        )
         if len(ordered) == 1:
             return IssuerResolution("mapped", ordered, ordered[0], _now())
         if ordered:

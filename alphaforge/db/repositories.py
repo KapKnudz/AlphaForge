@@ -124,9 +124,7 @@ def relink_watchlist(conn: Any) -> int:
     return linked
 
 
-def upsert_financial_periods(
-    conn: Any, company_id: int, periods: list[dict[str, Any]]
-) -> int:
+def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str, Any]]) -> int:
     count = 0
     for p in periods:
         # Use-core kpi_taxonomy to map? Keep raw mapping here minimal
@@ -743,7 +741,9 @@ def persist_mfn_issuer_candidates(
             continue
         evidence = candidate.get("identity_evidence")
         evidence_json = (
-            json.dumps(evidence, ensure_ascii=False, sort_keys=True) if evidence is not None else None
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+            if evidence is not None
+            else None
         )
         conn.execute(
             """
@@ -877,9 +877,7 @@ def persist_evidence_sibling(
     conn.commit()
 
 
-def complete_evidence_language_majority(
-    conn: Any, company_id: int, as_of: str
-) -> str | None:
+def complete_evidence_language_majority(conn: Any, company_id: int, as_of: str) -> str | None:
     rows = conn.execute(
         """
         SELECT COALESCE(d.ingested_lang, 'en') AS language, COUNT(*) AS count
@@ -914,7 +912,9 @@ def find_complete_evidence_attachment(
     conn: Any, source_url: str, company_id: int | None = None
 ) -> dict[str, Any] | None:
     company_clause = " AND d.company_id=?" if company_id is not None else ""
-    parameters: tuple[Any, ...] = (source_url, company_id) if company_id is not None else (source_url,)
+    parameters: tuple[Any, ...] = (
+        (source_url, company_id) if company_id is not None else (source_url,)
+    )
     row = conn.execute(
         f"""
         SELECT a.* FROM research_attachments a
@@ -1165,9 +1165,7 @@ def persist_evidence_packet(
     return int(row[0]) if row else 0
 
 
-def load_evidence_packet(
-    conn: Any, company_id: int, as_of: str
-) -> dict[str, Any] | None:
+def load_evidence_packet(conn: Any, company_id: int, as_of: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
         SELECT packet_json FROM evidence_packets

@@ -165,7 +165,9 @@ class _FakeScraper:
         self.scrape_calls = []
 
     def discover_feed(self, mfn_slug, *, reports_only=True):
-        return [{"url": article["source_url"], "title": article["title"]} for article in self.articles]
+        return [
+            {"url": article["source_url"], "title": article["title"]} for article in self.articles
+        ]
 
     def scrape_details(self, entries, *, reports_only=True):
         self.scrape_calls.append(list(entries))
@@ -261,7 +263,9 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
-    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")):
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")
+    ):
         second = flow.run(company_id, as_of="2026-09-20")
     assert second.status == "complete"
     assert second.downloaded == 0
@@ -371,7 +375,9 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     ],
 )
 def test_pdf_acquisition_rejects_non_pdf_payloads(content_type, content, code):
-    response = SimpleNamespace(status_code=200, headers={"Content-Type": content_type}, content=content)
+    response = SimpleNamespace(
+        status_code=200, headers={"Content-Type": content_type}, content=content
+    )
     with pytest.raises(ValueError, match=code.replace("_", " ")):
         download_pdf(
             "https://storage.mfn.test/bad",
@@ -442,8 +448,16 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
         "evidence_catalog": {"canonical_source_ids": ["document:1"]},
         "limitations": [],
     }
-    packet["packet_hash"] = __import__("hashlib").sha256(
-        json.dumps({key: value for key, value in packet.items() if key != "packet_hash"}, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    packet["packet_hash"] = (
+        __import__("hashlib")
+        .sha256(
+            json.dumps(
+                {key: value for key, value in packet.items() if key != "packet_hash"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        .hexdigest()
+    )
     candidate.research_evidence["evidence_packet"] = packet
     assert gate.assess(candidate).status == "ready"

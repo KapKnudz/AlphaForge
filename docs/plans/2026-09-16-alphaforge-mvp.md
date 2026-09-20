@@ -192,13 +192,13 @@ Following `scout-alphaforge-evidence-sources §2`:
 
 | # | Evidence step | Mode | Owner | What happens |
 |---|---|---|---|---|
-| S0 | MFN feed poll + detail fetch | Deterministic — scrape | `MfnScraper` (HTTP + stdlib `HTMLParser`, `BASE_URL https://mfn.se`, `MAX_ARTICLES 24`, report-only by default, detail `h1`/`article`, timestamp metadata, attachment `storage.mfn.se/*.pdf`) | `discover_feed(mfn_slug)` daily page-1, Sunday page-2; `scrape_details(unseen)` only for unseen URLs |
+| S0 | MFN feed poll + detail fetch | Deterministic — scrape | `MfnScraper` (HTTP + stdlib `HTMLParser`, `BASE_URL https://mfn.se`, `MAX_ARTICLES 24`, report-only by default, detail `h1`/`article`, publication-labeled timestamp metadata, attachment `storage.mfn.se/*.pdf`) | `discover_feed(mfn_slug)` daily page-1, Sunday page-2; `scrape_details(unseen)` only for unseen URLs |
 | S1 | Release persistence | Deterministic | `ResearchDocumentIngestionService.persist_articles` | `research_documents` uses `ON CONFLICT(company_id, source_url) DO NOTHING`; report filtering happens before grouping; selected and suppressed bilingual variants retain language, checksum, group, and selection-rule metadata, with `duplicate_of` audit pointers |
-| S2 | PDF download | Deterministic | `_download` via `request_with_retry` (60 s timeout, 3 retries, `Retry-After`) | Fails single PDF without aborting batch |
-| S3 | PDF text extraction — **50 + tail** | Deterministic | `_extract_pdf_text` → `pypdf` `pages[:50]` + `pages[80:90]` tail when `len>50 && holder table suspected`; `re.sub(\n{3,},\n\n)`; `page_truncated` flag; scanned-image → `missing_information` supplemental | Language tag (`lang`, `lang_confidence`) applied here; шведск/Acast shareholder tables on p.51 prove 30 was insufficient |
+| S2 | PDF download | Deterministic | `download_pdf` via `request_with_retry` (60 s timeout, bounded retries, `Retry-After`) | Fails single PDF without aborting batch |
+| S3 | PDF text extraction — **50 + tail** | Deterministic | `ResearchDocumentIngestionService.extract_pdf_pages` → `pypdf` pages 1–50 plus pages 81–90 when the default cap applies to a document over 50 pages; `re.sub(\n{3,},\n\n)`; `page_truncated` flag; scanned or near-empty PDFs retain a `*_no_ocr` limitation | Language is seeded from detail metadata or a deterministic title/body heuristic during ingestion; confidence is not persisted. шведск/Acast shareholder tables on p.51 prove 30 was insufficient |
 | S4 | Catalog + period normalization | Deterministic | `report_kind` / `is_report` in `mfn_taxonomy.py` | Annual/quarterly title classification, schedule-notice exclusion, and report-only eligibility; report-period normalization remains the planned downstream catalog step |
 | S5 | Keyword-taxonomy pre-pass | Deterministic | `mfn_taxonomy.py` (`CATEGORY_KEYWORDS_SE`, `IMPORTANCE_KEYWORDS_SE`, `REPORT_TERMS_SE = REPORT_TITLE_TERMS + ("bokslutskommuniké","flaggning","flagging","riktad emission","ägarförteckning","aktieåterköp","lock-up","listbyte")`) | `release_category ∈ {earnings,guidance,ownership_change,insider,buyback,placement,lockup,listing_change,contract_win,…}`, `importance ∈ {high,medium,low}`; gates irrelevant outside `[as_of−5y, as_of]`; included in packet so LLM refines rather than invents |
-| S6 | Evidence packet assembly | Deterministic | `ResearchEvidenceBuilder` → `AgentCandidatePacket` | PIT-filtered `ResearchEvidence{documents[], news[], insider_transactions[], ownership_liquidity, missing_information[]}` + `evidence_catalog{canonical_source_ids[], aliases{}}` + `packet_hash = sha256(canonical_json without hash)` — **the only input the LLM ever sees** (typed `EvidenceDocument{source_id, title, url, published_at, text, report_year/period, body_source_id, structured_financial_values}` — not `df.to_markdown()`) |
+| S6 | Evidence packet assembly | Deterministic | `build_frozen_evidence_packet` → `evidence_packets` | The one-company lane PIT-filters complete MFN documents and emits body paragraphs, attachment/extraction metadata, page anchors, `evidence_catalog.canonical_source_ids[]`, limitations, and `packet_hash = sha256(canonical_json without hash)`; the validated frozen packet is the only model-boundary input. Broader `ResearchEvidence` slices remain downstream. See [`docs/evidence-flow.md`](../evidence-flow.md). |
 | S7 | Management credibility ledger | LLM (typed) | `ManagementCredibilitySpecialist` | Extracts `coverage{tier,no_ledger|partial|full, quarters_covered, …}`, `ledger[ManagementLedgerRow{quarter YYYY-Qn, claim_id, claim, expected_timing, observed_outcome, result∈{kept,delayed,missed,unverifiable,too_vague_to_test,external_shock}, claim_source_ids[], outcome_source_ids[], source_ids[]}]` with paragraph-anchored excerpt; deterministic `kept/delayed/missed` accounting, `external_shock` does not penalize pattern state |
 | S8 | Business-model & scalability | LLM (typed) | `BusinessModelSpecialist` | `revenue_model_types[], recurring_revenue_profile, operating_leverage∈{absent,…,demonstrated}, profitability_state, claims[]` + deterministic `gross_to_ebit_spread` guard |
 | S9 | Margin / peak-margin defensibility | Hybrid | `MarginSpecialist` + deterministic solver | LLM authors `mechanism`+`defensible_peak_ebit_margin`; code clamps `defensible_peak ≤ gross_margin` and rejects `source_ids==[]`, rejects 8%→20% jumps without `fixed cost/distribution/market size/comp` mechanism |
@@ -266,10 +266,10 @@ sync  (batch 50, 0.5–1s sleep, MAX_RETRIES=3, backoff 1/2/4s, http_transport.r
 rank  (RankingEngine over watchlist: per company FinancialResult+ValuationResult → WatchlistRanking + ranking_runs{model_version, as_of, packet_hash, universe_hash, scores, inputs_summary})
       │
       ▼
-gate  (AgentReadinessGate: general model only → evidence_blocked if research_documents≤as_of absent → valuation_blocked if reverse-DCF unavailable/guardrail missing → the ONLY paid-call gate)
+gate  (AgentReadinessGate: general model only → evidence_blocked if the evidence lane lacks a valid frozen packet → valuation_blocked if reverse-DCF unavailable/guardrail missing → the ONLY paid-call gate)
       │ ready set only (top 25 + flags up to 30 style)
       ▼
-evidence  (EvidencePacketBuilder PIT-filters every source ≤as_of via point_in_time.two_layer; instrument_header "NIBE Industrier AB (NIBE B, Industrials/Capital Goods, OMX Stockholm)" anchored to Börsdata truth; packet_hash=sha256(canonical_json without hash); dual-persist DB + evidence/<ticker>/<as_of>/packet.json; S5 taxonomy included, bilingual dupe suppressed, lang majority resolved)
+evidence  (OneCompanyEvidenceFlow PIT-filters complete MFN PDF evidence ≤as_of; packet_hash=sha256(canonical_json without hash); validated packet persisted in `evidence_packets`; bilingual duplicates suppressed and language majority resolved; see `docs/evidence-flow.md`)
       │
       ▼
 analyze  (fan-out 6 specialists in parallel, each a section-scoped packet slice → SectionDraft{claims,citations,limitations} via single LLMClient; one free-text retry + _coerce_optional_float; main agent Stock Researcher owns verdict-only synthesis via Hedborg skills; numbers re-derived in core and rejected if >eps)
@@ -530,7 +530,7 @@ All checks run without a paid model when marked *deterministic*; the pilot is th
   alphaforge sync   --as-of 2026-09-16            # nightly-shape initial
   alphaforge sync   --as-of 2026-09-16            # idempotence proof (rowcounts unchanged)
   alphaforge rank   --as-of 2026-09-16            # golden packet + ranking_runs row
-  alphaforge evidence --ticker <pilot> --as-of 2026-09-16   # packet.json with packet_hash
+  alphaforge evidence --ticker <pilot> --as-of 2026-09-16   # evidence_packets row with packet_hash
   alphaforge analyze  --ticker <pilot> --as-of 2026-09-16   # 6 specialists + aggregator, one-repair ceiling
   alphaforge export --as-of 2026-09-16
   ```

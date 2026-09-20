@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
@@ -31,6 +31,7 @@ from alphaforge.evidence.mfn_taxonomy import is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
+
 if TYPE_CHECKING:
     from alphaforge.providers.mfn.scraper import MfnScraper
 
@@ -89,16 +90,24 @@ def download_pdf(
         except (TypeError, ValueError):
             parsed_length = None
         if parsed_length is not None and parsed_length > limits.max_pdf_bytes:
-            raise PdfAcquisitionError("resource_limit", "PDF Content-Length exceeds the configured limit")
+            raise PdfAcquisitionError(
+                "resource_limit", "PDF Content-Length exceeds the configured limit"
+            )
     content = bytes(getattr(response, "content", b"") or b"")
     if len(content) > limits.max_pdf_bytes:
         raise PdfAcquisitionError("resource_limit", "PDF payload exceeds the configured byte limit")
     if "text/html" in content_type or "application/xhtml" in content_type:
-        raise PdfAcquisitionError("invalid_content_type", f"attachment content type is {content_type}")
+        raise PdfAcquisitionError(
+            "invalid_content_type", f"attachment content type is {content_type}"
+        )
     if content_type and "pdf" not in content_type and content_type != "application/octet-stream":
-        raise PdfAcquisitionError("invalid_content_type", f"attachment content type is {content_type}")
+        raise PdfAcquisitionError(
+            "invalid_content_type", f"attachment content type is {content_type}"
+        )
     if not content.startswith(b"%PDF-"):
-        raise PdfAcquisitionError("invalid_pdf_magic", "attachment does not start with PDF magic bytes")
+        raise PdfAcquisitionError(
+            "invalid_pdf_magic", "attachment does not start with PDF magic bytes"
+        )
     return PdfDownload(
         source_url=source_url,
         content_type=content_type or "application/pdf",
@@ -120,8 +129,13 @@ def _observation_date(article: dict[str, Any]) -> str | None:
     year = int(year_match.group(1))
     quarter_match = re.search(r"\bq([1-4])\b", title)
     if quarter_match:
-        return (f"{year}-" + {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}[quarter_match.group(1)])
-    if any(term in title for term in ("annual", "year-end", "year end", "årsredovisning", "bokslut")):
+        return (
+            f"{year}-"
+            + {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}[quarter_match.group(1)]
+        )
+    if any(
+        term in title for term in ("annual", "year-end", "year end", "årsredovisning", "bokslut")
+    ):
         return f"{year}-12-31"
     return None
 
@@ -201,7 +215,9 @@ def build_frozen_evidence_packet(
                 limitations.add("invalid_document_metadata")
         source_id = f"document:{document_id}"
         body_text = str(row["release_body"] or "").strip()
-        body_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", body_text) if paragraph.strip()]
+        body_paragraphs = [
+            paragraph.strip() for paragraph in re.split(r"\n\s*\n", body_text) if paragraph.strip()
+        ]
         source = {
             "source_id": source_id,
             "source_url": row["source_url"],
@@ -261,7 +277,9 @@ def build_frozen_evidence_packet(
             ],
         }
         sources.append(source)
-    sources.sort(key=lambda source: (source["publication_date"], source["source_url"], source["source_id"]))
+    sources.sort(
+        key=lambda source: (source["publication_date"], source["source_url"], source["source_id"])
+    )
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
@@ -275,9 +293,7 @@ def build_frozen_evidence_packet(
             "identity_evidence": mapping.get("identity_evidence"),
         },
         "sources": sources,
-        "evidence_catalog": {
-            "canonical_source_ids": [source["source_id"] for source in sources]
-        },
+        "evidence_catalog": {"canonical_source_ids": [source["source_id"] for source in sources]},
         "limitations": sorted(limitations | set(additional_limitations or [])),
     }
     base["packet_hash"] = canonical_packet_hash(base)
@@ -331,7 +347,7 @@ class OneCompanyEvidenceFlow:
         self,
         conn: Any,
         *,
-        scraper: "MfnScraper" | None = None,
+        scraper: MfnScraper | None = None,
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
         now: Callable[[], datetime] | None = None,
@@ -378,8 +394,9 @@ class OneCompanyEvidenceFlow:
                     mapping_status=resolution.status,
                     skipped={"issuer_mapping_review_required": 1},
                     message=(
-                        "no deterministic MFN issuer mapping" if not resolution.candidates else
-                        "multiple deterministic MFN issuer candidates require review"
+                        "no deterministic MFN issuer mapping"
+                        if not resolution.candidates
+                        else "multiple deterministic MFN issuer candidates require review"
                     ),
                 )
             mapping = resolution.selected
@@ -416,10 +433,13 @@ class OneCompanyEvidenceFlow:
             unique_feed.append(entry)
         unseen_feed = []
         for entry in unique_feed:
-            entry_url = entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
-            if entry_url and find_complete_evidence_document(
-                self.conn, company_id, entry_url
-            ) is not None:
+            entry_url = (
+                entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
+            )
+            if (
+                entry_url
+                and find_complete_evidence_document(self.conn, company_id, entry_url) is not None
+            ):
                 continue
             unseen_feed.append(entry)
         if not dry_run:
@@ -453,21 +473,25 @@ class OneCompanyEvidenceFlow:
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
-                result.skipped["non_report_release"] = result.skipped.get("non_report_release", 0) + 1
+                result.skipped["non_report_release"] = (
+                    result.skipped.get("non_report_release", 0) + 1
+                )
                 continue
             published_at = article.get("published_at")
             if not published_at:
-                result.skipped["missing_publication_timestamp"] = result.skipped.get("missing_publication_timestamp", 0) + 1
+                result.skipped["missing_publication_timestamp"] = (
+                    result.skipped.get("missing_publication_timestamp", 0) + 1
+                )
                 continue
             if str(published_at)[:10] > as_of[:10] or str(published_at)[:10] > today.isoformat():
-                result.skipped["future_dated_release"] = result.skipped.get("future_dated_release", 0) + 1
+                result.skipped["future_dated_release"] = (
+                    result.skipped.get("future_dated_release", 0) + 1
+                )
                 continue
             eligible.append(article)
         packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
         persisted_identity = []
-        for persisted in complete_evidence_identity_documents(
-            self.conn, company_id, as_of=as_of
-        ):
+        for persisted in complete_evidence_identity_documents(self.conn, company_id, as_of=as_of):
             metadata = {}
             if persisted["raw_metadata"]:
                 try:
@@ -515,11 +539,11 @@ class OneCompanyEvidenceFlow:
                 continue
             attachment_url = article.get("attachment_url") or article.get("storage_url")
             if not attachment_url:
-                result.skipped["missing_pdf_attachment"] = result.skipped.get("missing_pdf_attachment", 0) + 1
+                result.skipped["missing_pdf_attachment"] = (
+                    result.skipped.get("missing_pdf_attachment", 0) + 1
+                )
                 continue
-            existing = find_complete_evidence_attachment(
-                self.conn, str(attachment_url), company_id
-            )
+            existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
             if existing is not None:
                 continue
             try:
@@ -532,14 +556,14 @@ class OneCompanyEvidenceFlow:
                     downloaded.content, max_pages=self.limits.max_pages
                 )
             except Exception:
-                result.skipped["pdf_extraction_failed"] = result.skipped.get(
-                    "pdf_extraction_failed", 0
-                ) + 1
+                result.skipped["pdf_extraction_failed"] = (
+                    result.skipped.get("pdf_extraction_failed", 0) + 1
+                )
                 continue
             if not extracted.pages:
-                result.skipped["pdf_extraction_failed"] = result.skipped.get(
-                    "pdf_extraction_failed", 0
-                ) + 1
+                result.skipped["pdf_extraction_failed"] = (
+                    result.skipped.get("pdf_extraction_failed", 0) + 1
+                )
                 continue
             article = {
                 **article,

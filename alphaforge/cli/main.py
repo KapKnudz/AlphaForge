@@ -900,7 +900,9 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
 def _company_id_from_args(conn, args: argparse.Namespace) -> int | None:
     if args.company_id is not None:
-        row = conn.execute("SELECT id FROM companies WHERE id=?", (int(args.company_id),)).fetchone()
+        row = conn.execute(
+            "SELECT id FROM companies WHERE id=?", (int(args.company_id),)
+        ).fetchone()
     else:
         row = conn.execute(
             "SELECT id FROM companies WHERE ticker=? COLLATE NOCASE", (args.ticker,)
@@ -1063,7 +1065,9 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_scope.add_argument("--company-id", type=int)
     evidence_scope.add_argument("--ticker")
     evidence.add_argument("--as-of", required=True, help="Point-in-time cutoff YYYY-MM-DD")
-    evidence.add_argument("--dry-run", action="store_true", help="Discover and diagnose without writes")
+    evidence.add_argument(
+        "--dry-run", action="store_true", help="Discover and diagnose without writes"
+    )
     evidence.add_argument("--diagnostic", action="store_true", help="Include packet diagnostics")
     evidence.add_argument("--max-pdf-bytes", type=int, default=25 * 1024 * 1024)
     evidence.add_argument("--max-pages", type=int, default=50)

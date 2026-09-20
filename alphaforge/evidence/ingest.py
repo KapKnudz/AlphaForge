@@ -134,7 +134,9 @@ def bilingual_dedupe(
 
     def strong_keys(keys: set[str]) -> set[str]:
         return {
-            key for key in keys if not key.startswith("attachment:") and not key.startswith("title:")
+            key
+            for key in keys
+            if not key.startswith("attachment:") and not key.startswith("title:")
         }
 
     for doc in docs:
@@ -146,7 +148,9 @@ def bilingual_dedupe(
             owners = {
                 owner
                 for owner in weak_owners
-                if not any(strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner])
+                if not any(
+                    strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner]
+                )
             }
         if not owners:
             group_index = len(groups)
@@ -176,7 +180,9 @@ def bilingual_dedupe(
     for variants in groups:
         if not variants:
             continue
-        group_keys = sorted({key for variant in variants for key in _bilingual_identity_keys(variant)})
+        group_keys = sorted(
+            {key for variant in variants for key in _bilingual_identity_keys(variant)}
+        )
         group_id = hashlib.sha256(group_keys[0].encode()).hexdigest()[:24]
         for variant in variants:
             variant["_bilingual_group_id"] = group_id

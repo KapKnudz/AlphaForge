@@ -293,7 +293,9 @@ def test_pypdf_extraction_keeps_late_page_tail_with_resource_cap():
     assert result.page_count == 121
     assert result.pages_included == "1-50,81-90"
     assert result.page_truncated == 1
-    assert [page["page_number"] for page in result.pages] == list(range(1, 51)) + list(range(81, 91))
+    assert [page["page_number"] for page in result.pages] == list(range(1, 51)) + list(
+        range(81, 91)
+    )
 
 
 def test_persist_articles_is_idempotent_without_company_id():

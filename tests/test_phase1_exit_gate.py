@@ -74,9 +74,12 @@ def test_v1_dividend_constraint_migrates_for_type_4(mem_conn):
         "document_pages",
         "evidence_packets",
     ):
-        assert mem_conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone() is not None
+        assert (
+            mem_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            is not None
+        )
 
 
 def test_import_watchlist_isin_normalized_and_uniqueness(mem_conn, tmp_path):

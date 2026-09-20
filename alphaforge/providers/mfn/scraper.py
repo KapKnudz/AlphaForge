@@ -164,8 +164,7 @@ class _MfnHtmlParser(HTMLParser):
             self._time_active = True
             self._time_parts = []
             label = " ".join(
-                values.get(key, "")
-                for key in ("class", "data-type", "aria-label", "itemprop")
+                values.get(key, "") for key in ("class", "data-type", "aria-label", "itemprop")
             ).lower()
             self._time_publication_active = bool(
                 re.search(r"publish|publication|release date|released|utgiv", label)
@@ -347,7 +346,9 @@ class MfnScraper:
         try:
             resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
         except Exception as exc:
-            raise MfnAcquisitionError("mfn_feed_fetch_failed", f"MFN feed request failed: {exc}") from exc
+            raise MfnAcquisitionError(
+                "mfn_feed_fetch_failed", f"MFN feed request failed: {exc}"
+            ) from exc
         if resp.status_code != 200:
             raise MfnAcquisitionError(
                 "mfn_feed_http_status", f"MFN feed request returned HTTP {resp.status_code}"
