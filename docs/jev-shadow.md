@@ -35,20 +35,42 @@ relation = sidecar.classify_citation_relation(packet, citation, claim)
 impact = sidecar.classify_missing_information(packet, missing_item, specialist_requirement)
 ```
 
-Both calls first verify the frozen packet hash and perform deterministic
-identity, point-in-time, catalog, anchor, and exact excerpt checks. A failed
-check is audited as `not_attempted` and never reaches Jev. Model responses are
-checked once; malformed responses, timeouts, rate limits, model-version
-mismatches, and budget failures produce an audited error with no fallback or
-repair attempt.
+The evidence flow invokes these sidecars only when the corresponding optional
+inputs are supplied. The CLI accepts the same inputs, for example:
+
+```sh
+alphaforge evidence --ticker ABC --as-of 2026-05-31 \
+  --shadow-source-id document:1 \
+  --shadow-anchor document:1#page:1 \
+  --shadow-excerpt 'Revenue increased' \
+  --shadow-claim 'Revenue increased in Sweden.'
+```
+
+Use `--shadow-missing-item` and `--shadow-specialist-requirement` for missing-
+information impact classification. A citation classification requires all four
+citation inputs. The frozen packet owns one canonical `coverage_facts` object
+with source count and ids, report kinds, languages, and limitations; the
+missing-information sidecar receives only those facts plus the named missing
+item and requirement. The citation sidecar receives only the packet hash,
+claim, source identity, anchor, and validated excerpt—not the whole packet.
+
+Both calls first verify the frozen packet hash. Citation calls then perform
+deterministic source identity, point-in-time, catalog, anchor, and exact excerpt
+checks; missing-information calls validate the item, requirement, and
+`coverage_facts`. A failed check is audited as `not_attempted` and never
+reaches Jev. Model responses are checked once; malformed responses, SDK
+failures, model-version mismatches, and post-response budget violations produce
+an audited error, while calls rejected before dispatch are audited as
+`skipped_budget`. There is no fallback or repair attempt.
 
 ## Inspecting results
 
-Every attempt appends one structured row to `jev_shadow_audit`. It contains the
-packet/source or missing-item identity, checksums, claim/question versions,
-pinned and returned model versions, complete probabilities, confidence, token
-usage, latency, retry/error outcome, and observation time. It contains no
-generated prose or secret values.
+Every invocation produces one structured audit record. When a database
+connection is supplied, the sidecar appends it to `jev_shadow_audit`. The row
+contains the packet/source or missing-item identity, checksums,
+claim/question versions, pinned and returned model versions, complete
+probabilities, confidence, token usage, latency, retry/error outcome, and
+observation time. It contains no generated prose or secret values.
 
 ```sql
 SELECT observed_at, feature, packet_hash, selected_class, probabilities,
