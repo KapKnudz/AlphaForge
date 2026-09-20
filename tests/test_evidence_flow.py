@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from datetime import UTC, datetime
@@ -432,7 +433,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
                 },
                 "extraction": {
                     "extractor": "pypdf",
-                    "text_checksum": "2cf40b007e170144ae8c8223864ba6599b38c51c43b00aa58f1f5a172e11685b",
+                    "text_checksum": hashlib.sha256(b"[page 1]\nEvidence").hexdigest(),
                     "page_count": 1,
                 },
                 "pages": [
@@ -440,7 +441,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
                         "page_number": 1,
                         "anchor": "document:1#page:1",
                         "text": "Evidence",
-                        "text_checksum": "03867aea70acaf4c5dce37a76cf5a04dab1716d6ff70bf03761c439daa8be984",
+                        "text_checksum": hashlib.sha256(b"Evidence").hexdigest(),
                     }
                 ],
             }
@@ -449,7 +450,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
         "limitations": [],
     }
     packet["packet_hash"] = (
-        __import__("hashlib")
+        hashlib
         .sha256(
             json.dumps(
                 {key: value for key, value in packet.items() if key != "packet_hash"},
