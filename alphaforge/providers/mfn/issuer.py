@@ -195,7 +195,7 @@ class IssuerResolution:
 class MfnIssuerResolver:
     """Resolve one issuer using MFN-owned index/search surfaces only."""
 
-    def __init__(self, *, base_url: str = BASE_URL, max_surfaces: int = 4) -> None:
+    def __init__(self, *, base_url: str = BASE_URL, max_surfaces: int = 5) -> None:
         self.base_url = base_url.rstrip("/")
         self.max_surfaces = max(1, max_surfaces)
 

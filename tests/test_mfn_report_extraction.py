@@ -95,6 +95,23 @@ def test_scrape_details_prefers_published_json_timestamp():
     assert articles[0]["published_at"] == "2026-05-07T06:30:00Z"
 
 
+def test_scrape_details_does_not_promote_json_created_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <script type="application/ld+json">
+      {"@type": "WebPage", "dateCreated": "2026-05-01T08:00:00Z"}
+    </script>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] is None
+
+
 def test_scrape_details_normalises_human_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>

@@ -13,6 +13,7 @@ from typing import Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
+    complete_evidence_source_urls,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
     get_verified_mfn_mapping,
@@ -20,7 +21,11 @@ from alphaforge.db.repositories import (
     persist_evidence_packet,
     record_mfn_feed_check,
 )
-from alphaforge.evidence.ingest import ResearchDocumentIngestionService, bilingual_dedupe
+from alphaforge.evidence.ingest import (
+    ResearchDocumentIngestionService,
+    bilingual_dedupe,
+    canonical_release_url,
+)
 from alphaforge.evidence.mfn_taxonomy import is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.issuer import MfnIssuerResolver
@@ -140,6 +145,9 @@ def build_frozen_evidence_packet(
         JOIN document_extractions e ON e.document_id=d.id
         WHERE d.company_id=? AND d.duplicate_of IS NULL
           AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
+          AND EXISTS (
+              SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
+          )
         ORDER BY d.source_url, a.sha256, d.id
         """,
         (company_id, as_of[:10]),
@@ -365,6 +373,10 @@ class OneCompanyEvidenceFlow:
         feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
         if now.weekday() == 6:
             feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
+        complete_source_urls = set(complete_evidence_source_urls(self.conn, company_id))
+        complete_canonical_urls = {
+            canonical_release_url(url) for url in complete_source_urls
+        }
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
         for entry in feed:
@@ -374,14 +386,15 @@ class OneCompanyEvidenceFlow:
             if url:
                 seen_feed_urls.add(url)
             unique_feed.append(entry)
-        unseen_feed = [
-            entry
-            for entry in unique_feed
-            if not (
-                (entry_url := entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url"))
-                and find_complete_evidence_document(self.conn, company_id, entry_url) is not None
-            )
-        ]
+        unseen_feed = []
+        for entry in unique_feed:
+            entry_url = entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
+            if entry_url and (
+                find_complete_evidence_document(self.conn, company_id, entry_url) is not None
+                or canonical_release_url(entry_url) in complete_canonical_urls
+            ):
+                continue
+            unseen_feed.append(entry)
         if not dry_run:
             record_mfn_feed_check(
                 self.conn,
@@ -434,7 +447,20 @@ class OneCompanyEvidenceFlow:
             except PdfAcquisitionError as exc:
                 result.skipped[exc.code] = result.skipped.get(exc.code, 0) + 1
                 continue
-            extracted = ingestion.extract_pdf_pages(downloaded.content, max_pages=self.limits.max_pages)
+            try:
+                extracted = ingestion.extract_pdf_pages(
+                    downloaded.content, max_pages=self.limits.max_pages
+                )
+            except Exception:
+                result.skipped["pdf_extraction_failed"] = result.skipped.get(
+                    "pdf_extraction_failed", 0
+                ) + 1
+                continue
+            if not extracted.pages:
+                result.skipped["pdf_extraction_failed"] = result.skipped.get(
+                    "pdf_extraction_failed", 0
+                ) + 1
+                continue
             article = {
                 **article,
                 "ingested_lang": article.get("lang") or article.get("ingested_lang") or "en",

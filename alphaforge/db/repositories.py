@@ -797,6 +797,32 @@ def find_complete_evidence_document(
     return dict(row) if row is not None else None
 
 
+def complete_evidence_source_urls(conn: Any, company_id: int) -> tuple[str, ...]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT d.source_url
+        FROM research_documents d
+        WHERE d.company_id=?
+          AND EXISTS (
+              SELECT 1 FROM research_attachments a
+              WHERE a.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+          AND EXISTS (
+              SELECT 1 FROM document_extractions e
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              JOIN document_extractions e ON e.id=p.extraction_id
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+        """,
+        (company_id,),
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
 def find_complete_evidence_attachment(
     conn: Any, source_url: str, company_id: int | None = None
 ) -> dict[str, Any] | None:

@@ -58,7 +58,7 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
     return years[-1] if years else ""
 
 
-def _canonical_url(url: str) -> str:
+def canonical_release_url(url: str) -> str:
     if not url:
         return ""
     parsed = urlparse(url.lower())
@@ -80,7 +80,7 @@ def _bilingual_group_key(doc: dict[str, Any]) -> str:
     )
     if attachment_checksum:
         return f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}"
-    canonical = _canonical_url(str(doc.get("source_url") or doc.get("url") or ""))
+    canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     published = str(doc.get("published_at") or "")[:10]
     if canonical:
         return f"url:{issuer}|{canonical}|{published}"

@@ -72,6 +72,25 @@ def test_exact_mfn_candidate_is_observed_and_can_be_persisted():
     assert mapping["identity_evidence"]["matched_identifiers"] == ["exact"]
 
 
+def test_mfn_resolver_queries_borsdata_identity_surface():
+    company = {
+        "id": 7,
+        "borsdata_id": 7001,
+        "name": "Exact AB",
+        "ticker": "EXACT",
+        "isin": "SE0000007001",
+    }
+    requested = []
+
+    def request(method, url, **kwargs):
+        requested.append(url)
+        return SimpleNamespace(status_code=404, text="")
+
+    with patch("alphaforge.providers.mfn.issuer.request_with_retry", side_effect=request):
+        MfnIssuerResolver(base_url="https://mfn.test").discover(company)
+    assert "https://mfn.test/search?q=7001" in requested
+
+
 def test_mapped_mfn_mapping_requires_structured_provenance_and_reason():
     conn = _connection()
     company_id = upsert_company(conn, {"insId": 7004, "name": "Evidence AB", "ticker": "EVID"})
@@ -334,6 +353,14 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     assert packet["sources"][0]["bilingual_siblings"][0]["language"] == "sv"
     assert "scanned_pdf_no_ocr" in packet["limitations"]
     assert "page_resource_limit" in packet["limitations"]
+    second = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([articles[0]]),
+        limits=EvidenceResourceLimits(max_pages=3),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-20")
+    assert second.status == "complete"
+    assert second.packet_hash == result.packet_hash
 
 
 @pytest.mark.parametrize(

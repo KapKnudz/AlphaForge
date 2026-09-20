@@ -124,7 +124,6 @@ class _MfnHtmlParser(HTMLParser):
         self.timestamps: list[str] = []
         self.generic_timestamps: list[str] = []
         self.json_published_timestamps: list[str] = []
-        self.json_created_timestamps: list[str] = []
         self.json_parts: list[str] = []
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
@@ -225,9 +224,6 @@ class _MfnHtmlParser(HTMLParser):
                     candidate = item.get(key)
                     if isinstance(candidate, str):
                         self.json_published_timestamps.append(candidate)
-                candidate = item.get("dateCreated")
-                if isinstance(candidate, str):
-                    self.json_created_timestamps.append(candidate)
                 for child in item.values():
                     walk(child)
             elif isinstance(item, list):
@@ -285,15 +281,6 @@ def _parse_html(html: str) -> dict[str, Any]:
             (
                 normalised
                 for raw in parser.generic_timestamps
-                if (normalised := _normalise_timestamp(raw))
-            ),
-            None,
-        )
-    if published_at is None:
-        published_at = next(
-            (
-                normalised
-                for raw in parser.json_created_timestamps
                 if (normalised := _normalise_timestamp(raw))
             ),
             None,
