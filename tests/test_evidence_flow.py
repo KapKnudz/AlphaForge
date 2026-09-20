@@ -449,16 +449,12 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
         "evidence_catalog": {"canonical_source_ids": ["document:1"]},
         "limitations": [],
     }
-    packet["packet_hash"] = (
-        hashlib
-        .sha256(
-            json.dumps(
-                {key: value for key, value in packet.items() if key != "packet_hash"},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        )
-        .hexdigest()
-    )
+    packet["packet_hash"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in packet.items() if key != "packet_hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     candidate.research_evidence["evidence_packet"] = packet
     assert gate.assess(candidate).status == "ready"
