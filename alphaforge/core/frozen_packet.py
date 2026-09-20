@@ -79,12 +79,16 @@ def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
             return False
         if not isinstance(pages, list) or not pages:
             return False
+        page_numbers: list[int] = []
         for page in pages:
             if not isinstance(page, dict):
                 return False
             if not isinstance(page.get("page_number"), int) or isinstance(page["page_number"], bool):
                 return False
-            if page["page_number"] < 1:
+            if page["page_number"] < 1 or page["page_number"] in page_numbers:
+                return False
+            page_numbers.append(page["page_number"])
+            if page["page_number"] > extraction["page_count"]:
                 return False
             if not isinstance(page.get("anchor"), str) or not page["anchor"]:
                 return False
@@ -92,4 +96,13 @@ def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
                 return False
             if not isinstance(page.get("text_checksum"), str) or not page["text_checksum"]:
                 return False
+            expected_page_checksum = hashlib.sha256(page["text"].encode("utf-8")).hexdigest()
+            if page["text_checksum"] != expected_page_checksum:
+                return False
+        canonical_text = "\n\n".join(
+            f"[page {page['page_number']}]\n{page['text']}".rstrip() for page in pages
+        )
+        expected_text_checksum = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+        if extraction["text_checksum"] != expected_text_checksum:
+            return False
     return set(catalog_ids) == set(source_ids) and len(catalog_ids) == len(source_ids)

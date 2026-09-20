@@ -823,7 +823,9 @@ def complete_evidence_source_urls(conn: Any, company_id: int) -> tuple[str, ...]
     return tuple(str(row[0]) for row in rows)
 
 
-def complete_evidence_identity_documents(conn: Any, company_id: int) -> list[dict[str, Any]]:
+def complete_evidence_identity_documents(
+    conn: Any, company_id: int, *, as_of: str | None = None
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT d.source_url, d.title, d.published_at, d.content_text, d.ingested_lang,
@@ -833,6 +835,7 @@ def complete_evidence_identity_documents(conn: Any, company_id: int) -> list[dic
         JOIN research_attachments a ON a.document_id=d.id
         JOIN document_extractions e ON e.document_id=d.id
         WHERE d.company_id=? AND d.duplicate_of IS NULL
+          AND (? IS NULL OR (d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?))
           AND EXISTS (
               SELECT 1
               FROM document_pages p
@@ -840,7 +843,7 @@ def complete_evidence_identity_documents(conn: Any, company_id: int) -> list[dic
           )
         ORDER BY d.source_url, d.id
         """,
-        (company_id,),
+        (company_id, as_of[:10] if as_of else None, as_of[:10] if as_of else None),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -865,6 +868,8 @@ def persist_evidence_sibling(
     if not isinstance(metadata, dict):
         metadata = {}
     metadata["duplicate_of_source_url"] = canonical_source_url
+    if sibling.get("_bilingual_group_id") is not None:
+        metadata["bilingual_group_id"] = sibling["_bilingual_group_id"]
     metadata["bilingual_selection_rule"] = sibling.get(
         "bilingual_selection_rule", "deterministic_en_fallback"
     )

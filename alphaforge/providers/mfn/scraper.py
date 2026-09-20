@@ -17,15 +17,10 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
+from alphaforge.providers.mfn.errors import MfnAcquisitionError
 
 BASE_URL = "https://mfn.se"
 MAX_ARTICLES = 24
-
-
-class MfnAcquisitionError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
 
 
 _HTML_VOID_TAGS = frozenset(

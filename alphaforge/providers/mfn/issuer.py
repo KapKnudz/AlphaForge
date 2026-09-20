@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import quote, urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 from alphaforge.db.repositories import (
     persist_mfn_issuer_candidates,
@@ -24,6 +24,25 @@ from alphaforge.db.repositories import (
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 
 BASE_URL = "https://mfn.se"
+
+
+class MfnIssuerAcquisitionError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _canonical_issuer_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/") or "/",
+            "",
+            "",
+        )
+    )
 _RELEASE_SEGMENTS = {"a", "cision", "release", "releases"}
 _INDEX_SEGMENTS = {"all", "company", "companies", "issuer", "issuers", "search"}
 _EXTERNAL_IDENTITY_ATTRIBUTE_KEYS = {
@@ -167,10 +186,11 @@ def parse_mfn_issuer_candidates(
         matched_identifiers = sorted(identifiers.intersection(candidate_identifiers))
         if not matched_identifiers:
             continue
-        key = (slug.lower(), absolute)
+        canonical_url = _canonical_issuer_url(absolute)
+        key = (slug.lower(), canonical_url)
         candidates[key] = {
             "mfn_slug": slug,
-            "source_url": absolute,
+            "source_url": canonical_url,
             "discovery_source": discovery_source,
             "match_basis": "exact_identifier",
             "identity_evidence": {
@@ -221,8 +241,15 @@ class MfnIssuerResolver:
             for url in urls[: self.max_surfaces]:
                 try:
                     response = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise MfnIssuerAcquisitionError(
+                        "mfn_issuer_fetch_failed", f"MFN issuer request failed: {exc}"
+                    ) from exc
+                if response.status_code >= 500 or response.status_code in {408, 429}:
+                    raise MfnIssuerAcquisitionError(
+                        "mfn_issuer_http_status",
+                        f"MFN issuer request returned HTTP {response.status_code}",
+                    )
                 if response.status_code == 200:
                     fetched.append((url, response.text))
             surfaces = fetched
@@ -238,7 +265,7 @@ class MfnIssuerResolver:
                 )
             )
         unique = {
-            (candidate["mfn_slug"].lower(), candidate["source_url"]): candidate
+            (candidate["mfn_slug"].lower(), _canonical_issuer_url(candidate["source_url"])): candidate
             for candidate in candidates
         }
         ordered = tuple(sorted(unique.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"])))

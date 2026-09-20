@@ -426,7 +426,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
                 },
                 "extraction": {
                     "extractor": "pypdf",
-                    "text_checksum": "def",
+                    "text_checksum": "2cf40b007e170144ae8c8223864ba6599b38c51c43b00aa58f1f5a172e11685b",
                     "page_count": 1,
                 },
                 "pages": [
@@ -434,7 +434,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
                         "page_number": 1,
                         "anchor": "document:1#page:1",
                         "text": "Evidence",
-                        "text_checksum": "ghi",
+                        "text_checksum": "03867aea70acaf4c5dce37a76cf5a04dab1716d6ff70bf03761c439daa8be984",
                     }
                 ],
             }

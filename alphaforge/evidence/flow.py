@@ -9,7 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
@@ -29,8 +29,10 @@ from alphaforge.evidence.ingest import (
 )
 from alphaforge.evidence.mfn_taxonomy import is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
-from alphaforge.providers.mfn.issuer import MfnIssuerResolver
-from alphaforge.providers.mfn.scraper import MfnAcquisitionError, MfnScraper
+from alphaforge.providers.mfn.errors import MfnAcquisitionError
+from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
+if TYPE_CHECKING:
+    from alphaforge.providers.mfn.scraper import MfnScraper
 
 
 @dataclass(frozen=True)
@@ -323,13 +325,17 @@ class OneCompanyEvidenceFlow:
         self,
         conn: Any,
         *,
-        scraper: MfnScraper | None = None,
+        scraper: "MfnScraper" | None = None,
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.conn = conn
-        self.scraper = scraper or MfnScraper()
+        if scraper is None:
+            from alphaforge.providers.mfn.scraper import MfnScraper
+
+            scraper = MfnScraper()
+        self.scraper = scraper
         self.resolver = resolver or MfnIssuerResolver(base_url=self.scraper.base_url)
         self.limits = limits
         self.now = now or (lambda: datetime.now(UTC))
@@ -347,7 +353,16 @@ class OneCompanyEvidenceFlow:
         company = dict(row)
         mapping = get_verified_mfn_mapping(self.conn, company_id)
         if mapping is None:
-            resolution = self.resolver.discover(company)
+            try:
+                resolution = self.resolver.discover(company)
+            except MfnIssuerAcquisitionError as exc:
+                return EvidenceFlowResult(
+                    "acquisition_failed",
+                    company_id,
+                    mapping_status="unavailable",
+                    skipped={exc.code: 1},
+                    message=str(exc),
+                )
             if not dry_run:
                 self.resolver.persist_resolution(self.conn, company, resolution)
             if resolution.status != "mapped":
@@ -444,7 +459,9 @@ class OneCompanyEvidenceFlow:
             eligible.append(article)
         packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
         persisted_identity = []
-        for persisted in complete_evidence_identity_documents(self.conn, company_id):
+        for persisted in complete_evidence_identity_documents(
+            self.conn, company_id, as_of=as_of
+        ):
             metadata = {}
             if persisted["raw_metadata"]:
                 try:
@@ -466,6 +483,7 @@ class OneCompanyEvidenceFlow:
                     "attachment_checksum": persisted["attachment_checksum"],
                     "ingested_lang": persisted["ingested_lang"],
                     "lang": persisted["ingested_lang"],
+                    "_bilingual_group_id": metadata.get("bilingual_group_id"),
                     "_persisted_evidence": True,
                 }
             )
