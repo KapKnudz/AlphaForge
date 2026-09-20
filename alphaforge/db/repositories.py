@@ -823,6 +823,81 @@ def complete_evidence_source_urls(conn: Any, company_id: int) -> tuple[str, ...]
     return tuple(str(row[0]) for row in rows)
 
 
+def complete_evidence_identity_documents(conn: Any, company_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT d.source_url, d.title, d.published_at, d.content_text, d.ingested_lang,
+               d.raw_metadata, d.checksum AS document_checksum,
+               a.source_url AS attachment_url, a.sha256 AS attachment_checksum
+        FROM research_documents d
+        JOIN research_attachments a ON a.document_id=d.id
+        JOIN document_extractions e ON e.document_id=d.id
+        WHERE d.company_id=? AND d.duplicate_of IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              WHERE p.extraction_id=e.id
+          )
+        ORDER BY d.source_url, d.id
+        """,
+        (company_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def persist_evidence_sibling(
+    conn: Any,
+    *,
+    company_id: int,
+    canonical_source_url: str,
+    sibling: dict[str, Any],
+) -> None:
+    canonical = conn.execute(
+        "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, canonical_source_url),
+    ).fetchone()
+    if canonical is None:
+        raise ValueError("canonical evidence document was not persisted")
+    sibling_url = str(sibling.get("source_url") or sibling.get("url") or "").strip()
+    if not sibling_url or sibling_url == canonical_source_url:
+        return
+    metadata = dict(sibling.get("raw_metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["duplicate_of_source_url"] = canonical_source_url
+    metadata["bilingual_selection_rule"] = sibling.get(
+        "bilingual_selection_rule", "deterministic_en_fallback"
+    )
+    conn.execute(
+        """
+        INSERT INTO research_documents
+            (company_id, source_url, source_type, title, published_at, content_text,
+             duplicate_of, ingested_lang, checksum, raw_metadata)
+        VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, source_url) DO UPDATE SET
+            title=excluded.title,
+            published_at=excluded.published_at,
+            content_text=excluded.content_text,
+            duplicate_of=excluded.duplicate_of,
+            ingested_lang=excluded.ingested_lang,
+            checksum=COALESCE(excluded.checksum, research_documents.checksum),
+            raw_metadata=excluded.raw_metadata
+        """,
+        (
+            company_id,
+            sibling_url,
+            sibling.get("title"),
+            sibling.get("published_at"),
+            sibling.get("content_text") or sibling.get("body"),
+            int(canonical[0]),
+            sibling.get("lang") or sibling.get("ingested_lang") or "en",
+            sibling.get("pdf_checksum") or sibling.get("attachment_checksum"),
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    conn.commit()
+
+
 def complete_evidence_language_majority(
     conn: Any, company_id: int, as_of: str
 ) -> str | None:

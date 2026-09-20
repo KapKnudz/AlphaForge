@@ -115,7 +115,7 @@ def test_scrape_details_does_not_promote_json_created_timestamp():
 def test_scrape_details_normalises_human_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
-    <time>7 May 2026</time>
+    <time class="published">7 May 2026</time>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")
@@ -130,7 +130,7 @@ def test_scrape_details_normalises_human_timestamp():
 def test_scrape_details_normalises_swedish_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
-    <time>7 maj 2026</time>
+    <time class="publication-date">7 maj 2026</time>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")

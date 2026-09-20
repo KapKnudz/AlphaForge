@@ -20,6 +20,14 @@ from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 
 BASE_URL = "https://mfn.se"
 MAX_ARTICLES = 24
+
+
+class MfnAcquisitionError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 _HTML_VOID_TAGS = frozenset(
     {
         "area",
@@ -131,6 +139,7 @@ class _MfnHtmlParser(HTMLParser):
         self._article_depth = 0
         self._release_body_depth = 0
         self._time_active = False
+        self._time_publication_active = False
         self._time_parts: list[str] = []
         self._json_active = False
 
@@ -159,8 +168,15 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "time":
             self._time_active = True
             self._time_parts = []
+            label = " ".join(
+                values.get(key, "")
+                for key in ("class", "data-type", "aria-label", "itemprop")
+            ).lower()
+            self._time_publication_active = bool(
+                re.search(r"publish|publication|release date|released|utgiv", label)
+            )
             timestamp = values.get("datetime") or values.get("data-datetime")
-            if timestamp:
+            if timestamp and self._time_publication_active:
                 self.timestamps.append(timestamp)
         if lower_tag == "meta":
             name = (values.get("property") or values.get("name") or "").lower()
@@ -184,9 +200,10 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "h1":
             self._h1_active = False
         if lower_tag == "time":
-            if self._time_parts:
+            if self._time_parts and self._time_publication_active:
                 self.generic_timestamps.append(" ".join(self._time_parts))
             self._time_active = False
+            self._time_publication_active = False
             self._time_parts = []
         if lower_tag == "script" and self._json_active:
             self._json_active = False
@@ -334,10 +351,12 @@ class MfnScraper:
         time.sleep(1.0)
         try:
             resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise MfnAcquisitionError("mfn_feed_fetch_failed", f"MFN feed request failed: {exc}") from exc
         if resp.status_code != 200:
-            return []
+            raise MfnAcquisitionError(
+                "mfn_feed_http_status", f"MFN feed request returned HTTP {resp.status_code}"
+            )
         parser = _MfnHtmlParser()
         parser.feed(resp.text)
         articles: list[dict[str, Any]] = []
@@ -388,10 +407,14 @@ class MfnScraper:
             time.sleep(1.0)
             try:
                 resp = request_with_retry("GET", url, timeout=60, max_retries=MAX_RETRIES)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise MfnAcquisitionError(
+                    "mfn_detail_fetch_failed", f"MFN detail request failed: {exc}"
+                ) from exc
             if resp.status_code != 200:
-                continue
+                raise MfnAcquisitionError(
+                    "mfn_detail_http_status", f"MFN detail request returned HTTP {resp.status_code}"
+                )
             parsed = _parse_html(resp.text)
             title = parsed["title"] or seed.get("title") or ""
             if reports_only and not is_report(title):

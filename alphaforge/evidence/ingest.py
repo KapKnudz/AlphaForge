@@ -93,8 +93,17 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     if canonical:
         keys.add(f"url:{issuer}|{canonical}|{published}")
-    if (issuer or period) and (kind or period):
-        keys.add(f"report:{issuer}|{kind}|{period}")
+    title = str(doc.get("title") or "").lower()
+    if "årsredovisning" in title or "annual report" in title:
+        title_kind = "annual_report"
+    elif "bokslutskommuniké" in title or "year-end report" in title or "year end report" in title:
+        title_kind = "year_end_report"
+    elif kind:
+        title_kind = kind
+    else:
+        title_kind = ""
+    if (issuer or period) and title_kind and period:
+        keys.add(f"report:{issuer}|{title_kind}|{period}")
     elif (issuer or period) and published:
         keys.add(f"report:{issuer}|{kind}|{published}")
     if not keys:

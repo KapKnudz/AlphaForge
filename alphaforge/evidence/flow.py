@@ -13,24 +13,24 @@ from typing import Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
+    complete_evidence_identity_documents,
     complete_evidence_language_majority,
-    complete_evidence_source_urls,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
     get_verified_mfn_mapping,
     persist_evidence_document,
     persist_evidence_packet,
+    persist_evidence_sibling,
     record_mfn_feed_check,
 )
 from alphaforge.evidence.ingest import (
     ResearchDocumentIngestionService,
     bilingual_dedupe,
-    canonical_release_url,
 )
 from alphaforge.evidence.mfn_taxonomy import is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.issuer import MfnIssuerResolver
-from alphaforge.providers.mfn.scraper import MfnScraper
+from alphaforge.providers.mfn.scraper import MfnAcquisitionError, MfnScraper
 
 
 @dataclass(frozen=True)
@@ -372,13 +372,18 @@ class OneCompanyEvidenceFlow:
         if mapping is None:
             return EvidenceFlowResult("mapping_unavailable", company_id, mapping_status="unmapped")
         now = self.now()
-        feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
-        if now.weekday() == 6:
-            feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
-        complete_source_urls = set(complete_evidence_source_urls(self.conn, company_id))
-        complete_canonical_urls = {
-            canonical_release_url(url) for url in complete_source_urls
-        }
+        try:
+            feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
+            if now.weekday() == 6:
+                feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
+        except MfnAcquisitionError as exc:
+            return EvidenceFlowResult(
+                "acquisition_failed",
+                company_id,
+                mapping_status="mapped",
+                skipped={exc.code: 1},
+                message=str(exc),
+            )
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
         for entry in feed:
@@ -391,10 +396,9 @@ class OneCompanyEvidenceFlow:
         unseen_feed = []
         for entry in unique_feed:
             entry_url = entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
-            if entry_url and (
-                find_complete_evidence_document(self.conn, company_id, entry_url) is not None
-                or canonical_release_url(entry_url) in complete_canonical_urls
-            ):
+            if entry_url and find_complete_evidence_document(
+                self.conn, company_id, entry_url
+            ) is not None:
                 continue
             unseen_feed.append(entry)
         if not dry_run:
@@ -406,7 +410,17 @@ class OneCompanyEvidenceFlow:
                 len(unseen_feed),
             )
             self.conn.commit()
-        details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+        try:
+            details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+        except MfnAcquisitionError as exc:
+            return EvidenceFlowResult(
+                "acquisition_failed",
+                company_id,
+                mapping_status="mapped",
+                discovered=len(unseen_feed),
+                skipped={exc.code: 1},
+                message=str(exc),
+            )
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
@@ -429,13 +443,52 @@ class OneCompanyEvidenceFlow:
                 continue
             eligible.append(article)
         packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
-        deduped = bilingual_dedupe(eligible, packet_majority=packet_majority)
-        result.eligible = len(deduped)
+        persisted_identity = []
+        for persisted in complete_evidence_identity_documents(self.conn, company_id):
+            metadata = {}
+            if persisted["raw_metadata"]:
+                try:
+                    loaded = json.loads(persisted["raw_metadata"])
+                    if isinstance(loaded, dict):
+                        metadata = loaded
+                except (TypeError, ValueError):
+                    metadata = {}
+            persisted_identity.append(
+                {
+                    "source_url": persisted["source_url"],
+                    "title": persisted["title"],
+                    "published_at": persisted["published_at"],
+                    "content_text": persisted["content_text"],
+                    "mfn_slug": metadata.get("mfn_slug"),
+                    "report_kind": metadata.get("report_kind"),
+                    "fiscal_period": metadata.get("fiscal_period") or metadata.get("report_period"),
+                    "attachment_url": persisted["attachment_url"],
+                    "attachment_checksum": persisted["attachment_checksum"],
+                    "ingested_lang": persisted["ingested_lang"],
+                    "lang": persisted["ingested_lang"],
+                    "_persisted_evidence": True,
+                }
+            )
+        deduped = bilingual_dedupe(
+            persisted_identity + eligible,
+            packet_majority=packet_majority,
+        )
+        result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
         if dry_run:
             result.status = "dry_run"
             return result
         ingestion = ResearchDocumentIngestionService(self.conn)
         for article in deduped:
+            if article.get("_persisted_evidence"):
+                for sibling in article.get("_suppressed_variants", []):
+                    if not sibling.get("_persisted_evidence"):
+                        persist_evidence_sibling(
+                            self.conn,
+                            company_id=company_id,
+                            canonical_source_url=str(article["source_url"]),
+                            sibling=sibling,
+                        )
+                continue
             attachment_url = article.get("attachment_url") or article.get("storage_url")
             if not attachment_url:
                 result.skipped["missing_pdf_attachment"] = result.skipped.get("missing_pdf_attachment", 0) + 1
