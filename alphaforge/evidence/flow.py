@@ -13,6 +13,7 @@ from typing import Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
+    complete_evidence_language_majority,
     complete_evidence_source_urls,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
@@ -426,7 +427,8 @@ class OneCompanyEvidenceFlow:
                 result.skipped["future_dated_release"] = result.skipped.get("future_dated_release", 0) + 1
                 continue
             eligible.append(article)
-        deduped = bilingual_dedupe(eligible)
+        packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
+        deduped = bilingual_dedupe(eligible, packet_majority=packet_majority)
         result.eligible = len(deduped)
         if dry_run:
             result.status = "dry_run"

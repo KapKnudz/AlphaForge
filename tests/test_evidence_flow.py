@@ -257,7 +257,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert first.status == "complete"
     assert first.skipped == {"future_dated_release": 1, "missing_publication_timestamp": 1}
     feed_check = conn.execute(
-        "SELECT discovered_count, unseen_count FROM mfn_feed_checks ORDER BY id DESC LIMIT 1"
+        "SELECT discovered_count, unseen_count FROM mfn_feed_checks ORDER BY checked_at DESC LIMIT 1"
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)

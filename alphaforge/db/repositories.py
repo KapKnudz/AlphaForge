@@ -823,6 +823,39 @@ def complete_evidence_source_urls(conn: Any, company_id: int) -> tuple[str, ...]
     return tuple(str(row[0]) for row in rows)
 
 
+def complete_evidence_language_majority(
+    conn: Any, company_id: int, as_of: str
+) -> str | None:
+    rows = conn.execute(
+        """
+        SELECT COALESCE(d.ingested_lang, 'en') AS language, COUNT(*) AS count
+        FROM research_documents d
+        WHERE d.company_id=? AND d.duplicate_of IS NULL
+          AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
+          AND EXISTS (
+              SELECT 1 FROM research_attachments a WHERE a.document_id=d.id
+          )
+          AND EXISTS (
+              SELECT 1 FROM document_extractions e WHERE e.document_id=d.id
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              JOIN document_extractions e ON e.id=p.extraction_id
+              WHERE e.document_id=d.id
+          )
+        GROUP BY COALESCE(d.ingested_lang, 'en')
+        """,
+        (company_id, as_of[:10]),
+    ).fetchall()
+    counts = {str(row[0]): int(row[1]) for row in rows}
+    if counts.get("sv", 0) > counts.get("en", 0):
+        return "sv"
+    if counts.get("en", 0) > counts.get("sv", 0):
+        return "en"
+    return None
+
+
 def find_complete_evidence_attachment(
     conn: Any, source_url: str, company_id: int | None = None
 ) -> dict[str, Any] | None:

@@ -80,13 +80,18 @@ def _bilingual_group_key(doc: dict[str, Any]) -> str:
     )
     if attachment_checksum:
         return f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}"
+    body = doc.get("content_text") or doc.get("body")
+    if body:
+        normalized_body = " ".join(str(body).split()).casefold()
+        body_checksum = hashlib.sha256(normalized_body.encode()).hexdigest()
+        return f"body:{issuer}|{kind}|{period}|{body_checksum}"
+    filename = _attachment_filename(doc)
+    if filename and (issuer or period):
+        return f"attachment:{issuer}|{kind}|{period}|{filename}"
     canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     published = str(doc.get("published_at") or "")[:10]
     if canonical:
         return f"url:{issuer}|{canonical}|{published}"
-    filename = _attachment_filename(doc)
-    if filename and (issuer or period):
-        return f"attachment:{issuer}|{kind}|{period}|{filename}"
     title = re.sub(
         r"\b(inbjudan|invitation to|publicerar|has published)\b",
         "",
