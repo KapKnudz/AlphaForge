@@ -1,3 +1,5 @@
+import hashlib
+import json
 from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
@@ -72,7 +74,17 @@ class AgentReadinessGate:
                 )
             )
 
-        if not candidate.research_evidence.get("documents"):
+        evidence = candidate.research_evidence or {}
+        if getattr(candidate, "evidence_lane", evidence.get("evidence_lane", False)):
+            if not _valid_frozen_packet(evidence.get("evidence_packet")):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="frozen_evidence_packet_missing",
+                        category="evidence",
+                        message="a valid frozen point-in-time evidence packet is required",
+                    )
+                )
+        elif not evidence.get("documents"):
             blockers.append(
                 ReadinessBlocker(
                     code="primary_evidence_missing",
@@ -190,6 +202,34 @@ def _subsection_status(value) -> EvidenceSubsectionStatus:
 
 def _positive(value) -> bool:
     return isinstance(value, (int, float)) and isfinite(value) and value > 0
+
+
+def _valid_frozen_packet(packet) -> bool:
+    """Validate the persisted packet contract without importing the evidence layer."""
+    if not isinstance(packet, dict) or packet.get("frozen") is not True:
+        return False
+    packet_hash = packet.get("packet_hash")
+    sources = packet.get("sources")
+    if not isinstance(packet_hash, str) or not packet_hash or not isinstance(sources, list) or not sources:
+        return False
+    for source in sources:
+        if not isinstance(source, dict):
+            return False
+        if not source.get("source_id") or not source.get("publication_date"):
+            return False
+        if source.get("publication_timestamp_authoritative") is not True:
+            return False
+        attachment = source.get("attachment")
+        pages = source.get("pages")
+        if not isinstance(attachment, dict) or not attachment.get("sha256"):
+            return False
+        if not isinstance(pages, list) or not pages:
+            return False
+        if any(not isinstance(page, dict) or not page.get("anchor") for page in pages):
+            return False
+    without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
+    canonical = json.dumps(without_hash, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest() == packet_hash
 
 
 def _reverse_dcf_blockers(reverse_dcf) -> list[ReadinessBlocker]:

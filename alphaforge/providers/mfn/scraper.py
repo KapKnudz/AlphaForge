@@ -419,7 +419,10 @@ class MfnScraper:
                 "content_text": body,
                 "storage_url": parsed["storage_url"],
                 "attachment_url": parsed["storage_url"],
-                "published_at": parsed["published_at"] or seed.get("published_at"),
+                # Feed-card dates are not a stable publication authority; only
+                # the detail page's timestamp metadata may enter the frozen
+                # evidence lane.
+                "published_at": parsed["published_at"],
                 "lang": seed.get("lang") or _language_hint(title),
             }
             article.update(_report_identity_seed(article))

@@ -80,13 +80,13 @@ def _bilingual_group_key(doc: dict[str, Any]) -> str:
     )
     if attachment_checksum:
         return f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}"
-    filename = _attachment_filename(doc)
-    if filename and (issuer or period):
-        return f"attachment:{issuer}|{kind}|{period}|{filename}"
     canonical = _canonical_url(str(doc.get("source_url") or doc.get("url") or ""))
     published = str(doc.get("published_at") or "")[:10]
     if canonical:
         return f"url:{issuer}|{canonical}|{published}"
+    filename = _attachment_filename(doc)
+    if filename and (issuer or period):
+        return f"attachment:{issuer}|{kind}|{period}|{filename}"
     title = re.sub(
         r"\b(inbjudan|invitation to|publicerar|has published)\b",
         "",
@@ -212,6 +212,7 @@ class PdfExtraction:
     page_truncated: int
     scanned: bool
     pages: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...] = ()
 
 
 class ResearchDocumentIngestionService:
@@ -358,16 +359,23 @@ class ResearchDocumentIngestionService:
         self.conn.commit()
         return IngestResult(inserted=inserted, suppressed=suppressed)
 
-    def extract_pdf_pages(self, pdf_bytes: bytes) -> PdfExtraction:
-        """Extract every page with pypdf while retaining page anchors."""
+    def extract_pdf_pages(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> PdfExtraction:
+        """Extract pages with pypdf while retaining stable page anchors.
+
+        ``max_pages`` is an acquisition-flow resource limit. The default stays
+        unbounded for the existing repository API; callers that enforce a
+        bounded download pass an explicit cap and receive truncation metadata.
+        """
         try:
             import io
 
             from pypdf import PdfReader
 
             reader = PdfReader(io.BytesIO(pdf_bytes))
+            total_page_count = len(reader.pages)
+            selected_pages = reader.pages if max_pages is None else reader.pages[:max_pages]
             pages: list[dict[str, Any]] = []
-            for page_number, page in enumerate(reader.pages, start=1):
+            for page_number, page in enumerate(selected_pages, start=1):
                 try:
                     text = re.sub(r"\n{3,}", "\n\n", page.extract_text() or "").strip()
                 except Exception:
@@ -375,28 +383,37 @@ class ResearchDocumentIngestionService:
                 pages.append(
                     {
                         "page_number": page_number,
+                        "anchor": f"page:{page_number}",
                         "text": text,
                         "text_length": len(text),
                         "extractor": "pypdf",
                     }
                 )
-            page_count = len(pages)
+            page_count = total_page_count
             anchored = "\n\n".join(
                 f"[page {page['page_number']}]\n{page['text']}".rstrip() for page in pages
             )
-            scanned = page_count > 5 and len(anchored.strip()) < max(200, page_count * 20)
+            nonempty_chars = sum(int(page["text_length"]) for page in pages)
+            scanned = page_count > 5 and nonempty_chars < max(200, len(pages) * 20)
+            limitations: list[str] = []
             if scanned:
+                limitations.append("scanned_pdf_no_ocr")
                 build_ownership_evidence(anchored).get("limitations")
+            elif page_count and nonempty_chars < 20:
+                limitations.append("near_empty_pdf_no_ocr")
+            if max_pages is not None and total_page_count > max_pages:
+                limitations.append("page_resource_limit")
             return PdfExtraction(
                 text=anchored,
                 page_count=page_count,
-                pages_included=f"1-{page_count}" if page_count else "",
-                page_truncated=0,
+                pages_included=f"1-{len(pages)}" if pages else "",
+                page_truncated=int(max_pages is not None and total_page_count > max_pages),
                 scanned=scanned,
                 pages=tuple(pages),
+                limitations=tuple(limitations),
             )
         except (ImportError, OSError, ValueError):
-            return PdfExtraction("", 0, "", 0, False, ())
+            return PdfExtraction("", 0, "", 0, False, (), ("pdf_extraction_failed",))
 
     def extract_pdf_text(self, pdf_bytes: bytes) -> tuple[str, int, str, int]:
         """Compatibility tuple for callers; extraction is complete, not 50-page sampled."""
