@@ -1066,7 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--dry-run", action="store_true", help="Discover and diagnose without writes")
     evidence.add_argument("--diagnostic", action="store_true", help="Include packet diagnostics")
     evidence.add_argument("--max-pdf-bytes", type=int, default=25 * 1024 * 1024)
-    evidence.add_argument("--max-pages", type=int, default=120)
+    evidence.add_argument("--max-pages", type=int, default=50)
     evidence.add_argument("--max-retries", type=int, default=3)
     evidence.set_defaults(func=cmd_evidence)
 

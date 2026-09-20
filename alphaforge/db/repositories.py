@@ -607,6 +607,19 @@ def save_ranking_run(
     return int(row[0]) if row else 0
 
 
+def _has_structured_mfn_identity_evidence(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    provenance = value.get("provenance")
+    reason = value.get("reason")
+    return (
+        isinstance(provenance, str)
+        and bool(provenance.strip())
+        and isinstance(reason, str)
+        and bool(reason.strip())
+    )
+
+
 def upsert_mfn_issuer_mapping(
     conn: Any,
     company_id: int,
@@ -628,8 +641,8 @@ def upsert_mfn_issuer_mapping(
         raise ValueError(f"invalid MFN mapping status: {status}")
     if status == "mapped" and not (mfn_slug and source_url and verified_at):
         raise ValueError("a mapped MFN issuer requires slug, source_url, and verified_at")
-    if status == "mapped" and not identity_evidence:
-        raise ValueError("a mapped MFN issuer requires nonempty identity_evidence")
+    if status == "mapped" and not _has_structured_mfn_identity_evidence(identity_evidence):
+        raise ValueError("a mapped MFN issuer requires structured provenance and reason")
     evidence_json = (
         json.dumps(identity_evidence, ensure_ascii=False, sort_keys=True)
         if identity_evidence is not None
@@ -687,7 +700,7 @@ def get_verified_mfn_mapping(conn: Any, company_id: int) -> dict[str, Any] | Non
             result["identity_evidence"] = json.loads(raw_evidence)
         except ValueError:
             result["identity_evidence"] = None
-    if not result.get("identity_evidence"):
+    if not _has_structured_mfn_identity_evidence(result.get("identity_evidence")):
         return None
     return result
 

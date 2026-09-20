@@ -174,6 +174,8 @@ def parse_mfn_issuer_candidates(
             "discovery_source": discovery_source,
             "match_basis": "exact_identifier",
             "identity_evidence": {
+                "provenance": surface_url,
+                "reason": "matched explicit external identifier(s): " + ", ".join(matched_identifiers),
                 "surface_url": surface_url,
                 "label": label,
                 "matched_identifiers": matched_identifiers,
@@ -310,10 +312,6 @@ def apply_reviewed_mapping_seed(conn: Any, path: str) -> int:
             raise ValueError("each reviewed MFN mapping seed requires company_id")
         status = record.get("status", "mapped")
         identity_evidence = record.get("identity_evidence")
-        if status == "mapped" and not identity_evidence:
-            raise ValueError(
-                "each reviewed mapped MFN seed requires identity_evidence with operator provenance or reason"
-            )
         upsert_mfn_issuer_mapping(
             conn,
             int(company_id),

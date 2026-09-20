@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +18,7 @@ from alphaforge.db.repositories import (
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
     upsert_company,
+    upsert_mfn_issuer_mapping,
 )
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
@@ -70,6 +72,33 @@ def test_exact_mfn_candidate_is_observed_and_can_be_persisted():
     assert mapping["identity_evidence"]["matched_identifiers"] == ["exact"]
 
 
+def test_mapped_mfn_mapping_requires_structured_provenance_and_reason():
+    conn = _connection()
+    company_id = upsert_company(conn, {"insId": 7004, "name": "Evidence AB", "ticker": "EVID"})
+    with pytest.raises(ValueError, match="structured provenance and reason"):
+        upsert_mfn_issuer_mapping(
+            conn,
+            company_id,
+            status="mapped",
+            mfn_slug="all/a/evidence",
+            source_url="https://mfn.test/all/a/evidence",
+            discovery_source="operator_mapping",
+            verified_at="2026-09-20T00:00:00Z",
+            identity_evidence={"note": "x"},
+        )
+    upsert_mfn_issuer_mapping(
+        conn,
+        company_id,
+        status="mapped",
+        mfn_slug="all/a/evidence",
+        source_url="https://mfn.test/all/a/evidence",
+        discovery_source="operator_mapping",
+        verified_at="2026-09-20T00:00:00Z",
+        identity_evidence={"provenance": "operator", "reason": "reviewed issuer page"},
+    )
+    assert get_verified_mfn_mapping(conn, company_id)["mfn_slug"] == "all/a/evidence"
+
+
 def test_ambiguous_mfn_candidates_remain_unmapped_and_visible():
     conn = _connection()
     company_id = upsert_company(conn, {"insId": 7002, "name": "Ambiguous AB", "ticker": "AMB"})
@@ -96,6 +125,19 @@ def test_ambiguous_mfn_candidates_remain_unmapped_and_visible():
     ]
 
 
+class _PagedFakeScraper:
+    base_url = "https://mfn.test"
+
+    def __init__(self, articles):
+        self.articles = articles
+
+    def discover_feed(self, mfn_slug, *, page=1, reports_only=True):
+        return [article for article in self.articles if article["page"] == page]
+
+    def scrape_details(self, entries, *, reports_only=True):
+        return list(entries)
+
+
 class _FakeScraper:
     base_url = "https://mfn.test"
 
@@ -116,12 +158,40 @@ def _mapped_company(conn):
         INSERT INTO mfn_issuer_mappings
             (company_id, mfn_slug, source_url, status, discovery_source, verified_at, identity_evidence)
         VALUES (?, 'all/a/flow', 'https://mfn.test/all/a/flow', 'mapped', 'fixture',
-                '2026-09-20T00:00:00Z', '{"ticker":"FLOW"}')
+                '2026-09-20T00:00:00Z',
+                '{"provenance":"fixture","reason":"explicit fixture mapping"}')
         """,
         (company_id,),
     )
     conn.commit()
     return company_id
+
+
+def test_flow_runs_weekly_page_two_backstop():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "page": 1,
+            "source_url": "https://mfn.test/a/flow/q1",
+            "title": "Flow AB Interim Report Q1 2026",
+            "published_at": "2026-05-01T08:00:00Z",
+        },
+        {
+            "page": 2,
+            "source_url": "https://mfn.test/a/flow/annual",
+            "title": "Flow AB Annual Report 2025",
+            "published_at": "2026-03-01T08:00:00Z",
+        },
+    ]
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_PagedFakeScraper(articles),
+        now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-20", dry_run=True)
+    assert result.status == "dry_run"
+    assert result.discovered == 2
+    assert result.eligible == 2
 
 
 def test_flow_filters_missing_and_future_dates_and_is_idempotent():

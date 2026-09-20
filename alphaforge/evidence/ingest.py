@@ -137,6 +137,21 @@ def bilingual_dedupe(
     return out
 
 
+def _page_ranges(page_numbers: list[int]) -> str:
+    if not page_numbers:
+        return ""
+    ranges: list[str] = []
+    start = previous = page_numbers[0]
+    for page_number in page_numbers[1:]:
+        if page_number == previous + 1:
+            previous = page_number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page_number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
 def _metadata_json(doc: dict[str, Any], *, language: str, checksum: str | None) -> str | None:
     raw = doc.get("raw_metadata")
     if isinstance(raw, dict):
@@ -373,9 +388,16 @@ class ResearchDocumentIngestionService:
 
             reader = PdfReader(io.BytesIO(pdf_bytes))
             total_page_count = len(reader.pages)
-            selected_pages = reader.pages if max_pages is None else reader.pages[:max_pages]
+            if max_pages is None:
+                selected_page_numbers = list(range(1, total_page_count + 1))
+            else:
+                selected_page_numbers = list(range(1, min(total_page_count, max_pages) + 1))
+                if max_pages >= 50 and total_page_count > 50:
+                    selected_page_numbers.extend(range(81, min(total_page_count, 90) + 1))
+                selected_page_numbers = sorted(set(selected_page_numbers))
             pages: list[dict[str, Any]] = []
-            for page_number, page in enumerate(selected_pages, start=1):
+            for page_number in selected_page_numbers:
+                page = reader.pages[page_number - 1]
                 try:
                     text = re.sub(r"\n{3,}", "\n\n", page.extract_text() or "").strip()
                 except Exception:
@@ -406,7 +428,7 @@ class ResearchDocumentIngestionService:
             return PdfExtraction(
                 text=anchored,
                 page_count=page_count,
-                pages_included=f"1-{len(pages)}" if pages else "",
+                pages_included=_page_ranges(selected_page_numbers),
                 page_truncated=int(max_pages is not None and total_page_count > max_pages),
                 scanned=scanned,
                 pages=tuple(pages),

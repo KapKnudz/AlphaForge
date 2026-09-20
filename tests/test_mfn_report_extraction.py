@@ -262,6 +262,23 @@ def test_cross_run_checksum_dedupes_bilingual_documents():
         conn.close()
 
 
+def test_pypdf_extraction_keeps_late_page_tail_with_resource_cap():
+    writer = PdfWriter()
+    for _ in range(121):
+        writer.add_blank_page(width=72, height=72)
+    import io
+
+    stream = io.BytesIO()
+    writer.write(stream)
+    result = ResearchDocumentIngestionService(None).extract_pdf_pages(
+        stream.getvalue(), max_pages=50
+    )
+    assert result.page_count == 121
+    assert result.pages_included == "1-50,81-90"
+    assert result.page_truncated == 1
+    assert [page["page_number"] for page in result.pages] == list(range(1, 51)) + list(range(81, 91))
+
+
 def test_persist_articles_is_idempotent_without_company_id():
     conn = _connection()
     try:

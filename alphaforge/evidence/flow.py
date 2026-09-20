@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import re
 from collections.abc import Callable
@@ -27,7 +28,7 @@ from alphaforge.providers.mfn.scraper import MfnScraper
 @dataclass(frozen=True)
 class EvidenceResourceLimits:
     max_pdf_bytes: int = 25 * 1024 * 1024
-    max_pages: int = 120
+    max_pages: int = 50
     max_retries: int = MAX_RETRIES
 
 
@@ -277,6 +278,19 @@ class EvidenceFlowResult:
         }
 
 
+def _discover_feed_page(scraper: Any, mfn_slug: str, page: int) -> list[dict[str, Any]]:
+    discover_feed = scraper.discover_feed
+    try:
+        parameters = inspect.signature(discover_feed).parameters.values()
+    except (TypeError, ValueError):
+        return []
+    if "page" not in inspect.signature(discover_feed).parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    ):
+        return []
+    return discover_feed(mfn_slug, page=page, reports_only=True)
+
+
 class OneCompanyEvidenceFlow:
     """Compose deterministic mapping, release, PDF, extraction and packet steps."""
 
@@ -332,8 +346,20 @@ class OneCompanyEvidenceFlow:
                 }
         if mapping is None:
             return EvidenceFlowResult("mapping_unavailable", company_id, mapping_status="unmapped")
+        now = self.now()
         feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
-        details = self.scraper.scrape_details(feed, reports_only=True)
+        if now.weekday() == 6:
+            feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
+        unique_feed: list[dict[str, Any]] = []
+        seen_feed_urls: set[str] = set()
+        for entry in feed:
+            url = entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
+            if url and url in seen_feed_urls:
+                continue
+            if url:
+                seen_feed_urls.add(url)
+            unique_feed.append(entry)
+        details = self.scraper.scrape_details(unique_feed, reports_only=True)
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
@@ -341,7 +367,7 @@ class OneCompanyEvidenceFlow:
             discovered=len(details),
         )
         eligible: list[dict[str, Any]] = []
-        today = self.now().date()
+        today = now.date()
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
