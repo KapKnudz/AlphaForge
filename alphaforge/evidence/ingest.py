@@ -58,7 +58,7 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
     return years[-1] if years else ""
 
 
-def _canonical_url(url: str) -> str:
+def canonical_release_url(url: str) -> str:
     if not url:
         return ""
     parsed = urlparse(url.lower())
@@ -68,46 +68,107 @@ def _canonical_url(url: str) -> str:
     return f"{parsed.netloc}{path}"
 
 
-def _bilingual_group_key(doc: dict[str, Any]) -> str:
-    event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
-    if event_id:
-        return f"event:{event_id}"
+def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     issuer = str(doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id") or "").lower()
     kind = str(doc.get("report_kind") or "").lower()
     period = _fiscal_period(doc)
+    published = str(doc.get("published_at") or "")[:10]
+    keys: set[str] = set()
+    event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
+    if event_id:
+        keys.add(f"event:{event_id}")
     attachment_checksum = (
         doc.get("pdf_checksum") or doc.get("attachment_checksum") or doc.get("document_checksum")
     )
     if attachment_checksum:
-        return f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}"
+        keys.add(f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}")
+    body = doc.get("content_text") or doc.get("body")
+    body_checksum = ""
+    if body:
+        normalized_body = " ".join(str(body).split()).casefold()
+        body_checksum = hashlib.sha256(normalized_body.encode()).hexdigest()
+        keys.add(f"body:{issuer}|{kind}|{period}|{body_checksum}")
     filename = _attachment_filename(doc)
     if filename and (issuer or period):
-        return f"attachment:{issuer}|{kind}|{period}|{filename}"
-    canonical = _canonical_url(str(doc.get("source_url") or doc.get("url") or ""))
-    published = str(doc.get("published_at") or "")[:10]
+        keys.add(f"attachment:{issuer}|{kind}|{period}|{filename}")
+    canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     if canonical:
-        return f"url:{issuer}|{canonical}|{published}"
-    title = re.sub(
-        r"\b(inbjudan|invitation to|publicerar|has published)\b",
-        "",
-        str(doc.get("title") or ""),
-        flags=re.IGNORECASE,
-    )
-    title_key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-    return f"title:{issuer}|{kind}|{period}|{title_key}"
+        keys.add(f"url:{issuer}|{canonical}|{published}")
+    title = str(doc.get("title") or "").lower()
+    if "årsredovisning" in title or "annual report" in title:
+        title_kind = "annual_report"
+    elif "bokslutskommuniké" in title or "year-end report" in title or "year end report" in title:
+        title_kind = "year_end_report"
+    elif kind:
+        title_kind = kind
+    else:
+        title_kind = ""
+    identity_token = str(event_id or attachment_checksum or body_checksum)
+    if (issuer or period) and title_kind and period and identity_token:
+        keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")
+    if not keys:
+        title = re.sub(
+            r"\b(inbjudan|invitation to|publicerar|has published)\b",
+            "",
+            str(doc.get("title") or ""),
+            flags=re.IGNORECASE,
+        )
+        title_key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        keys.add(f"title:{issuer}|{kind}|{period}|{title_key}")
+    return keys
 
 
 def bilingual_dedupe(
     docs: list[dict[str, Any]], *, packet_majority: str | None = None
 ) -> list[dict[str, Any]]:
     """Select one report edition while retaining suppressed provenance."""
-    from collections import defaultdict
+    groups: list[list[dict[str, Any]]] = []
+    key_groups: dict[str, int] = {}
+    parents: list[int] = []
 
-    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    def find(group_index: int) -> int:
+        while parents[group_index] != group_index:
+            parents[group_index] = parents[parents[group_index]]
+            group_index = parents[group_index]
+        return group_index
+
+    def strong_keys(keys: set[str]) -> set[str]:
+        return {
+            key
+            for key in keys
+            if not key.startswith("attachment:") and not key.startswith("title:")
+        }
+
     for doc in docs:
-        group_key = _bilingual_group_key(doc)
-        doc["_bilingual_group_id"] = hashlib.sha256(group_key.encode()).hexdigest()[:24]
-        groups[group_key].append(doc)
+        keys = _bilingual_identity_keys(doc)
+        strong = strong_keys(keys)
+        owners = {find(key_groups[key]) for key in strong if key in key_groups}
+        if not owners and not strong:
+            weak_owners = {find(key_groups[key]) for key in keys if key in key_groups}
+            owners = {
+                owner
+                for owner in weak_owners
+                if not any(
+                    strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner]
+                )
+            }
+        if not owners:
+            group_index = len(groups)
+            groups.append([])
+            parents.append(group_index)
+        else:
+            group_index = min(owners)
+            for owner in owners:
+                owner = find(owner)
+                if owner == group_index:
+                    continue
+                parents[owner] = group_index
+                groups[group_index].extend(groups[owner])
+                groups[owner] = []
+            group_index = find(group_index)
+        groups[group_index].append(doc)
+        for key in keys:
+            key_groups[key] = group_index
 
     preferred_language = packet_majority if packet_majority in {"sv", "en"} else "en"
     selection_rule = (
@@ -116,7 +177,15 @@ def bilingual_dedupe(
         else "deterministic_en_fallback"
     )
     out: list[dict[str, Any]] = []
-    for variants in groups.values():
+    for variants in groups:
+        if not variants:
+            continue
+        group_keys = sorted(
+            {key for variant in variants for key in _bilingual_identity_keys(variant)}
+        )
+        group_id = hashlib.sha256(group_keys[0].encode()).hexdigest()[:24]
+        for variant in variants:
+            variant["_bilingual_group_id"] = group_id
         variants_sorted = sorted(
             variants,
             key=lambda value: (
@@ -135,6 +204,21 @@ def bilingual_dedupe(
             suppressed["bilingual_selection_rule"] = selection_rule
             preferred.setdefault("_suppressed_variants", []).append(suppressed)
     return out
+
+
+def _page_ranges(page_numbers: list[int]) -> str:
+    if not page_numbers:
+        return ""
+    ranges: list[str] = []
+    start = previous = page_numbers[0]
+    for page_number in page_numbers[1:]:
+        if page_number == previous + 1:
+            previous = page_number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = page_number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
 
 
 def _metadata_json(doc: dict[str, Any], *, language: str, checksum: str | None) -> str | None:
@@ -212,6 +296,7 @@ class PdfExtraction:
     page_truncated: int
     scanned: bool
     pages: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...] = ()
 
 
 class ResearchDocumentIngestionService:
@@ -358,16 +443,30 @@ class ResearchDocumentIngestionService:
         self.conn.commit()
         return IngestResult(inserted=inserted, suppressed=suppressed)
 
-    def extract_pdf_pages(self, pdf_bytes: bytes) -> PdfExtraction:
-        """Extract every page with pypdf while retaining page anchors."""
+    def extract_pdf_pages(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> PdfExtraction:
+        """Extract pages with pypdf while retaining stable page anchors.
+
+        ``max_pages`` is an acquisition-flow resource limit. The default stays
+        unbounded for the existing repository API; callers that enforce a
+        bounded download pass an explicit cap and receive truncation metadata.
+        """
         try:
             import io
 
             from pypdf import PdfReader
 
             reader = PdfReader(io.BytesIO(pdf_bytes))
+            total_page_count = len(reader.pages)
+            if max_pages is None:
+                selected_page_numbers = list(range(1, total_page_count + 1))
+            else:
+                selected_page_numbers = list(range(1, min(total_page_count, max_pages) + 1))
+                if max_pages >= 50 and total_page_count > 50:
+                    selected_page_numbers.extend(range(81, min(total_page_count, 90) + 1))
+                selected_page_numbers = sorted(set(selected_page_numbers))
             pages: list[dict[str, Any]] = []
-            for page_number, page in enumerate(reader.pages, start=1):
+            for page_number in selected_page_numbers:
+                page = reader.pages[page_number - 1]
                 try:
                     text = re.sub(r"\n{3,}", "\n\n", page.extract_text() or "").strip()
                 except Exception:
@@ -375,28 +474,37 @@ class ResearchDocumentIngestionService:
                 pages.append(
                     {
                         "page_number": page_number,
+                        "anchor": f"page:{page_number}",
                         "text": text,
                         "text_length": len(text),
                         "extractor": "pypdf",
                     }
                 )
-            page_count = len(pages)
+            page_count = total_page_count
             anchored = "\n\n".join(
                 f"[page {page['page_number']}]\n{page['text']}".rstrip() for page in pages
             )
-            scanned = page_count > 5 and len(anchored.strip()) < max(200, page_count * 20)
+            nonempty_chars = sum(int(page["text_length"]) for page in pages)
+            scanned = page_count > 5 and nonempty_chars < max(200, len(pages) * 20)
+            limitations: list[str] = []
             if scanned:
+                limitations.append("scanned_pdf_no_ocr")
                 build_ownership_evidence(anchored).get("limitations")
+            elif page_count and nonempty_chars < 20:
+                limitations.append("near_empty_pdf_no_ocr")
+            if max_pages is not None and total_page_count > max_pages:
+                limitations.append("page_resource_limit")
             return PdfExtraction(
                 text=anchored,
                 page_count=page_count,
-                pages_included=f"1-{page_count}" if page_count else "",
-                page_truncated=0,
+                pages_included=_page_ranges(selected_page_numbers),
+                page_truncated=int(max_pages is not None and total_page_count > max_pages),
                 scanned=scanned,
                 pages=tuple(pages),
+                limitations=tuple(limitations),
             )
         except (ImportError, OSError, ValueError):
-            return PdfExtraction("", 0, "", 0, False, ())
+            return PdfExtraction("", 0, "", 0, False, (), ("pdf_extraction_failed",))
 
     def extract_pdf_text(self, pdf_bytes: bytes) -> tuple[str, int, str, int]:
         """Compatibility tuple for callers; extraction is complete, not 50-page sampled."""

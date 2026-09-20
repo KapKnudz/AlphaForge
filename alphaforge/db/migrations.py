@@ -39,6 +39,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         return
     if current == 0:
         _apply_initial_schema(conn)
+        _ensure_schema_extensions(conn)
         set_user_version(conn, SCHEMA_VERSION)
         conn.commit()
         return
@@ -75,7 +76,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
-        conn.commit()
+    _ensure_schema_extensions(conn)
+    conn.commit()
 
 
 def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
@@ -88,6 +90,87 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             name_en TEXT,
             fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         ) STRICT;
+
+        -- Deterministic MFN identity is explicit source-of-truth data.  A
+        -- candidate row is deliberately separate from the verified mapping so
+        -- an ambiguous discovery can never become an issuer link implicitly.
+        CREATE TABLE IF NOT EXISTS mfn_issuer_mappings (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL UNIQUE REFERENCES companies(id) ON DELETE CASCADE,
+            mfn_slug            TEXT,
+            source_url          TEXT,
+            status              TEXT NOT NULL CHECK (status IN ('mapped','ambiguous','unmapped')),
+            discovery_source    TEXT NOT NULL,
+            verified_at         TEXT,
+            identity_evidence   TEXT CHECK (identity_evidence IS NULL OR json_valid(identity_evidence)),
+            last_checked_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            CHECK (status <> 'mapped' OR (mfn_slug IS NOT NULL AND source_url IS NOT NULL AND verified_at IS NOT NULL))
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS mfn_issuer_candidates (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            mfn_slug            TEXT NOT NULL,
+            source_url          TEXT NOT NULL,
+            discovery_source    TEXT NOT NULL,
+            match_basis         TEXT,
+            identity_evidence   TEXT CHECK (identity_evidence IS NULL OR json_valid(identity_evidence)),
+            status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+            discovered_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, mfn_slug, source_url)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_mfn_issuer_candidates_review
+            ON mfn_issuer_candidates(company_id, status, discovered_at);
+
+        CREATE TABLE IF NOT EXISTS research_attachments (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id         INTEGER NOT NULL REFERENCES research_documents(id) ON DELETE CASCADE,
+            source_url          TEXT NOT NULL,
+            content_type        TEXT,
+            byte_size           INTEGER NOT NULL CHECK (byte_size >= 0),
+            sha256              TEXT NOT NULL,
+            magic_valid         INTEGER NOT NULL CHECK (magic_valid IN (0,1)),
+            http_status         INTEGER,
+            fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            raw_metadata        TEXT CHECK (raw_metadata IS NULL OR json_valid(raw_metadata)),
+            UNIQUE (document_id, source_url)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_research_attachments_checksum ON research_attachments(sha256);
+
+        CREATE TABLE IF NOT EXISTS document_extractions (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id         INTEGER NOT NULL UNIQUE REFERENCES research_documents(id) ON DELETE CASCADE,
+            extractor           TEXT NOT NULL,
+            text_checksum       TEXT,
+            page_count          INTEGER NOT NULL CHECK (page_count >= 0),
+            pages_included      TEXT,
+            page_truncated      INTEGER NOT NULL CHECK (page_truncated IN (0,1)),
+            scanned             INTEGER NOT NULL CHECK (scanned IN (0,1)),
+            limitations         TEXT CHECK (limitations IS NULL OR json_valid(limitations)),
+            extracted_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS document_pages (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            extraction_id       INTEGER NOT NULL REFERENCES document_extractions(id) ON DELETE CASCADE,
+            page_number         INTEGER NOT NULL CHECK (page_number > 0),
+            anchor              TEXT NOT NULL,
+            text                TEXT NOT NULL,
+            text_checksum       TEXT NOT NULL,
+            UNIQUE (extraction_id, page_number)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_document_pages_anchor ON document_pages(anchor);
+
+        CREATE TABLE IF NOT EXISTS evidence_packets (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            as_of               TEXT NOT NULL,
+            packet_hash         TEXT NOT NULL,
+            packet_json         TEXT NOT NULL CHECK (json_valid(packet_json)),
+            frozen_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, as_of, packet_hash)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
         """
     )
 

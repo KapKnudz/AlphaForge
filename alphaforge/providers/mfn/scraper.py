@@ -17,9 +17,12 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
+from alphaforge.providers.mfn.errors import MfnAcquisitionError
 
 BASE_URL = "https://mfn.se"
 MAX_ARTICLES = 24
+
+
 _HTML_VOID_TAGS = frozenset(
     {
         "area",
@@ -124,7 +127,6 @@ class _MfnHtmlParser(HTMLParser):
         self.timestamps: list[str] = []
         self.generic_timestamps: list[str] = []
         self.json_published_timestamps: list[str] = []
-        self.json_created_timestamps: list[str] = []
         self.json_parts: list[str] = []
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
@@ -132,6 +134,7 @@ class _MfnHtmlParser(HTMLParser):
         self._article_depth = 0
         self._release_body_depth = 0
         self._time_active = False
+        self._time_publication_active = False
         self._time_parts: list[str] = []
         self._json_active = False
 
@@ -160,8 +163,14 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "time":
             self._time_active = True
             self._time_parts = []
+            label = " ".join(
+                values.get(key, "") for key in ("class", "data-type", "aria-label", "itemprop")
+            ).lower()
+            self._time_publication_active = bool(
+                re.search(r"publish|publication|release date|released|utgiv", label)
+            )
             timestamp = values.get("datetime") or values.get("data-datetime")
-            if timestamp:
+            if timestamp and self._time_publication_active:
                 self.timestamps.append(timestamp)
         if lower_tag == "meta":
             name = (values.get("property") or values.get("name") or "").lower()
@@ -185,9 +194,10 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "h1":
             self._h1_active = False
         if lower_tag == "time":
-            if self._time_parts:
+            if self._time_parts and self._time_publication_active:
                 self.generic_timestamps.append(" ".join(self._time_parts))
             self._time_active = False
+            self._time_publication_active = False
             self._time_parts = []
         if lower_tag == "script" and self._json_active:
             self._json_active = False
@@ -225,9 +235,6 @@ class _MfnHtmlParser(HTMLParser):
                     candidate = item.get(key)
                     if isinstance(candidate, str):
                         self.json_published_timestamps.append(candidate)
-                candidate = item.get("dateCreated")
-                if isinstance(candidate, str):
-                    self.json_created_timestamps.append(candidate)
                 for child in item.values():
                     walk(child)
             elif isinstance(item, list):
@@ -289,15 +296,6 @@ def _parse_html(html: str) -> dict[str, Any]:
             ),
             None,
         )
-    if published_at is None:
-        published_at = next(
-            (
-                normalised
-                for raw in parser.json_created_timestamps
-                if (normalised := _normalise_timestamp(raw))
-            ),
-            None,
-        )
     return {
         "title": title,
         "body": body,
@@ -347,10 +345,14 @@ class MfnScraper:
         time.sleep(1.0)
         try:
             resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise MfnAcquisitionError(
+                "mfn_feed_fetch_failed", f"MFN feed request failed: {exc}"
+            ) from exc
         if resp.status_code != 200:
-            return []
+            raise MfnAcquisitionError(
+                "mfn_feed_http_status", f"MFN feed request returned HTTP {resp.status_code}"
+            )
         parser = _MfnHtmlParser()
         parser.feed(resp.text)
         articles: list[dict[str, Any]] = []
@@ -401,10 +403,14 @@ class MfnScraper:
             time.sleep(1.0)
             try:
                 resp = request_with_retry("GET", url, timeout=60, max_retries=MAX_RETRIES)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise MfnAcquisitionError(
+                    "mfn_detail_fetch_failed", f"MFN detail request failed: {exc}"
+                ) from exc
             if resp.status_code != 200:
-                continue
+                raise MfnAcquisitionError(
+                    "mfn_detail_http_status", f"MFN detail request returned HTTP {resp.status_code}"
+                )
             parsed = _parse_html(resp.text)
             title = parsed["title"] or seed.get("title") or ""
             if reports_only and not is_report(title):
@@ -419,7 +425,10 @@ class MfnScraper:
                 "content_text": body,
                 "storage_url": parsed["storage_url"],
                 "attachment_url": parsed["storage_url"],
-                "published_at": parsed["published_at"] or seed.get("published_at"),
+                # Feed-card dates are not a stable publication authority; only
+                # the detail page's timestamp metadata may enter the frozen
+                # evidence lane.
+                "published_at": parsed["published_at"],
                 "lang": seed.get("lang") or _language_hint(title),
             }
             article.update(_report_identity_seed(article))

@@ -7,7 +7,7 @@ import csv
 import hashlib
 import json
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 
@@ -898,6 +898,105 @@ def cmd_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+def _company_id_from_args(conn, args: argparse.Namespace) -> int | None:
+    if args.company_id is not None:
+        row = conn.execute(
+            "SELECT id FROM companies WHERE id=?", (int(args.company_id),)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM companies WHERE ticker=? COLLATE NOCASE", (args.ticker,)
+        ).fetchone()
+    return int(row[0]) if row else None
+
+
+def cmd_mfn_map_seed(args: argparse.Namespace) -> int:
+    from alphaforge.config import Settings
+    from alphaforge.db.connection import get_connection
+    from alphaforge.db.migrations import migrate
+    from alphaforge.providers.mfn.issuer import apply_reviewed_mapping_seed
+
+    settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
+    conn = get_connection(settings)
+    migrate(conn)
+    try:
+        applied = apply_reviewed_mapping_seed(conn, args.file)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"mfn-map-seed failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "complete", "applied": applied}, sort_keys=True))
+    return 0
+
+
+def cmd_mfn_map(args: argparse.Namespace) -> int:
+    from alphaforge.config import Settings
+    from alphaforge.db.connection import get_connection
+    from alphaforge.db.migrations import migrate
+    from alphaforge.db.repositories import upsert_mfn_issuer_mapping
+
+    settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
+    conn = get_connection(settings)
+    migrate(conn)
+    company_id = _company_id_from_args(conn, args)
+    if company_id is None:
+        print("mfn-map failed: company not found", file=sys.stderr)
+        return 1
+    try:
+        evidence = json.loads(args.identity_evidence) if args.identity_evidence else None
+        upsert_mfn_issuer_mapping(
+            conn,
+            company_id,
+            status=args.status,
+            mfn_slug=args.slug,
+            source_url=args.source_url,
+            discovery_source=args.discovery_source,
+            verified_at=(
+                args.verified_at
+                or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+                if args.status == "mapped"
+                else None
+            ),
+            identity_evidence=evidence,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"mfn-map failed: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "complete", "company_id": company_id}, sort_keys=True))
+    return 0
+
+
+def cmd_evidence(args: argparse.Namespace) -> int:
+    from alphaforge.config import Settings
+    from alphaforge.db.connection import get_connection
+    from alphaforge.db.migrations import migrate
+    from alphaforge.evidence.flow import EvidenceResourceLimits, OneCompanyEvidenceFlow
+
+    settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
+    conn = get_connection(settings)
+    migrate(conn)
+    company_id = _company_id_from_args(conn, args)
+    if company_id is None:
+        print(json.dumps({"status": "company_missing"}, sort_keys=True))
+        return 1
+    limits = EvidenceResourceLimits(
+        max_pdf_bytes=args.max_pdf_bytes,
+        max_pages=args.max_pages,
+        max_retries=args.max_retries,
+    )
+    flow = OneCompanyEvidenceFlow(conn, limits=limits)
+    result = flow.run(company_id, as_of=args.as_of, dry_run=args.dry_run)
+    output = result.diagnostic()
+    if args.diagnostic and result.packet is not None:
+        output["sources"] = len(result.packet.get("sources", []))
+        output["limitations"] = result.packet.get("limitations", [])
+    print(json.dumps(output, ensure_ascii=False, sort_keys=True))
+    if result.status in {"complete", "dry_run"}:
+        return 0
+    if result.status.startswith("mapping_"):
+        return 2
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="alphaforge")
     p.add_argument("--dsn", dest="dsn", default=None, help="ALPHAFORGE_DSN override")
@@ -938,6 +1037,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Watchlist CSV path (optional, uses DB watchlist if omitted)",
     )
     rank.set_defaults(func=cmd_rank)
+
+    mfn_seed = sub.add_parser(
+        "mfn-map-seed",
+        help="Apply an explicit reviewed company_id to MFN issuer mapping JSON seed",
+    )
+    mfn_seed.add_argument("--file", required=True, help="Reviewed JSON mapping seed")
+    mfn_seed.set_defaults(func=cmd_mfn_map_seed)
+
+    mfn_map = sub.add_parser("mfn-map", help="Persist one explicit MFN issuer mapping decision")
+    map_scope = mfn_map.add_mutually_exclusive_group(required=True)
+    map_scope.add_argument("--company-id", type=int)
+    map_scope.add_argument("--ticker")
+    mfn_map.add_argument("--status", choices=("mapped", "ambiguous", "unmapped"), default="mapped")
+    mfn_map.add_argument("--slug", default=None)
+    mfn_map.add_argument("--source-url", default=None)
+    mfn_map.add_argument("--verified-at", default=None)
+    mfn_map.add_argument("--discovery-source", default="operator_mapping")
+    mfn_map.add_argument("--identity-evidence", default=None, help="JSON identity evidence")
+    mfn_map.set_defaults(func=cmd_mfn_map)
+
+    evidence = sub.add_parser(
+        "evidence",
+        help="Run one-company deterministic MFN PDF evidence flow",
+    )
+    evidence_scope = evidence.add_mutually_exclusive_group(required=True)
+    evidence_scope.add_argument("--company-id", type=int)
+    evidence_scope.add_argument("--ticker")
+    evidence.add_argument("--as-of", required=True, help="Point-in-time cutoff YYYY-MM-DD")
+    evidence.add_argument(
+        "--dry-run", action="store_true", help="Discover and diagnose without writes"
+    )
+    evidence.add_argument("--diagnostic", action="store_true", help="Include packet diagnostics")
+    evidence.add_argument("--max-pdf-bytes", type=int, default=25 * 1024 * 1024)
+    evidence.add_argument("--max-pages", type=int, default=50)
+    evidence.add_argument("--max-retries", type=int, default=3)
+    evidence.set_defaults(func=cmd_evidence)
 
     return p
 

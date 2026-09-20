@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
 
+from alphaforge.core.frozen_packet import validate_frozen_packet
 from alphaforge.core.valuation.forward_scenario import (
     ForwardScenarioEngine,
     ForwardScenarioInputs,
@@ -72,7 +73,17 @@ class AgentReadinessGate:
                 )
             )
 
-        if not candidate.research_evidence.get("documents"):
+        evidence = candidate.research_evidence or {}
+        if getattr(candidate, "evidence_lane", evidence.get("evidence_lane", False)):
+            if not validate_frozen_packet(evidence.get("evidence_packet")):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="frozen_evidence_packet_missing",
+                        category="evidence",
+                        message="a valid frozen point-in-time evidence packet is required",
+                    )
+                )
+        elif not evidence.get("documents"):
             blockers.append(
                 ReadinessBlocker(
                     code="primary_evidence_missing",

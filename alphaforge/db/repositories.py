@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-import sqlite3
 from typing import Any
 
 
-def upsert_company(conn: sqlite3.Connection, borsdata_ins: dict[str, Any]) -> int:
+def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
     """Upsert companies row; return company id."""
     # Börsdata instrument fields vary; normalize
     borsdata_id = (
@@ -76,7 +76,7 @@ def upsert_company(conn: sqlite3.Connection, borsdata_ins: dict[str, Any]) -> in
     return int(row[0]) if row else 0
 
 
-def relink_watchlist(conn: sqlite3.Connection) -> int:
+def relink_watchlist(conn: Any) -> int:
     """Match imported rows after instruments have been seeded.
 
     The original source row remains untouched; only its foreign key and match
@@ -114,17 +114,17 @@ def relink_watchlist(conn: sqlite3.Connection) -> int:
                 (company_id, matched_via, int(row[0])),
             )
             linked += 1
-        except sqlite3.IntegrityError:
+        except Exception as exc:
             # A company may already be represented by another source row. Keep
             # the original unmatched row rather than deleting source data.
+            if exc.__class__.__name__ != "IntegrityError":
+                raise
             continue
     conn.commit()
     return linked
 
 
-def upsert_financial_periods(
-    conn: sqlite3.Connection, company_id: int, periods: list[dict[str, Any]]
-) -> int:
+def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str, Any]]) -> int:
     count = 0
     for p in periods:
         # Use-core kpi_taxonomy to map? Keep raw mapping here minimal
@@ -262,7 +262,7 @@ def upsert_financial_periods(
 
 
 def upsert_prices(
-    conn: sqlite3.Connection,
+    conn: Any,
     company_id: int,
     rows: list[dict[str, Any]],
     *,
@@ -304,7 +304,7 @@ def upsert_prices(
     return count
 
 
-def upsert_dividends(conn: sqlite3.Connection, company_id: int, rows: list[dict[str, Any]]) -> int:
+def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> int:
     count = 0
     for r in rows:
         ex_date = r.get("exDate") or r.get("ex_date") or r.get("date")
@@ -337,7 +337,7 @@ def upsert_dividends(conn: sqlite3.Connection, company_id: int, rows: list[dict[
 
 
 def upsert_kpi_observations(
-    conn: sqlite3.Connection,
+    conn: Any,
     company_id: int,
     kpi_id: int,
     period_type: str,
@@ -420,7 +420,7 @@ def upsert_kpi_observations(
     return count
 
 
-def upsert_news_release(conn: sqlite3.Connection, company_id: int, article: dict[str, Any]) -> None:
+def upsert_news_release(conn: Any, company_id: int, article: dict[str, Any]) -> None:
     url = article.get("url") or article.get("source_url") or ""
     if not url:
         return
@@ -441,7 +441,7 @@ def upsert_news_release(conn: sqlite3.Connection, company_id: int, article: dict
 
 
 def record_mfn_feed_check(
-    conn: sqlite3.Connection, company_id: int, mfn_slug: str, discovered: int, unseen: int
+    conn: Any, company_id: int, mfn_slug: str, discovered: int, unseen: int
 ) -> None:
     conn.execute(
         "INSERT INTO mfn_feed_checks (company_id, mfn_slug, discovered_count, unseen_count) VALUES (?, ?, ?, ?)",
@@ -450,7 +450,7 @@ def record_mfn_feed_check(
 
 
 def upsert_stock_splits(
-    conn: sqlite3.Connection,
+    conn: Any,
     rows: list[dict[str, Any]],
     *,
     company_map: dict[int, int] | None = None,
@@ -494,7 +494,7 @@ def upsert_stock_splits(
 
 
 def upsert_report_calendar(
-    conn: sqlite3.Connection,
+    conn: Any,
     rows: list[dict[str, Any]],
     *,
     company_map: dict[int, int] | None = None,
@@ -539,7 +539,7 @@ def upsert_report_calendar(
 
 
 def record_job(
-    conn: sqlite3.Connection,
+    conn: Any,
     job_type: str,
     *,
     company_id: int | None,
@@ -567,7 +567,7 @@ def record_job(
 
 
 def save_ranking_run(
-    conn: sqlite3.Connection,
+    conn: Any,
     *,
     as_of: str,
     model_version: str,
@@ -603,3 +603,580 @@ def save_ranking_run(
     cur = conn.execute("SELECT last_insert_rowid()")
     row = cur.fetchone()
     return int(row[0]) if row else 0
+
+
+def _has_structured_mfn_identity_evidence(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    provenance = value.get("provenance")
+    reason = value.get("reason")
+    return (
+        isinstance(provenance, str)
+        and bool(provenance.strip())
+        and isinstance(reason, str)
+        and bool(reason.strip())
+    )
+
+
+def upsert_mfn_issuer_mapping(
+    conn: Any,
+    company_id: int,
+    *,
+    status: str,
+    mfn_slug: str | None = None,
+    source_url: str | None = None,
+    discovery_source: str,
+    verified_at: str | None = None,
+    identity_evidence: dict[str, Any] | list[Any] | None = None,
+) -> int:
+    """Persist an explicit MFN identity decision keyed by ``companies.id``.
+
+    This function intentionally does not infer a slug. Callers must provide a
+    mapping decision and its evidence; unresolved or ambiguous decisions can
+    be stored without creating a usable report-ingestion link.
+    """
+    if status not in {"mapped", "ambiguous", "unmapped"}:
+        raise ValueError(f"invalid MFN mapping status: {status}")
+    if status == "mapped" and not (mfn_slug and source_url and verified_at):
+        raise ValueError("a mapped MFN issuer requires slug, source_url, and verified_at")
+    if status == "mapped" and not _has_structured_mfn_identity_evidence(identity_evidence):
+        raise ValueError("a mapped MFN issuer requires structured provenance and reason")
+    evidence_json = (
+        json.dumps(identity_evidence, ensure_ascii=False, sort_keys=True)
+        if identity_evidence is not None
+        else None
+    )
+    conn.execute(
+        """
+        INSERT INTO mfn_issuer_mappings
+            (company_id, mfn_slug, source_url, status, discovery_source, verified_at, identity_evidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id) DO UPDATE SET
+            mfn_slug=excluded.mfn_slug,
+            source_url=excluded.source_url,
+            status=excluded.status,
+            discovery_source=excluded.discovery_source,
+            verified_at=excluded.verified_at,
+            identity_evidence=excluded.identity_evidence,
+            last_checked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (
+            company_id,
+            mfn_slug,
+            source_url,
+            status,
+            discovery_source,
+            verified_at,
+            evidence_json,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM mfn_issuer_mappings WHERE company_id=?", (company_id,)
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def get_verified_mfn_mapping(conn: Any, company_id: int) -> dict[str, Any] | None:
+    """Return only a complete, reviewed mapping suitable for ingestion."""
+    row = conn.execute(
+        """
+        SELECT company_id, mfn_slug, source_url, status, discovery_source,
+               verified_at, identity_evidence, last_checked_at
+        FROM mfn_issuer_mappings
+        WHERE company_id=? AND status='mapped'
+          AND mfn_slug IS NOT NULL AND source_url IS NOT NULL AND verified_at IS NOT NULL
+        """,
+        (company_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    raw_evidence = result.get("identity_evidence")
+    if isinstance(raw_evidence, str):
+        try:
+            result["identity_evidence"] = json.loads(raw_evidence)
+        except ValueError:
+            result["identity_evidence"] = None
+    if not _has_structured_mfn_identity_evidence(result.get("identity_evidence")):
+        return None
+    return result
+
+
+def get_mfn_mapping_review(conn: Any, company_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM mfn_issuer_mappings WHERE company_id=?", (company_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["candidates"] = [
+        dict(candidate)
+        for candidate in conn.execute(
+            """
+            SELECT id, mfn_slug, source_url, discovery_source, match_basis,
+                   identity_evidence, status, discovered_at
+            FROM mfn_issuer_candidates
+            WHERE company_id=? ORDER BY mfn_slug, source_url, id
+            """,
+            (company_id,),
+        ).fetchall()
+    ]
+    return result
+
+
+def persist_mfn_issuer_candidates(
+    conn: Any,
+    company_id: int,
+    candidates: list[dict[str, Any]],
+    *,
+    discovery_source: str,
+) -> int:
+    """Store bounded candidate discoveries for operator review."""
+    count = 0
+    for candidate in candidates:
+        slug = str(candidate.get("mfn_slug") or candidate.get("slug") or "").strip()
+        source_url = str(candidate.get("source_url") or candidate.get("url") or "").strip()
+        if not slug or not source_url:
+            continue
+        evidence = candidate.get("identity_evidence")
+        evidence_json = (
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+            if evidence is not None
+            else None
+        )
+        conn.execute(
+            """
+            INSERT INTO mfn_issuer_candidates
+                (company_id, mfn_slug, source_url, discovery_source, match_basis, identity_evidence)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company_id, mfn_slug, source_url) DO UPDATE SET
+                discovery_source=excluded.discovery_source,
+                match_basis=excluded.match_basis,
+                identity_evidence=excluded.identity_evidence,
+                discovered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            """,
+            (
+                company_id,
+                slug,
+                source_url,
+                discovery_source,
+                candidate.get("match_basis"),
+                evidence_json,
+            ),
+        )
+        count += 1
+    conn.commit()
+    return count
+
+
+def find_complete_evidence_document(
+    conn: Any, company_id: int, source_url: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT d.* FROM research_documents d
+        WHERE d.company_id=? AND d.source_url=?
+          AND EXISTS (
+              SELECT 1 FROM research_attachments a
+              WHERE a.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+          AND EXISTS (
+              SELECT 1 FROM document_extractions e
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              JOIN document_extractions e ON e.id=p.extraction_id
+              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+          )
+        """,
+        (company_id, source_url),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def complete_evidence_identity_documents(
+    conn: Any, company_id: int, *, as_of: str | None = None
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT d.source_url, d.title, d.published_at, d.content_text, d.ingested_lang,
+               d.raw_metadata, d.checksum AS document_checksum,
+               a.source_url AS attachment_url, a.sha256 AS attachment_checksum
+        FROM research_documents d
+        JOIN research_attachments a ON a.document_id=d.id
+        JOIN document_extractions e ON e.document_id=d.id
+        WHERE d.company_id=? AND d.duplicate_of IS NULL
+          AND (? IS NULL OR (d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?))
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              WHERE p.extraction_id=e.id
+          )
+        ORDER BY d.source_url, d.id
+        """,
+        (company_id, as_of[:10] if as_of else None, as_of[:10] if as_of else None),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def persist_evidence_sibling(
+    conn: Any,
+    *,
+    company_id: int,
+    canonical_source_url: str,
+    sibling: dict[str, Any],
+) -> None:
+    canonical = conn.execute(
+        "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, canonical_source_url),
+    ).fetchone()
+    if canonical is None:
+        raise ValueError("canonical evidence document was not persisted")
+    sibling_url = str(sibling.get("source_url") or sibling.get("url") or "").strip()
+    if not sibling_url or sibling_url == canonical_source_url:
+        return
+    metadata = dict(sibling.get("raw_metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["duplicate_of_source_url"] = canonical_source_url
+    if sibling.get("_bilingual_group_id") is not None:
+        metadata["bilingual_group_id"] = sibling["_bilingual_group_id"]
+    metadata["bilingual_selection_rule"] = sibling.get(
+        "bilingual_selection_rule", "deterministic_en_fallback"
+    )
+    conn.execute(
+        """
+        INSERT INTO research_documents
+            (company_id, source_url, source_type, title, published_at, content_text,
+             duplicate_of, ingested_lang, checksum, raw_metadata)
+        VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, source_url) DO UPDATE SET
+            title=excluded.title,
+            published_at=excluded.published_at,
+            content_text=excluded.content_text,
+            duplicate_of=excluded.duplicate_of,
+            ingested_lang=excluded.ingested_lang,
+            checksum=COALESCE(excluded.checksum, research_documents.checksum),
+            raw_metadata=excluded.raw_metadata
+        """,
+        (
+            company_id,
+            sibling_url,
+            sibling.get("title"),
+            sibling.get("published_at"),
+            sibling.get("content_text") or sibling.get("body"),
+            int(canonical[0]),
+            sibling.get("lang") or sibling.get("ingested_lang") or "en",
+            sibling.get("pdf_checksum") or sibling.get("attachment_checksum"),
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    conn.commit()
+
+
+def complete_evidence_language_majority(conn: Any, company_id: int, as_of: str) -> str | None:
+    rows = conn.execute(
+        """
+        SELECT COALESCE(d.ingested_lang, 'en') AS language, COUNT(*) AS count
+        FROM research_documents d
+        WHERE d.company_id=? AND d.duplicate_of IS NULL
+          AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
+          AND EXISTS (
+              SELECT 1 FROM research_attachments a WHERE a.document_id=d.id
+          )
+          AND EXISTS (
+              SELECT 1 FROM document_extractions e WHERE e.document_id=d.id
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM document_pages p
+              JOIN document_extractions e ON e.id=p.extraction_id
+              WHERE e.document_id=d.id
+          )
+        GROUP BY COALESCE(d.ingested_lang, 'en')
+        """,
+        (company_id, as_of[:10]),
+    ).fetchall()
+    counts = {str(row[0]): int(row[1]) for row in rows}
+    if counts.get("sv", 0) > counts.get("en", 0):
+        return "sv"
+    if counts.get("en", 0) > counts.get("sv", 0):
+        return "en"
+    return None
+
+
+def find_complete_evidence_attachment(
+    conn: Any, source_url: str, company_id: int | None = None
+) -> dict[str, Any] | None:
+    company_clause = " AND d.company_id=?" if company_id is not None else ""
+    parameters: tuple[Any, ...] = (
+        (source_url, company_id) if company_id is not None else (source_url,)
+    )
+    row = conn.execute(
+        f"""
+        SELECT a.* FROM research_attachments a
+        JOIN research_documents d ON d.id=a.document_id
+        JOIN document_extractions e ON e.document_id=d.id
+        JOIN document_pages p ON p.extraction_id=e.id
+        WHERE a.source_url=?{company_clause} ORDER BY a.id LIMIT 1
+        """,
+        parameters,
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def persist_evidence_document(
+    conn: Any,
+    *,
+    company_id: int,
+    article: dict[str, Any],
+    attachment: dict[str, Any],
+    extraction: dict[str, Any],
+    pages: list[dict[str, Any]],
+    suppressed_variants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Persist one selected report and its complete PDF provenance.
+
+    The flow passes structured values to this repository function instead of
+    issuing SQL itself. A sibling translation is persisted as an auditable
+    document row, but only the selected edition receives attachment/extraction
+    rows and enters the frozen packet.
+    """
+    source_url = str(article.get("source_url") or article.get("url") or "").strip()
+    published_at = article.get("published_at")
+    if not source_url or not published_at:
+        raise ValueError("evidence documents require source_url and authoritative published_at")
+    language = article.get("ingested_lang") or article.get("lang") or "en"
+    checksum = str(attachment.get("sha256") or "")
+    if not checksum:
+        raise ValueError("evidence attachment requires sha256")
+    metadata = dict(article.get("raw_metadata") or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    for key in (
+        "mfn_slug",
+        "report_kind",
+        "report_period",
+        "fiscal_period",
+        "observation_date",
+        "lang_confidence",
+        "_bilingual_group_id",
+    ):
+        if article.get(key) is not None:
+            metadata[key] = article[key]
+    if article.get("_bilingual_group_id") is not None:
+        metadata["bilingual_group_id"] = article["_bilingual_group_id"]
+    metadata["authoritative_publication_timestamp"] = True
+    metadata["attachment_sha256"] = checksum
+    metadata["bilingual_selection_rule"] = article.get(
+        "bilingual_selection_rule", "deterministic_en_fallback"
+    )
+    metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    conn.execute("SAVEPOINT evidence_document")
+    try:
+        conn.execute(
+            """
+            INSERT INTO research_documents
+                (company_id, source_url, source_type, title, published_at, content_text,
+                 page_count, pages_included, page_truncated, duplicate_of,
+                 ingested_lang, checksum, raw_metadata)
+            VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            ON CONFLICT(company_id, source_url) DO UPDATE SET
+                title=excluded.title,
+                published_at=excluded.published_at,
+                content_text=excluded.content_text,
+                page_count=excluded.page_count,
+                pages_included=excluded.pages_included,
+                page_truncated=excluded.page_truncated,
+                duplicate_of=NULL,
+                ingested_lang=excluded.ingested_lang,
+                checksum=excluded.checksum,
+                raw_metadata=excluded.raw_metadata
+            """,
+            (
+                company_id,
+                source_url,
+                article.get("title"),
+                published_at,
+                article.get("content_text") or article.get("body"),
+                extraction.get("page_count"),
+                extraction.get("pages_included"),
+                int(bool(extraction.get("page_truncated"))),
+                language,
+                checksum,
+                metadata_json,
+            ),
+        )
+        document = conn.execute(
+            "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+            (company_id, source_url),
+        ).fetchone()
+        if document is None:
+            raise RuntimeError("research document was not persisted")
+        document_id = int(document[0])
+        conn.execute(
+            """
+            INSERT INTO research_attachments
+                (document_id, source_url, content_type, byte_size, sha256, magic_valid, http_status, raw_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_id, source_url) DO UPDATE SET
+                content_type=excluded.content_type,
+                byte_size=excluded.byte_size,
+                sha256=excluded.sha256,
+                magic_valid=excluded.magic_valid,
+                http_status=excluded.http_status,
+                raw_metadata=excluded.raw_metadata
+            """,
+            (
+                document_id,
+                attachment.get("source_url") or article.get("attachment_url") or source_url,
+                attachment.get("content_type"),
+                int(attachment.get("byte_size") or 0),
+                checksum,
+                int(bool(attachment.get("magic_valid"))),
+                attachment.get("http_status"),
+                json.dumps(attachment.get("raw_metadata"), ensure_ascii=False, sort_keys=True)
+                if attachment.get("raw_metadata") is not None
+                else None,
+            ),
+        )
+        limitations = list(extraction.get("limitations") or [])
+        extraction_json = json.dumps(limitations, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            INSERT INTO document_extractions
+                (document_id, extractor, text_checksum, page_count, pages_included,
+                 page_truncated, scanned, limitations)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_id) DO UPDATE SET
+                extractor=excluded.extractor,
+                text_checksum=excluded.text_checksum,
+                page_count=excluded.page_count,
+                pages_included=excluded.pages_included,
+                page_truncated=excluded.page_truncated,
+                scanned=excluded.scanned,
+                limitations=excluded.limitations
+            """,
+            (
+                document_id,
+                extraction.get("extractor", "pypdf"),
+                extraction.get("text_checksum"),
+                int(extraction.get("page_count") or 0),
+                extraction.get("pages_included"),
+                int(bool(extraction.get("page_truncated"))),
+                int(bool(extraction.get("scanned"))),
+                extraction_json,
+            ),
+        )
+        extraction_row = conn.execute(
+            "SELECT id FROM document_extractions WHERE document_id=?", (document_id,)
+        ).fetchone()
+        if extraction_row is None:
+            raise RuntimeError("document extraction was not persisted")
+        extraction_id = int(extraction_row[0])
+        conn.execute("DELETE FROM document_pages WHERE extraction_id=?", (extraction_id,))
+        for page in pages:
+            text = str(page.get("text") or "")
+            page_number = int(page["page_number"])
+            conn.execute(
+                """
+                INSERT INTO document_pages
+                    (extraction_id, page_number, anchor, text, text_checksum)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    extraction_id,
+                    page_number,
+                    (
+                        page.get("anchor")
+                        if str(page.get("anchor") or "").startswith("document:")
+                        else f"document:{document_id}#page:{page_number}"
+                    ),
+                    text,
+                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                ),
+            )
+        for sibling in suppressed_variants or []:
+            sibling_url = str(sibling.get("source_url") or sibling.get("url") or "").strip()
+            if not sibling_url or sibling_url == source_url:
+                continue
+            sibling_meta = dict(sibling.get("raw_metadata") or {})
+            sibling_meta["duplicate_of_source_url"] = source_url
+            if sibling.get("_bilingual_group_id") is not None:
+                sibling_meta["bilingual_group_id"] = sibling["_bilingual_group_id"]
+            sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
+            sibling_checksum = sibling.get("pdf_checksum") or sibling.get("attachment_checksum")
+            conn.execute(
+                """
+                INSERT INTO research_documents
+                    (company_id, source_url, source_type, title, published_at, content_text,
+                     duplicate_of, ingested_lang, checksum, raw_metadata)
+                VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(company_id, source_url) DO UPDATE SET
+                    duplicate_of=excluded.duplicate_of,
+                    ingested_lang=excluded.ingested_lang,
+                    checksum=COALESCE(excluded.checksum, research_documents.checksum),
+                    raw_metadata=excluded.raw_metadata
+                """,
+                (
+                    company_id,
+                    sibling_url,
+                    sibling.get("title"),
+                    sibling.get("published_at") or published_at,
+                    sibling.get("content_text") or sibling.get("body"),
+                    document_id,
+                    sibling.get("lang") or sibling.get("ingested_lang") or "sv",
+                    sibling_checksum,
+                    json.dumps(sibling_meta, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+        conn.execute("RELEASE SAVEPOINT evidence_document")
+        conn.commit()
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT evidence_document")
+        conn.execute("RELEASE SAVEPOINT evidence_document")
+        raise
+    return {"document_id": document_id, "extraction_id": extraction_id, "checksum": checksum}
+
+
+def persist_evidence_packet(
+    conn: Any, *, company_id: int, as_of: str, packet: dict[str, Any]
+) -> int:
+    packet_json = json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    packet_hash = str(packet.get("packet_hash") or "")
+    if not packet_hash:
+        raise ValueError("frozen evidence packet requires packet_hash")
+    conn.execute(
+        """
+        INSERT INTO evidence_packets (company_id, as_of, packet_hash, packet_json)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(company_id, as_of, packet_hash) DO UPDATE SET packet_json=excluded.packet_json
+        """,
+        (company_id, as_of, packet_hash, packet_json),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM evidence_packets WHERE company_id=? AND as_of=? AND packet_hash=?",
+        (company_id, as_of, packet_hash),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def load_evidence_packet(conn: Any, company_id: int, as_of: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT packet_json FROM evidence_packets
+        WHERE company_id=? AND as_of=? ORDER BY id DESC LIMIT 1
+        """,
+        (company_id, as_of),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        packet = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    return packet if isinstance(packet, dict) else None

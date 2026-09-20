@@ -67,6 +67,19 @@ def test_v1_dividend_constraint_migrates_for_type_4(mem_conn):
     mem_conn.commit()
     assert get_user_version(mem_conn) == 3
     assert mem_conn.execute("SELECT dividend_type FROM dividends").fetchone()[0] == 4
+    for table in (
+        "mfn_issuer_mappings",
+        "research_attachments",
+        "document_extractions",
+        "document_pages",
+        "evidence_packets",
+    ):
+        assert (
+            mem_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            is not None
+        )
 
 
 def test_import_watchlist_isin_normalized_and_uniqueness(mem_conn, tmp_path):

@@ -95,10 +95,27 @@ def test_scrape_details_prefers_published_json_timestamp():
     assert articles[0]["published_at"] == "2026-05-07T06:30:00Z"
 
 
+def test_scrape_details_does_not_promote_json_created_timestamp():
+    html = """
+    <h1>Acme Year-End Report 2025</h1>
+    <script type="application/ld+json">
+      {"@type": "WebPage", "dateCreated": "2026-05-01T08:00:00Z"}
+    </script>
+    """
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details([{"url": "https://mfn.test/a/acme/annual"}])
+    assert articles[0]["published_at"] is None
+
+
 def test_scrape_details_normalises_human_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
-    <time>7 May 2026</time>
+    <time class="published">7 May 2026</time>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")
@@ -113,7 +130,7 @@ def test_scrape_details_normalises_human_timestamp():
 def test_scrape_details_normalises_swedish_timestamp():
     html = """
     <h1>Acme Year-End Report 2025</h1>
-    <time>7 maj 2026</time>
+    <time class="publication-date">7 maj 2026</time>
     """
     response = SimpleNamespace(status_code=200, text=html)
     scraper = MfnScraper(base_url="https://mfn.test")
@@ -260,6 +277,25 @@ def test_cross_run_checksum_dedupes_bilingual_documents():
         assert row[0] is not None
     finally:
         conn.close()
+
+
+def test_pypdf_extraction_keeps_late_page_tail_with_resource_cap():
+    writer = PdfWriter()
+    for _ in range(121):
+        writer.add_blank_page(width=72, height=72)
+    import io
+
+    stream = io.BytesIO()
+    writer.write(stream)
+    result = ResearchDocumentIngestionService(None).extract_pdf_pages(
+        stream.getvalue(), max_pages=50
+    )
+    assert result.page_count == 121
+    assert result.pages_included == "1-50,81-90"
+    assert result.page_truncated == 1
+    assert [page["page_number"] for page in result.pages] == list(range(1, 51)) + list(
+        range(81, 91)
+    )
 
 
 def test_persist_articles_is_idempotent_without_company_id():
