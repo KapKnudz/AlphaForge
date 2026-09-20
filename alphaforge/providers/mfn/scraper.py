@@ -1,29 +1,325 @@
-"""MfnScraper — Playwright MFN feed + detail fetch.
+"""Deterministic MFN discovery for quarterly and annual reports.
 
-Rate limit: 1 rps (plan). Daily page-1 delta + Sunday page-2 backstop.
-MAX_ARTICLES 24 report-prioritized.
+The ship slice deliberately excludes general-news ingestion. HTTP requests
+remain the default acquisition path; a browser fallback belongs behind a
+fixture-proven client-rendering check, not in this deterministic parser.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import time
-from dataclasses import dataclass
+from datetime import UTC, datetime
+from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import unquote, urljoin, urlsplit
 
+from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 
 BASE_URL = "https://mfn.se"
 MAX_ARTICLES = 24
+_HTML_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_REPORT_ATTACHMENT_TERMS = (
+    "annual",
+    "årsredovis",
+    "year-end",
+    "year_end",
+    "interim",
+    "quarter",
+    "delårs",
+    "bokslut",
+    "report",
+    "rapport",
+)
+_NON_REPORT_ATTACHMENT_TERMS = ("presentation", "slides", "webcast")
+_SWEDISH_MONTHS = {
+    "januari": "january",
+    "februari": "february",
+    "mars": "march",
+    "april": "april",
+    "maj": "may",
+    "juni": "june",
+    "juli": "july",
+    "augusti": "august",
+    "september": "september",
+    "oktober": "october",
+    "november": "november",
+    "december": "december",
+}
 
 
-@dataclass(frozen=True)
-class MfnArticle:
-    url: str
-    title: str
-    published_at: str | None
-    body: str | None = None
-    lang: str | None = None
+def _normalise_timestamp(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = " ".join(value.split())
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        localized_text = re.sub(
+            r"\b(?:" + "|".join(_SWEDISH_MONTHS) + r")\b",
+            lambda match: _SWEDISH_MONTHS[match.group(0).lower()],
+            text,
+            flags=re.IGNORECASE,
+        )
+        for date_text in (text, localized_text):
+            for date_format in ("%d %B %Y", "%d %b %Y"):
+                try:
+                    parsed = datetime.strptime(date_text, date_format)
+                    break
+                except ValueError:
+                    continue
+            else:
+                continue
+            break
+        else:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.isoformat(timespec="seconds")
+    return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _language_hint(text: str) -> str | None:
+    lower = text.lower()
+    if any(
+        marker in lower
+        for marker in ("årsredovisning", "bokslutskommuniké", "delårsrapport", "kvartalsrapport")
+    ):
+        return "sv"
+    if any(marker in lower for marker in ("annual report", "year-end report", "interim report")):
+        return "en"
+    return None
+
+
+class _MfnHtmlParser(HTMLParser):
+    """Small, fixture-friendly parser for MFN's rendered HTML surface."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self.h1_parts: list[str] = []
+        self.body_parts: list[str] = []
+        self.release_body_parts: list[str] = []
+        self.release_body_seen = False
+        self.timestamps: list[str] = []
+        self.generic_timestamps: list[str] = []
+        self.json_published_timestamps: list[str] = []
+        self.json_created_timestamps: list[str] = []
+        self.json_parts: list[str] = []
+        self._anchor_href: str | None = None
+        self._anchor_parts: list[str] = []
+        self._h1_active = False
+        self._article_depth = 0
+        self._release_body_depth = 0
+        self._time_active = False
+        self._time_parts: list[str] = []
+        self._json_active = False
+
+    @staticmethod
+    def _attrs(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+        return {key.lower(): value or "" for key, value in attrs}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = self._attrs(attrs)
+        lower_tag = tag.lower()
+        if lower_tag == "a" and values.get("href"):
+            self._anchor_href = values["href"]
+            self._anchor_parts = []
+        if lower_tag == "h1":
+            self._h1_active = True
+        classes = values.get("class", "").lower().split()
+        if lower_tag == "article":
+            self._article_depth = max(self._article_depth, 1)
+        elif self._article_depth and lower_tag not in _HTML_VOID_TAGS:
+            self._article_depth += 1
+        if "release-body" in classes:
+            self.release_body_seen = True
+            self._release_body_depth = max(self._release_body_depth, 1)
+        elif self._release_body_depth and lower_tag not in _HTML_VOID_TAGS:
+            self._release_body_depth += 1
+        if lower_tag == "time":
+            self._time_active = True
+            self._time_parts = []
+            timestamp = values.get("datetime") or values.get("data-datetime")
+            if timestamp:
+                self.timestamps.append(timestamp)
+        if lower_tag == "meta":
+            name = (values.get("property") or values.get("name") or "").lower()
+            if name in {"article:published_time", "datepublished", "publish_date", "published_at"}:
+                if values.get("content"):
+                    self.timestamps.append(values["content"])
+        if lower_tag == "script" and values.get("type", "").lower() == "application/ld+json":
+            self._json_active = True
+            self.json_parts = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        lower_tag = tag.lower()
+        if lower_tag == "a" and self._anchor_href is not None:
+            self.links.append((self._anchor_href, " ".join(self._anchor_parts).strip()))
+            self._anchor_href = None
+            self._anchor_parts = []
+        if lower_tag == "h1":
+            self._h1_active = False
+        if lower_tag == "time":
+            if self._time_parts:
+                self.generic_timestamps.append(" ".join(self._time_parts))
+            self._time_active = False
+            self._time_parts = []
+        if lower_tag == "script" and self._json_active:
+            self._json_active = False
+            self._extract_json_dates("".join(self.json_parts))
+            self.json_parts = []
+        if lower_tag not in _HTML_VOID_TAGS:
+            if self._article_depth:
+                self._article_depth -= 1
+            if self._release_body_depth:
+                self._release_body_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor_href is not None:
+            self._anchor_parts.append(data)
+        if self._h1_active:
+            self.h1_parts.append(data)
+        if self._article_depth:
+            self.body_parts.append(data)
+        if self._release_body_depth:
+            self.release_body_parts.append(data)
+        if self._time_active:
+            self._time_parts.append(data)
+        if self._json_active:
+            self.json_parts.append(data)
+
+    def _extract_json_dates(self, raw: str) -> None:
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+
+        def walk(item: Any) -> None:
+            if isinstance(item, dict):
+                for key in ("datePublished", "published_at"):
+                    candidate = item.get(key)
+                    if isinstance(candidate, str):
+                        self.json_published_timestamps.append(candidate)
+                candidate = item.get("dateCreated")
+                if isinstance(candidate, str):
+                    self.json_created_timestamps.append(candidate)
+                for child in item.values():
+                    walk(child)
+            elif isinstance(item, list):
+                for child in item:
+                    walk(child)
+
+        walk(value)
+
+
+def _attachment_score(url: str, label: str = "") -> int:
+    name = f"{unquote(urlsplit(url).path)} {label}".lower()
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+        return 0
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+        return 2
+    return 1
+
+
+def _parse_html(html: str) -> dict[str, Any]:
+    parser = _MfnHtmlParser()
+    parser.feed(html)
+    pdf_links = [
+        (href, text)
+        for href, text in parser.links
+        if "storage.mfn.se/" in href.lower() and ".pdf" in href.lower()
+    ]
+    selected_attachment = max(
+        enumerate(pdf_links),
+        key=lambda item: (_attachment_score(*item[1]), -item[0]),
+        default=None,
+    )
+    storage_url = (
+        selected_attachment[1][0]
+        if selected_attachment is not None and _attachment_score(*selected_attachment[1])
+        else None
+    )
+    title = " ".join(" ".join(parser.h1_parts).split())
+    body_parts = parser.release_body_parts if parser.release_body_seen else parser.body_parts
+    body = " ".join(" ".join(body_parts).split())
+    published_at = next(
+        (normalised for raw in parser.timestamps if (normalised := _normalise_timestamp(raw))),
+        None,
+    )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.json_published_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.generic_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
+    if published_at is None:
+        published_at = next(
+            (
+                normalised
+                for raw in parser.json_created_timestamps
+                if (normalised := _normalise_timestamp(raw))
+            ),
+            None,
+        )
+    return {
+        "title": title,
+        "body": body,
+        "published_at": published_at,
+        "storage_url": storage_url,
+    }
+
+
+def _is_mfn_release_url(url: str, base_url: str) -> bool:
+    candidate = urlsplit(url)
+    base = urlsplit(base_url)
+    if candidate.scheme != base.scheme or candidate.netloc.lower() != base.netloc.lower():
+        return False
+    return candidate.path.startswith(("/a/", "/cision/"))
+
+
+def _report_identity_seed(article: dict[str, Any]) -> dict[str, Any]:
+    title = article.get("title") or ""
+    return {
+        "report_kind": article.get("report_kind") or report_kind(title),
+        "lang": article.get("lang") or _language_hint(title),
+    }
 
 
 class MfnScraper:
@@ -31,12 +327,19 @@ class MfnScraper:
         self.base_url = base_url.rstrip("/")
         self.max_articles = max_articles
 
-    def discover_feed(self, mfn_slug: str, *, page: int = 1) -> list[dict[str, Any]]:
-        """Discover feed URLs for a given MFN slug (company).
+    def discover_feed(
+        self,
+        mfn_slug: str,
+        *,
+        page: int = 1,
+        reports_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Discover report links from an issuer-scoped MFN page.
 
-        Uses requests to fetch MFN feed page; parses a.title-link.item-link.
-        Returns list of {url, title, published_at}.
-        Rate limited to 1 rps.
+        The default intentionally excludes general news, releases, and report
+        calendar notices. Detail pages remain the authoritative timestamp
+        source because feed cards do not expose a stable one-to-one date
+        association in every MFN layout.
         """
         url = f"{self.base_url}/{mfn_slug.lstrip('/')}"
         if page > 1:
@@ -48,42 +351,53 @@ class MfnScraper:
             return []
         if resp.status_code != 200:
             return []
-        html = resp.text
-        # Minimal regex parse — robust fallback when Playwright not available.
-        # Looks for <a class="title-link item-link" href="...">Title</a>
+        parser = _MfnHtmlParser()
+        parser.feed(resp.text)
         articles: list[dict[str, Any]] = []
-        # Try title-link pattern first, then generic MFN link
-        patterns = [
-            r'<a[^>]*class="[^"]*title-link[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-            r'<a[^>]*href="(https://mfn\.se/[^"]+)"[^>]*>(.*?)</a>',
-        ]
         seen: set[str] = set()
-        for pat in patterns:
-            for m in re.finditer(pat, html, re.IGNORECASE | re.DOTALL):
-                href = m.group(1).strip()
-                title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                if not href or not title:
-                    continue
-                if href.startswith("/"):
-                    href = self.base_url + href
-                if href in seen:
-                    continue
-                seen.add(href)
-                articles.append({"url": href, "title": title, "published_at": None})
-                if len(articles) >= self.max_articles:
-                    break
+        for href, raw_title in parser.links:
+            title = " ".join(raw_title.split())
+            absolute = urljoin(f"{self.base_url}/", href)
+            if (
+                not absolute
+                or not title
+                or absolute in seen
+                or not _is_mfn_release_url(absolute, self.base_url)
+            ):
+                continue
+            if reports_only and not is_report(title):
+                continue
+            seen.add(absolute)
+            article = {
+                "url": absolute,
+                "source_url": absolute,
+                "title": title,
+                "published_at": None,
+            }
+            article.update(_report_identity_seed(article))
+            articles.append(article)
             if len(articles) >= self.max_articles:
                 break
-        return articles[: self.max_articles]
+        return articles
 
-    def scrape_details(self, urls: list[str]) -> list[dict[str, Any]]:
-        """Fetch detail pages for unseen URLs — Playwright semantics via requests.
+    def scrape_details(
+        self,
+        entries: list[str | dict[str, Any]],
+        *,
+        reports_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Fetch unseen MFN details and return report/PDF metadata.
 
-        Returns list of {url, title, body, published_at, storage_url}.
-        1 rps, MAX_RETRIES=3 with Retry-After.
+        Entries may be URLs or feed dictionaries. Supporting dictionaries
+        preserves the feed's title/language hints while the detail page supplies
+        the canonical publication timestamp and attachment URL.
         """
         out: list[dict[str, Any]] = []
-        for url in urls:
+        for entry in entries:
+            seed = entry if isinstance(entry, dict) else {"url": entry}
+            url = seed.get("url") or seed.get("source_url") or ""
+            if not url:
+                continue
             time.sleep(1.0)
             try:
                 resp = request_with_retry("GET", url, timeout=60, max_retries=MAX_RETRIES)
@@ -91,37 +405,23 @@ class MfnScraper:
                 continue
             if resp.status_code != 200:
                 continue
-            html = resp.text
-            # Extract h1 title
-            title_m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
-            title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else ""
-            # Extract body .release-body or article
-            body_m = re.search(
-                r'<div[^>]*class="[^"]*release-body[^"]*"[^>]*>(.*?)</div>',
-                html,
-                re.IGNORECASE | re.DOTALL,
-            )
-            if not body_m:
-                body_m = re.search(
-                    r"<article[^>]*>(.*?)</article>", html, re.IGNORECASE | re.DOTALL
-                )
-            body = ""
-            if body_m:
-                body = re.sub(r"<[^>]+>", " ", body_m.group(1))
-                body = re.sub(r"\s+", " ", body).strip()
-                body = re.sub(r"\n{3,}", "\n\n", body)
-            # Attachment storage.mfn.se
-            storage_m = re.search(
-                r'href="(https://storage\.mfn\.se/[^"]+\.pdf[^"]*)"', html, re.IGNORECASE
-            )
-            storage_url = storage_m.group(1) if storage_m else None
-            out.append(
-                {
-                    "url": url,
-                    "title": title,
-                    "body": body,
-                    "storage_url": storage_url,
-                    "published_at": None,
-                }
-            )
+            parsed = _parse_html(resp.text)
+            title = parsed["title"] or seed.get("title") or ""
+            if reports_only and not is_report(title):
+                continue
+            body = parsed["body"]
+            article = {
+                "url": url,
+                "source_url": url,
+                "source_release_url": url,
+                "title": title,
+                "body": body,
+                "content_text": body,
+                "storage_url": parsed["storage_url"],
+                "attachment_url": parsed["storage_url"],
+                "published_at": parsed["published_at"] or seed.get("published_at"),
+                "lang": seed.get("lang") or _language_hint(title),
+            }
+            article.update(_report_identity_seed(article))
+            out.append(article)
         return out
