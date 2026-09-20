@@ -98,24 +98,37 @@ class JevShadowBudget:
     calls: int = 0
     input_tokens: int = 0
     cost_usd: float = 0.0
+    reserved_input_tokens: int = 0
+    reserved_cost_usd: float = 0.0
 
     def reserve(self, estimated_input_tokens: int) -> bool:
+        estimate = max(0, estimated_input_tokens)
         if self.calls >= self.max_calls:
             return False
-        if self.input_tokens + max(0, estimated_input_tokens) > self.max_input_tokens:
+        if self.input_tokens + self.reserved_input_tokens + estimate > self.max_input_tokens:
             return False
-        if self.cost_usd + max(0, estimated_input_tokens) * JEV_INPUT_COST_USD_PER_TOKEN > (
+        if self.cost_usd + self.reserved_cost_usd + estimate * JEV_INPUT_COST_USD_PER_TOKEN > (
             self.max_cost_usd
         ):
             return False
         self.calls += 1
+        self.reserved_input_tokens += estimate
+        self.reserved_cost_usd += estimate * JEV_INPUT_COST_USD_PER_TOKEN
         return True
 
-    def record_usage(self, input_tokens: int | None) -> None:
-        if input_tokens is None:
-            return
-        self.input_tokens += max(0, input_tokens)
-        self.cost_usd += max(0, input_tokens) * JEV_INPUT_COST_USD_PER_TOKEN
+    def record_usage(
+        self, input_tokens: int | None, estimated_input_tokens: int | None = None
+    ) -> None:
+        estimate = (
+            self.reserved_input_tokens
+            if estimated_input_tokens is None
+            else min(max(0, estimated_input_tokens), self.reserved_input_tokens)
+        )
+        self.reserved_input_tokens -= estimate
+        self.reserved_cost_usd -= estimate * JEV_INPUT_COST_USD_PER_TOKEN
+        actual = estimate if input_tokens is None else max(0, input_tokens)
+        self.input_tokens += actual
+        self.cost_usd += actual * JEV_INPUT_COST_USD_PER_TOKEN
 
 
 @dataclass(frozen=True)
@@ -698,14 +711,20 @@ class JevShadowSidecar:
             selected, probabilities, confidence, returned_model, input_tokens, output_tokens = (
                 _response_choice(response, question_id, labels)
             )
-            active_budget.record_usage(input_tokens)
+            active_budget.record_usage(input_tokens, estimate)
             if returned_model != self.config.model_version:
                 raise _JevResponseError("model_version_mismatch")
-            if active_budget.input_tokens > active_budget.max_input_tokens:
+            if (
+                active_budget.input_tokens + active_budget.reserved_input_tokens
+                > active_budget.max_input_tokens
+            ):
                 raise _JevResponseError("token_budget_exceeded")
             if input_tokens is not None and input_tokens > self.config.max_input_tokens:
                 raise _JevResponseError("token_budget_exceeded")
-            if active_budget.cost_usd > self.config.max_cost_usd:
+            if (
+                active_budget.cost_usd + active_budget.reserved_cost_usd
+                > active_budget.max_cost_usd
+            ):
                 raise _JevResponseError("cost_budget_exceeded")
             latency_ms = round((perf_counter() - started) * 1000)
             threshold = (
