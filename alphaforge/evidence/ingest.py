@@ -83,6 +83,7 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     if attachment_checksum:
         keys.add(f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}")
     body = doc.get("content_text") or doc.get("body")
+    body_checksum = ""
     if body:
         normalized_body = " ".join(str(body).split()).casefold()
         body_checksum = hashlib.sha256(normalized_body.encode()).hexdigest()
@@ -102,10 +103,9 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
         title_kind = kind
     else:
         title_kind = ""
-    if (issuer or period) and title_kind and period:
-        keys.add(f"report:{issuer}|{title_kind}|{period}")
-    elif (issuer or period) and published:
-        keys.add(f"report:{issuer}|{kind}|{published}")
+    identity_token = str(event_id or attachment_checksum or body_checksum)
+    if (issuer or period) and title_kind and period and identity_token:
+        keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")
     if not keys:
         title = re.sub(
             r"\b(inbjudan|invitation to|publicerar|has published)\b",

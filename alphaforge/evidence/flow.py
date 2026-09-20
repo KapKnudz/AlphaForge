@@ -174,9 +174,13 @@ def build_frozen_evidence_packet(
         sibling_rows = conn.execute(
             """
             SELECT source_url, title, published_at, ingested_lang, duplicate_of
-            FROM research_documents WHERE duplicate_of=? ORDER BY source_url
+            FROM research_documents
+            WHERE duplicate_of=?
+              AND published_at IS NOT NULL
+              AND substr(published_at, 1, 10) <= ?
+            ORDER BY source_url
             """,
-            (document_id,),
+            (document_id, as_of[:10]),
         ).fetchall()
         row_limitations: list[str] = []
         if row["limitations"]:
