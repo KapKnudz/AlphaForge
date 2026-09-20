@@ -261,8 +261,7 @@ def _parse_html(html: str) -> dict[str, Any]:
     )
     storage_url = (
         selected_attachment[1][0]
-        if selected_attachment is not None
-        and _attachment_score(*selected_attachment[1])
+        if selected_attachment is not None and _attachment_score(*selected_attachment[1])
         else None
     )
     title = " ".join(" ".join(parser.h1_parts).split())

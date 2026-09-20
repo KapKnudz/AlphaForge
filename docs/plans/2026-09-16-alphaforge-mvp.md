@@ -213,9 +213,9 @@ Following `scout-alphaforge-evidence-sources §2`:
 
 Every MFN company feed carries each release twice (same body translated). The ingestion **must**:
 
-- Compute `normalized_key = slugify(title without "Inbjudan/Invitation to") + storage_id_or_href_stem`; group `(mfn_slug, normalized_key, calendar_date)` as one logical release.
-- When a group has size 2, keep deterministically one `doc.selected = {preferred}` and mark the other `duplicate_of = selected.id` and `ingest_status = superseded_by_translation`. No PDF is fetched twice; the unselected variant's text is never concatenated into the packet.
-- The selection rule is recorded (`bilingual_selection_rule ∈ {sv_packet_majority, en_packet_majority, deterministic_en_fallback}`) and exposed as a diagnostic.
+- Build a deterministic identity from provider event ID first, then PDF/checksum identity, attachment filename, canonical MFN URL plus publication date, and finally issuer/report-kind/period/title fallbacks.
+- Keep one preferred variant per identity group. A packet-majority `sv`/`en` selection wins when supplied; otherwise English wins, with the source URL as the final tie-breaker. The selected row is returned for packet processing; suppressed variants retain `duplicate_of`, a shared bilingual group ID, `ingest_status = superseded_by_translation`, language, checksum, and selection-rule metadata for audit.
+- Record the selection rule (`bilingual_selection_rule ∈ {sv_packet_majority, en_packet_majority, deterministic_en_fallback}`) and expose it as a diagnostic. The checksum index also links alternate-source copies discovered across runs to the existing document.
 
 ### 4.3 Free ownership stack — what is shipped
 
@@ -230,8 +230,8 @@ All four feed the `ResearchEvidence` and S10/S11 typed outputs; the thesis card'
 
 ### 4.4 Swedish-aware prompts — no translation layer
 
-- Detector: `langdetect`/`fasttext` on each `news_releases.body` and `research_documents.document_text` → `metadata{lang, lang_confidence}` persisted.
-- Selector: packet majority lang (`mode(doc.lang for doc in documents if doc.lang in {sv,en})`) chooses the specialist prompt variant (`_sv.md` vs `_en.md`); mixed-sv majority → Swedish prompt even if some interim is English.
+- Current ingest detection is dependency-free: MFN title markers seed `sv`/`en`, while ingestion honors an explicit language and otherwise applies a Swedish-marker heuristic to title/body text. The persisted contract is `ingested_lang` plus language/checksum provenance in `raw_metadata`; confidence scores are not currently persisted.
+- Selection: a caller-supplied packet majority (`sv` or `en`) determines the preferred bilingual variant; without one, English is the deterministic fallback. The selection rule and shared group ID are persisted for audit. Specialist prompt variants remain a downstream integration step.
 - Instruction (front-matter of every `_sv.md`): *"`Du svarar på svenska där evidens är på svenska; citera ordagrant och översätt inte nyckeltermer. Varje påstående kräver source_ids-paragraf; saknas källa → missing_information.`"*
 - Hedborg Swedish-hedge fidelity (`"...förutsättningarna förblir utmanande"` is challenge-preserved, not mushed to *"challenging but positive"*) is validated by the evidence-sources report's §8 Nordic-language risk.
 
