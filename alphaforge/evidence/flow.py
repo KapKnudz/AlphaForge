@@ -83,11 +83,13 @@ def download_pdf(
     headers = getattr(response, "headers", {}) or {}
     content_type = str(headers.get("Content-Type") or headers.get("content-type") or "").lower()
     declared_length = headers.get("Content-Length") or headers.get("content-length")
-    try:
-        if declared_length is not None and int(declared_length) > limits.max_pdf_bytes:
+    if declared_length is not None:
+        try:
+            parsed_length = int(declared_length)
+        except (TypeError, ValueError):
+            parsed_length = None
+        if parsed_length is not None and parsed_length > limits.max_pdf_bytes:
             raise PdfAcquisitionError("resource_limit", "PDF Content-Length exceeds the configured limit")
-    except (TypeError, ValueError):
-        pass
     content = bytes(getattr(response, "content", b"") or b"")
     if len(content) > limits.max_pdf_bytes:
         raise PdfAcquisitionError("resource_limit", "PDF payload exceeds the configured byte limit")
