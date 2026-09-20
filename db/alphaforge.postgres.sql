@@ -100,3 +100,34 @@ CREATE INDEX IF NOT EXISTS idx_ranking_runs_scores_gin ON ranking_runs USING GIN
 
 -- Postgres advisory: no WAL pragmas; MVCC handles concurrency.
 -- Keep foreign_keys via standard REFERENCES (already enforced).
+
+CREATE TABLE IF NOT EXISTS jev_shadow_audit (
+    id                    BIGSERIAL PRIMARY KEY,
+    observed_at           TIMESTAMPTZ NOT NULL,
+    feature               TEXT NOT NULL CHECK (feature IN ('citation_relation', 'missing_information')),
+    packet_hash           TEXT,
+    source_id             TEXT,
+    missing_item_id       TEXT,
+    anchor                TEXT,
+    span_checksum         TEXT,
+    coverage_checksum     TEXT,
+    claim_hash            TEXT,
+    question_hash         TEXT,
+    question_version      TEXT NOT NULL,
+    criteria_version      TEXT NOT NULL,
+    pinned_model_version  TEXT NOT NULL,
+    returned_model        TEXT,
+    selected_class        TEXT,
+    probabilities         JSONB,
+    confidence            DOUBLE PRECISION CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
+    input_tokens          INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens         INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    usage                 JSONB,
+    latency_ms            INTEGER NOT NULL CHECK (latency_ms >= 0),
+    retry_outcome         TEXT NOT NULL,
+    error_code            TEXT,
+    input_hash            TEXT,
+    action                TEXT NOT NULL DEFAULT 'shadow_only'
+);
+CREATE INDEX IF NOT EXISTS idx_jev_shadow_audit_packet ON jev_shadow_audit(packet_hash, observed_at);
+CREATE INDEX IF NOT EXISTS idx_jev_shadow_audit_feature ON jev_shadow_audit(feature, observed_at);

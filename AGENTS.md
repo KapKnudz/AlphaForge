@@ -25,3 +25,4 @@ Use `docs/plans/2026-09-16-alphaforge-mvp.md` as the design authority. Do not vi
 
 - Börsdata dividend sync accepts the live nested calendar shape, including `excludingDate` and `dividendType=4`; adapter, fixture, and SQLite migration coverage live in `alphaforge/providers/borsdata/adapter.py`, `tests/fixtures/borsdata/live_dividend_calendar.json`, and `db/migrations/002_allow_dividend_type_4.sql`.
 - Deterministic MFN issuer mapping and the one-company frozen PDF evidence lane are documented in `docs/evidence-flow.md`; implementation seams are `alphaforge/providers/mfn/issuer.py`, `alphaforge/evidence/flow.py`, and repository-owned evidence tables.
+- Optional Jev shadow signals are documented in `docs/jev-shadow.md`; the sidecar is `alphaforge/llm/jev_shadow.py`, and its append-only audit schema is migration `004_jev_shadow_audit.sql`. It must remain observational and never alter deterministic readiness or packet contents.
