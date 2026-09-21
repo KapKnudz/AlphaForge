@@ -262,7 +262,13 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     kind = _report_kind_for_identity(doc)
     period = _fiscal_period(doc)
     published = str(doc.get("published_at") or "")[:10]
+    quarter_period = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", period)
     keys: set[str] = set()
+    if issuer and kind and quarter_period:
+        keys.add(
+            f"report-quarter:{issuer}|{kind}|"
+            f"{quarter_period.group(1)}-q{quarter_period.group(3)}"
+        )
     event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
     if event_id:
         keys.add(f"event:{event_id}")

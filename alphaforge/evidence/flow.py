@@ -961,6 +961,7 @@ class OneCompanyEvidenceFlow:
             selected = None
             downloaded = None
             extracted = None
+            existing_canonical_source_url = None
             failures: dict[str, int] = {}
             for variant in variants:
                 attachment_url = variant.get("attachment_url") or variant.get("storage_url")
@@ -973,6 +974,14 @@ class OneCompanyEvidenceFlow:
                     self.conn, str(attachment_url), company_id
                 )
                 if existing is not None:
+                    canonical = self.conn.execute(
+                        "SELECT source_url FROM research_documents WHERE id=?",
+                        (existing["document_id"],),
+                    ).fetchone()
+                    if canonical is not None:
+                        selected = variant
+                        existing_canonical_source_url = str(canonical["source_url"])
+                        break
                     continue
                 try:
                     candidate_download = download_pdf(str(attachment_url), limits=self.limits)
@@ -997,6 +1006,17 @@ class OneCompanyEvidenceFlow:
                 downloaded = candidate_download
                 extracted = candidate_extracted
                 break
+            if existing_canonical_source_url is not None:
+                for variant in variants:
+                    sibling_url = str(variant.get("source_url") or variant.get("url") or "")
+                    if sibling_url and sibling_url != existing_canonical_source_url:
+                        persist_evidence_sibling(
+                            self.conn,
+                            company_id=company_id,
+                            canonical_source_url=existing_canonical_source_url,
+                            sibling=variant,
+                        )
+                continue
             if selected is None or downloaded is None or extracted is None:
                 for code, count in failures.items():
                     result.skipped[code] = result.skipped.get(code, 0) + count
