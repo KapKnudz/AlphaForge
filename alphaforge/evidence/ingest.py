@@ -325,6 +325,64 @@ def _same_value(left: Any, right: Any) -> bool:
     return left not in (None, "") and left == right
 
 
+def _numeric_key_figure_fingerprint(value: Any) -> tuple[str, ...]:
+    if not value:
+        return ()
+    text = str(value)
+    figures: list[str] = []
+    token_pattern = re.compile(
+        r"(?<![\w/])(?:\d{1,3}(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)(?![\w/])"
+    )
+    unit_aliases = {
+        "%": "%",
+        "sek": "currency",
+        "msek": "currency",
+        "eur": "currency",
+        "meur": "currency",
+        "usd": "currency",
+        "miljon": "million",
+        "miljoner": "million",
+        "million": "million",
+        "millions": "million",
+        "mn": "million",
+        "m": "million",
+        "miljard": "billion",
+        "miljarder": "billion",
+        "billion": "billion",
+        "billions": "billion",
+        "bn": "billion",
+    }
+    for match in token_pattern.finditer(text):
+        raw = match.group(0)
+        compact = raw.replace(" ", "")
+        if "," in compact and "." in compact:
+            separator = "." if compact.rfind(".") > compact.rfind(",") else ","
+            decimal = compact.rsplit(separator, 1)
+            compact = decimal[0].replace(",", "").replace(".", "") + "." + decimal[1]
+        elif "," in compact or "." in compact:
+            separator = "," if "," in compact else "."
+            before, after = compact.rsplit(separator, 1)
+            compact = (
+                before + after
+                if len(after) == 3
+                else before + "." + after
+            )
+        try:
+            number = f"{float(compact):g}"
+        except ValueError:
+            continue
+        if number.isdigit() and len(number) == 4 and 1900 <= int(number) <= 2100:
+            continue
+        window = text[max(0, match.start() - 16) : min(len(text), match.end() + 16)].casefold()
+        unit = ""
+        for alias, normalized in unit_aliases.items():
+            if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", window):
+                unit = normalized
+                break
+        figures.append(f"{number}|{unit}")
+    return tuple(sorted(figures)) if len(figures) >= 2 else ()
+
+
 def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) -> bool:
     if _language(left) == _language(right):
         return False
@@ -342,7 +400,8 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     derived_corroborator = False
     event_left = left.get("provider_event_id") or left.get("mfn_event_id")
     event_right = right.get("provider_event_id") or right.get("mfn_event_id")
-    strong_corroborator |= _same_value(event_left, event_right)
+    shared_event = _same_value(event_left, event_right)
+    strong_corroborator |= shared_event
     checksum_left = left.get("pdf_checksum") or left.get("attachment_checksum")
     checksum_right = right.get("pdf_checksum") or right.get("attachment_checksum")
     strong_corroborator |= _same_value(checksum_left, checksum_right)
@@ -352,6 +411,14 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
         normalized_left = " ".join(str(body_left).split()).casefold()
         normalized_right = " ".join(str(body_right).split()).casefold()
         strong_corroborator |= normalized_left == normalized_right
+    numeric_left = _numeric_key_figure_fingerprint(body_left)
+    numeric_right = _numeric_key_figure_fingerprint(body_right)
+    numeric_corroborator = bool(numeric_left and numeric_right and numeric_left == numeric_right)
+    if numeric_left and numeric_right and numeric_left != numeric_right and not shared_event:
+        return False
+    strong_corroborator |= numeric_corroborator
+    if not shared_event and not numeric_corroborator:
+        return False
     url_left = canonical_release_url(str(left.get("source_url") or left.get("url") or ""))
     url_right = canonical_release_url(str(right.get("source_url") or right.get("url") or ""))
     strong_corroborator |= bool(url_left and url_left == url_right)
