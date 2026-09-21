@@ -102,6 +102,20 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
     for token in re.split(r"[^\w]+", issuer):
         if token:
             title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    for quarter, month_start, month_end in (
+        ("q1", "january|januari", "march|mars"),
+        ("q1", "may|maj", "july|juli"),
+        ("q2", "april", "june|juni"),
+        ("q2", "august|augusti", "october|oktober"),
+        ("q3", "july|juli", "september"),
+        ("q4", "october|oktober", "december"),
+    ):
+        title = re.sub(
+            rf"\b(?:\d{{1,2}}\s+)?(?:{month_start})\s*[-–]\s*"
+            rf"(?:\d{{1,2}}\s+)?(?:{month_end})\b",
+            f" {quarter} ",
+            title,
+        )
     for month, number in {
         "january": 1,
         "januari": 1,
@@ -190,6 +204,14 @@ def _quarter_period(text: str) -> str | None:
             f" {quarter} ",
             text,
         )
+    fiscal_range = re.search(
+        r"\b(?:\d{1,2}\s+)?(?:may|maj)\s*[-–]\s*"
+        r"(?:\d{1,2}\s+)?(?:july|juli)\s+(20\d{2})\b",
+        text,
+    )
+    if fiscal_range:
+        year = int(fiscal_range.group(1))
+        return f"{year}/{year + 1}-q1"
     text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b", "q1", text)
     text = re.sub(r"\bapril\s*[-–]\s*(?:june|juni)\b", "q2", text)
     text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
@@ -257,13 +279,24 @@ def canonical_release_url(url: str) -> str:
     return f"{parsed.netloc}{path}"
 
 
+def _translation_title_signature(doc: dict[str, Any], issuer: str) -> str:
+    signature = _translation_neutral_title(doc, issuer)
+    return re.sub(r"\b(20\d{2})-(20\d{2})\b", r"\1", signature)
+
+
 def _title_has_month_range(title: str) -> bool:
     return bool(
         re.search(
-            r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b"
-            r"|\bapril\s*[-–]\s*(?:june|juni)\b"
-            r"|\b(?:july|juli)\s*[-–]\s*september\b"
-            r"|\b(?:october|oktober)\s*[-–]\s*december\b",
+            r"\b(?:\d{1,2}\s+)?(?:january|januari)\s*[-–]\s*"
+            r"(?:\d{1,2}\s+)?(?:march|mars)\b"
+            r"|\b(?:\d{1,2}\s+)?(?:may|maj)\s*[-–]\s*"
+            r"(?:\d{1,2}\s+)?(?:july|juli)\b"
+            r"|\b(?:\d{1,2}\s+)?april\s*[-–]\s*"
+            r"(?:\d{1,2}\s+)?(?:june|juni)\b"
+            r"|\b(?:\d{1,2}\s+)?(?:july|juli)\s*[-–]\s*"
+            r"(?:\d{1,2}\s+)?september\b"
+            r"|\b(?:\d{1,2}\s+)?(?:october|oktober)\s*[-–]\s*"
+            r"(?:\d{1,2}\s+)?december\b",
             title.casefold(),
         )
     )
@@ -282,14 +315,18 @@ def _translation_period_bridge(left: dict[str, Any], right: dict[str, Any]) -> b
     right_quarter = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", right_period)
     if not left_quarter or not right_quarter:
         return False
+    left_month_range = _title_has_month_range(str(left.get("title") or ""))
+    right_month_range = _title_has_month_range(str(right.get("title") or ""))
+    left_published = str(left.get("published_at") or "")[:10]
+    right_published = str(right.get("published_at") or "")[:10]
     return (
         left_quarter.group(1) == right_quarter.group(1)
         and left_quarter.group(3) == right_quarter.group(3)
         and left_period != right_period
-        and (
-            _title_has_month_range(str(left.get("title") or ""))
-            or _title_has_month_range(str(right.get("title") or ""))
-        )
+        and left_month_range != right_month_range
+        and _translation_title_signature(left, _issuer_identity(left))
+        == _translation_title_signature(right, _issuer_identity(right))
+        and (not left_published or not right_published or left_published == right_published)
     )
 
 
@@ -298,10 +335,7 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     kind = _report_kind_for_identity(doc)
     period = _fiscal_period(doc)
     published = str(doc.get("published_at") or "")[:10]
-    quarter_period = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", period)
     keys: set[str] = set()
-    if issuer and kind and quarter_period:
-        keys.add(f"report-quarter:{issuer}|{kind}|{period}")
     event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
     if event_id:
         keys.add(f"event:{event_id}")
