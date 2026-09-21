@@ -338,35 +338,36 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     right_fiscal_config = _fiscal_year_config(right)
     if left_fiscal_config and right_fiscal_config and left_fiscal_config != right_fiscal_config:
         return False
-    corroborators = 0
+    strong_corroborator = False
+    derived_corroborator = False
     event_left = left.get("provider_event_id") or left.get("mfn_event_id")
     event_right = right.get("provider_event_id") or right.get("mfn_event_id")
-    corroborators += int(_same_value(event_left, event_right))
+    strong_corroborator |= _same_value(event_left, event_right)
     checksum_left = left.get("pdf_checksum") or left.get("attachment_checksum")
     checksum_right = right.get("pdf_checksum") or right.get("attachment_checksum")
-    corroborators += int(_same_value(checksum_left, checksum_right))
+    strong_corroborator |= _same_value(checksum_left, checksum_right)
     body_left = left.get("content_text") or left.get("body")
     body_right = right.get("content_text") or right.get("body")
     if body_left and body_right:
         normalized_left = " ".join(str(body_left).split()).casefold()
         normalized_right = " ".join(str(body_right).split()).casefold()
-        corroborators += int(normalized_left == normalized_right)
+        strong_corroborator |= normalized_left == normalized_right
     url_left = canonical_release_url(str(left.get("source_url") or left.get("url") or ""))
     url_right = canonical_release_url(str(right.get("source_url") or right.get("url") or ""))
-    corroborators += int(bool(url_left and url_left == url_right))
+    strong_corroborator |= bool(url_left and url_left == url_right)
     period_left = _fiscal_period(left)
     period_right = _fiscal_period(right)
-    corroborators += int(bool(period_left and period_left == period_right))
+    derived_corroborator |= bool(period_left and period_left == period_right)
     date_left = _resolved_date_identity(left)
     date_right = _resolved_date_identity(right)
-    corroborators += int(bool(date_left and date_left == date_right))
+    derived_corroborator |= bool(date_left and date_left == date_right)
     published_left = str(left.get("published_at") or "")[:10]
     published_right = str(right.get("published_at") or "")[:10]
-    corroborators += int(bool(published_left and published_left == published_right))
+    derived_corroborator |= bool(published_left and published_left == published_right)
     title_left = _translation_neutral_title(left, issuer)
     title_right = _translation_neutral_title(right, issuer)
-    corroborators += int(bool(title_left and title_left == title_right))
-    return corroborators >= 2
+    derived_corroborator |= bool(title_left and title_left == title_right)
+    return strong_corroborator and derived_corroborator
 
 
 def bilingual_dedupe(
