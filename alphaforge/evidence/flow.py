@@ -222,18 +222,20 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
 
 
 def _observation_date(article: dict[str, Any]) -> str | None:
-    body_end = _body_period_end(article)
-    if body_end:
-        return body_end
     for key in ("observation_date", "period_end", "report_period_end"):
         value = article.get(key)
         if value:
             return str(value)[:10]
+    body_end = _body_period_end(article)
+    if body_end:
+        return body_end
     title = str(article.get("title") or "").lower()
     year_match = re.search(r"\b(20\d{2})\b", title)
     if year_match is None:
         return None
     year = int(year_match.group(1))
+    if re.search(r"\b20\d{2}\s*[/\-]\s*20\d{2}\b", title):
+        return None
     quarter_match = re.search(r"\bq\s*([1-4])\b", title)
     if quarter_match:
         return (
@@ -816,11 +818,18 @@ class OneCompanyEvidenceFlow:
             additional_limitations=packet_limitations,
         )
         if not packet.get("sources"):
-            if result.skipped.get("future_dated_release", 0) and not result.eligible:
+            if (
+                result.skipped.get("future_dated_release", 0)
+                and not result.eligible
+                and not result.skipped.get("missing_publication_timestamp", 0)
+            ):
                 reason = NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
                 message = "all discovered releases are after the requested point-in-time cutoff"
             elif (
-                result.eligible or result.downloaded or result.skipped.get("missing_pdf_attachment")
+                result.eligible
+                or result.downloaded
+                or result.skipped.get("missing_pdf_attachment")
+                or result.skipped.get("missing_publication_timestamp")
             ):
                 reason = NoEvidenceReason.NO_COMPLETE_SOURCE
                 message = "no complete evidence source was available at the requested cutoff"

@@ -565,9 +565,8 @@ def record_job(
             borsdata_id=excluded.borsdata_id,
             attempt=jobs.attempt + 1,
             error=excluded.error,
-            started_at=COALESCE(jobs.started_at, excluded.started_at),
-            finished_at=CASE WHEN excluded.status IN ('running', 'pending') THEN jobs.finished_at
-                             ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+            started_at=excluded.started_at,
+            finished_at=excluded.finished_at
         """,
         (job_type, company_id, borsdata_id, status, err_json, status),
     )

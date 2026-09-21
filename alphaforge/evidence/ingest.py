@@ -46,11 +46,22 @@ def _attachment_filename(doc: dict[str, Any]) -> str:
     return ""
 
 
+def _issuer_token(value: Any) -> str:
+    text = str(value).casefold().strip("/")
+    segments = [segment for segment in text.split("/") if segment]
+    for marker in ("a", "cision"):
+        if marker in segments:
+            index = segments.index(marker)
+            if index + 1 < len(segments):
+                return segments[index + 1]
+    return text
+
+
 def _issuer_identity(doc: dict[str, Any]) -> str:
     """Return the stable issuer token used by report identity fallbacks."""
     explicit = doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id")
     if explicit not in (None, ""):
-        return str(explicit).casefold()
+        return _issuer_token(explicit)
     source_url = str(doc.get("source_url") or doc.get("url") or "")
     parsed = urlparse(source_url)
     segments = [segment for segment in parsed.path.split("/") if segment]
@@ -75,40 +86,6 @@ def _report_kind_for_identity(doc: dict[str, Any]) -> str:
     ):
         return "quarterly"
     return ""
-
-
-def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
-    """Keep release-specific title terms while dropping language boilerplate."""
-    title = str(doc.get("title") or "").casefold()
-    for token in re.split(r"[^\w]+", issuer):
-        if token:
-            title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
-    boilerplate = (
-        "interim",
-        "quarterly",
-        "quarter",
-        "report",
-        "delårsrapport",
-        "delarsrapport",
-        "kvartalsrapport",
-        "rapport",
-        "annual",
-        "årsredovisning",
-        "arsredovisning",
-        "year",
-        "end",
-        "bokslutskommuniké",
-        "bokslutskommunike",
-        "publicerar",
-        "offentliggör",
-        "offentliggor",
-        "has",
-        "published",
-        "its",
-    )
-    for word in boilerplate:
-        title = re.sub(rf"\b{re.escape(word)}\b", " ", title)
-    return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
 
 
 def _fiscal_period(doc: dict[str, Any]) -> str:
@@ -194,11 +171,7 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     # logical release.  This is deliberately stronger than the URL fallback,
     # but remains bounded to report-only documents and a concrete period.
     if issuer and kind and period:
-        title_key = _translation_neutral_title(doc, issuer)
-        identity = f"{issuer}|{kind}|{period}"
-        keys.add(
-            f"report-period:{identity}|{title_key}" if title_key else f"report-period:{identity}"
-        )
+        keys.add(f"report-period:{issuer}|{kind}|{period}")
     identity_token = str(event_id or attachment_checksum or body_checksum)
     if (issuer or period) and title_kind and period and identity_token:
         keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")
