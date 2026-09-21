@@ -257,6 +257,42 @@ def canonical_release_url(url: str) -> str:
     return f"{parsed.netloc}{path}"
 
 
+def _title_has_month_range(title: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b"
+            r"|\bapril\s*[-–]\s*(?:june|juni)\b"
+            r"|\b(?:july|juli)\s*[-–]\s*september\b"
+            r"|\b(?:october|oktober)\s*[-–]\s*december\b",
+            title.casefold(),
+        )
+    )
+
+
+def _translation_period_bridge(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if _language(left) == _language(right):
+        return False
+    if _issuer_identity(left) != _issuer_identity(right):
+        return False
+    if _report_kind_for_identity(left) != _report_kind_for_identity(right):
+        return False
+    left_period = _fiscal_period(left)
+    right_period = _fiscal_period(right)
+    left_quarter = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", left_period)
+    right_quarter = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", right_period)
+    if not left_quarter or not right_quarter:
+        return False
+    return (
+        left_quarter.group(1) == right_quarter.group(1)
+        and left_quarter.group(3) == right_quarter.group(3)
+        and left_period != right_period
+        and (
+            _title_has_month_range(str(left.get("title") or ""))
+            or _title_has_month_range(str(right.get("title") or ""))
+        )
+    )
+
+
 def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     issuer = _issuer_identity(doc)
     kind = _report_kind_for_identity(doc)
@@ -265,10 +301,7 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     quarter_period = re.fullmatch(r"(20\d{2})(?:/(20\d{2}))?-q([1-4])", period)
     keys: set[str] = set()
     if issuer and kind and quarter_period:
-        keys.add(
-            f"report-quarter:{issuer}|{kind}|"
-            f"{quarter_period.group(1)}-q{quarter_period.group(3)}"
-        )
+        keys.add(f"report-quarter:{issuer}|{kind}|{period}")
     event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
     if event_id:
         keys.add(f"event:{event_id}")
@@ -344,6 +377,12 @@ def bilingual_dedupe(
                     strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner]
                 )
             }
+        owners.update(
+            find(owner)
+            for owner, variants in enumerate(groups)
+            if variants
+            and any(_translation_period_bridge(doc, variant) for variant in variants)
+        )
         if not owners:
             group_index = len(groups)
             groups.append([])
