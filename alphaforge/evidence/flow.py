@@ -841,6 +841,7 @@ class OneCompanyEvidenceFlow:
             discovered=len(details),
         )
         eligible: list[dict[str, Any]] = []
+        pre_cutoff_report = False
         today = now.date()
         for article in details:
             title = article.get("title") or ""
@@ -866,6 +867,7 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("not_yet_published_release", 0) + 1
                 )
                 continue
+            pre_cutoff_report = True
             eligible.append(
                 {
                     **article,
@@ -1007,6 +1009,7 @@ class OneCompanyEvidenceFlow:
         if not packet.get("sources"):
             if (
                 result.skipped.get("future_dated_release", 0)
+                and not pre_cutoff_report
                 and not result.eligible
                 and not result.skipped.get("missing_publication_timestamp", 0)
             ):
