@@ -195,11 +195,34 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
         rf"(?:-|–|—|to|through|till|till och med)\s*"
         rf"(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    match = range_pattern.search(body)
-    if match:
+    candidates: list[tuple[int, str]] = []
+    for match in range_pattern.finditer(body):
         end = _date_value(match.group(1), match.group(2), match.group(3) or fiscal_year)
-        if end:
-            return end
+        if end is None:
+            continue
+        before = body[max(0, match.start() - 48) : match.start()]
+        if any(
+            term in before
+            for term in ("compared", "previous", "prior", "same period", "last year")
+        ):
+            continue
+        context = body[max(0, match.start() - 48) : min(len(body), match.end() + 48)]
+        score = 0
+        score += sum(
+            context.count(term)
+            for term in ("covered", "covers", "quarter", "period", "months ended", "three months")
+        )
+        score -= sum(
+            context.count(term)
+            for term in ("compared", "previous", "prior", "same period", "last year")
+        )
+        candidates.append((score, end))
+    if candidates:
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+            if candidates[0][1] != candidates[1][1]:
+                return None
+        return candidates[0][1]
     # Month-first English dates occur in a few release templates.
     month_first = re.compile(
         rf"\b(?:{months})\s+\d{{1,2}},?\s+(20\d{{2}})\s+"
@@ -506,6 +529,51 @@ class OneCompanyEvidenceFlow:
         self.now = now or (lambda: datetime.now(UTC))
 
     def run(
+        self,
+        company_id: int,
+        *,
+        as_of: str,
+        dry_run: bool = False,
+        shadow_citation: Mapping[str, Any] | None = None,
+        shadow_claim: str | None = None,
+        shadow_missing_item: str | Mapping[str, Any] | None = None,
+        shadow_specialist_requirement: str | None = None,
+    ) -> EvidenceFlowResult:
+        try:
+            return self._run(
+                company_id,
+                as_of=as_of,
+                dry_run=dry_run,
+                shadow_citation=shadow_citation,
+                shadow_claim=shadow_claim,
+                shadow_missing_item=shadow_missing_item,
+                shadow_specialist_requirement=shadow_specialist_requirement,
+            )
+        except Exception as exc:
+            if not dry_run:
+                try:
+                    row = self.conn.execute(
+                        "SELECT borsdata_id FROM companies WHERE id=?", (company_id,)
+                    ).fetchone()
+                    if row is not None:
+                        record_job(
+                            self.conn,
+                            "evidence",
+                            company_id=company_id,
+                            borsdata_id=(
+                                int(row["borsdata_id"])
+                                if row["borsdata_id"] is not None
+                                else None
+                            ),
+                            status="failed",
+                            error={"code": "unhandled_error", "message": str(exc)},
+                            begin_attempt=False,
+                        )
+                except Exception:
+                    pass
+            raise
+
+    def _run(
         self,
         company_id: int,
         *,

@@ -102,6 +102,17 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
     for token in re.split(r"[^\w]+", issuer):
         if token:
             title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    for ordinal, quarter in (
+        ("första|first", "q1"),
+        ("andra|second", "q2"),
+        ("tredje|third", "q3"),
+        ("fjärde|fourth", "q4"),
+    ):
+        title = re.sub(
+            rf"\b(?:{ordinal})\s+(?:kvartalet|quarter)\b",
+            f" {quarter} ",
+            title,
+        )
     for word in (
         "interim",
         "quarterly",
@@ -124,6 +135,7 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
         "has",
         "published",
         "its",
+        "the",
         "för",
         "for",
     ):
