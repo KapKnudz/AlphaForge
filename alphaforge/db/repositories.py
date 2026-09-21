@@ -794,6 +794,7 @@ def find_complete_evidence_document(
         """
         SELECT d.* FROM research_documents d
         WHERE d.company_id=? AND d.source_url=?
+          AND d.duplicate_of IS NULL
           AND EXISTS (
               SELECT 1 FROM research_attachments a
               WHERE a.document_id=COALESCE(d.duplicate_of, d.id)

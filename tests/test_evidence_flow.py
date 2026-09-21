@@ -284,7 +284,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     ).fetchone()
     assert evidence_job[0] == "success"
     assert evidence_job[1] is None
-    assert evidence_job[2] == 2
+    assert evidence_job[2] == 1
     assert evidence_job[3] is not None
     assert evidence_job[4] is not None
     with patch(

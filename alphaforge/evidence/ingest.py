@@ -102,6 +102,29 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
     for token in re.split(r"[^\w]+", issuer):
         if token:
             title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    for month, number in {
+        "january": 1,
+        "januari": 1,
+        "february": 2,
+        "februari": 2,
+        "march": 3,
+        "mars": 3,
+        "april": 4,
+        "may": 5,
+        "maj": 5,
+        "june": 6,
+        "juni": 6,
+        "july": 7,
+        "juli": 7,
+        "august": 8,
+        "augusti": 8,
+        "september": 9,
+        "october": 10,
+        "oktober": 10,
+        "november": 11,
+        "december": 12,
+    }.items():
+        title = re.sub(rf"\b{re.escape(month)}\b", f"m{number}", title)
     for ordinal, quarter in (
         ("första|first", "q1"),
         ("andra|second", "q2"),

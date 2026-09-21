@@ -203,18 +203,52 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
         before = body[max(0, match.start() - 48) : match.start()]
         if any(
             term in before
-            for term in ("compared", "previous", "prior", "same period", "last year")
+            for term in (
+                "compared",
+                "previous",
+                "prior",
+                "same period",
+                "last year",
+                "jämförelse",
+                "föregående",
+                "tidigare",
+                "samma period",
+                "förra året",
+            )
         ):
             continue
         context = body[max(0, match.start() - 48) : min(len(body), match.end() + 48)]
         score = 0
         score += sum(
             context.count(term)
-            for term in ("covered", "covers", "quarter", "period", "months ended", "three months")
+            for term in (
+                "covered",
+                "covers",
+                "quarter",
+                "period",
+                "months ended",
+                "three months",
+                "kvartalet",
+                "omfattade",
+                "omfattar",
+                "perioden",
+                "månader",
+            )
         )
         score -= sum(
             context.count(term)
-            for term in ("compared", "previous", "prior", "same period", "last year")
+            for term in (
+                "compared",
+                "previous",
+                "prior",
+                "same period",
+                "last year",
+                "jämförelse",
+                "föregående",
+                "tidigare",
+                "samma period",
+                "förra året",
+            )
         )
         candidates.append((score, end))
     if candidates:
@@ -760,9 +794,15 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("missing_publication_timestamp", 0) + 1
                 )
                 continue
-            if str(published_at)[:10] > as_of[:10] or str(published_at)[:10] > today.isoformat():
+            published_date = str(published_at)[:10]
+            if published_date > as_of[:10]:
                 result.skipped["future_dated_release"] = (
                     result.skipped.get("future_dated_release", 0) + 1
+                )
+                continue
+            if published_date > today.isoformat():
+                result.skipped["not_yet_published_release"] = (
+                    result.skipped.get("not_yet_published_release", 0) + 1
                 )
                 continue
             eligible.append(
@@ -890,7 +930,11 @@ class OneCompanyEvidenceFlow:
         packet_limitations = [
             f"evidence_flow_{code}:{count}"
             for code, count in sorted(result.skipped.items())
-            if code not in {"non_report_release", "future_dated_release"}
+            if code not in {
+                "non_report_release",
+                "future_dated_release",
+                "not_yet_published_release",
+            }
         ]
         packet = build_frozen_evidence_packet(
             self.conn,
@@ -912,6 +956,7 @@ class OneCompanyEvidenceFlow:
                 or result.downloaded
                 or result.skipped.get("missing_pdf_attachment")
                 or result.skipped.get("missing_publication_timestamp")
+                or result.skipped.get("not_yet_published_release")
             ):
                 reason = NoEvidenceReason.NO_COMPLETE_SOURCE
                 message = "no complete evidence source was available at the requested cutoff"
