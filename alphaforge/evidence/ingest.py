@@ -378,7 +378,8 @@ def bilingual_dedupe(
         matches = [
             index
             for index, variants in enumerate(groups)
-            if any(_cross_language_correspondence(doc, variant) for variant in variants)
+            if len(variants) == 1
+            and _cross_language_correspondence(doc, variants[0])
         ]
         if len(matches) == 1:
             groups[matches[0]].append(doc)
