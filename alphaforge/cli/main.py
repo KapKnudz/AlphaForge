@@ -881,14 +881,9 @@ def cmd_rank(args: argparse.Namespace) -> int:
         for company_id, score in ((score.company_id, score) for score in ranking.scores)
         if score.evidence_packet_hash
     }
-    if len(evidence_packet_hashes) == 1:
-        evidence_packet_hash = next(iter(evidence_packet_hashes.values()))
-    elif evidence_packet_hashes:
-        evidence_packet_hash = hashlib.sha256(
-            json.dumps(evidence_packet_hashes, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-    else:
-        evidence_packet_hash = None
+    evidence_packet_hash = (
+        next(iter(evidence_packet_hashes.values())) if len(evidence_packet_hashes) == 1 else None
+    )
 
     exports_dir = Path("exports") / as_of
     ranking_json_path, ranking_csv_path = export_ranking_files(

@@ -166,11 +166,8 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
 
 
-def _fiscal_period(doc: dict[str, Any]) -> str:
-    for key in ("fiscal_period", "report_period", "period"):
-        if doc.get(key) not in (None, ""):
-            return str(doc[key]).casefold().strip()
-    text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body")).casefold()
+def _quarter_period(text: str) -> str | None:
+    text = text.casefold()
     for ordinal, quarter in (
         ("första|first", "q1"),
         ("andra|second", "q2"),
@@ -182,10 +179,6 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
             f" {quarter} ",
             text,
         )
-    # MFN titles commonly use a financial year spanning two calendar years,
-    # e.g. ``Q1 2026/2027``.  Keep both years and the quarter so a Swedish
-    # and English release cannot become separate groups merely because their
-    # URL slugs and translated titles differ.
     match = re.search(
         r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b",
         text,
@@ -194,12 +187,34 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
         end_year = match.group(3) or match.group(2)
         return f"{match.group(2)}/{end_year}-q{match.group(1)}"
     match = re.search(
-        r"\b(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\s*q\s*([1-4])\b",
+        r"\b(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
         text,
     )
     if match:
         end_year = match.group(2) or match.group(1)
         return f"{match.group(1)}/{end_year}-q{match.group(3)}"
+    return None
+
+
+def _fiscal_period(doc: dict[str, Any]) -> str:
+    text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body"))
+    explicit = next(
+        (str(doc[key]).casefold().strip() for key in ("fiscal_period", "report_period", "period")
+         if doc.get(key) not in (None, "")),
+        None,
+    )
+    if explicit:
+        normalized = _quarter_period(explicit)
+        if normalized:
+            return normalized
+        title_period = _quarter_period(text)
+        if title_period:
+            return title_period
+        return explicit
+    quarter_period = _quarter_period(text)
+    if quarter_period:
+        return quarter_period
+    text = text.casefold()
     match = re.search(r"\b(?:h\s*([12])\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b", text)
     if match:
         end_year = match.group(3) or match.group(2)

@@ -206,6 +206,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             for term in (
                 "compared",
                 "comparative",
+                "comparison",
                 "previous",
                 "prior",
                 "same period",
@@ -241,6 +242,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             for term in (
                 "compared",
                 "comparative",
+                "comparison",
                 "previous",
                 "prior",
                 "same period",
@@ -274,6 +276,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             for term in (
                 "compared",
                 "comparative",
+                "comparison",
                 "previous",
                 "prior",
                 "same period",
@@ -325,6 +328,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             for term in (
                 "compared",
                 "comparative",
+                "comparison",
                 "previous",
                 "prior",
                 "same period",
@@ -802,15 +806,18 @@ class OneCompanyEvidenceFlow:
                 seen_feed_urls.add(url)
             unique_feed.append(entry)
         unseen_feed = []
+        future_dated_complete_release = False
         for entry in unique_feed:
             entry_url = (
                 entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
             )
-            if (
-                entry_url
-                and find_complete_evidence_document(self.conn, company_id, entry_url) is not None
-            ):
-                continue
+            if entry_url:
+                complete = find_complete_evidence_document(self.conn, company_id, entry_url)
+                if complete is not None:
+                    published_at = complete.get("published_at")
+                    if published_at and str(published_at)[:10] > as_of[:10]:
+                        future_dated_complete_release = True
+                    continue
             unseen_feed.append(entry)
         if not dry_run:
             record_mfn_feed_check(
@@ -840,6 +847,8 @@ class OneCompanyEvidenceFlow:
             mapping_status="mapped",
             discovered=len(details),
         )
+        if future_dated_complete_release:
+            result.skipped["future_dated_release"] = 1
         eligible: list[dict[str, Any]] = []
         pre_cutoff_report = False
         today = now.date()
