@@ -404,7 +404,8 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     strong_corroborator |= shared_event
     checksum_left = left.get("pdf_checksum") or left.get("attachment_checksum")
     checksum_right = right.get("pdf_checksum") or right.get("attachment_checksum")
-    strong_corroborator |= _same_value(checksum_left, checksum_right)
+    shared_checksum = _same_value(checksum_left, checksum_right)
+    strong_corroborator |= shared_checksum
     body_left = left.get("content_text") or left.get("body")
     body_right = right.get("content_text") or right.get("body")
     if body_left and body_right:
@@ -417,7 +418,7 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     if numeric_left and numeric_right and numeric_left != numeric_right and not shared_event:
         return False
     strong_corroborator |= numeric_corroborator
-    if not shared_event and not numeric_corroborator:
+    if not shared_event and not shared_checksum and not numeric_corroborator:
         return False
     url_left = canonical_release_url(str(left.get("source_url") or left.get("url") or ""))
     url_right = canonical_release_url(str(right.get("source_url") or right.get("url") or ""))
