@@ -161,6 +161,17 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
         "the",
         "för",
         "for",
+        "ab",
+        "aktiebolag",
+        "ag",
+        "corp",
+        "corporation",
+        "inc",
+        "limited",
+        "ltd",
+        "nv",
+        "plc",
+        "sa",
     ):
         title = re.sub(rf"\b{re.escape(word)}\b", " ", title)
     return re.sub(r"[^a-z0-9]+", "-", title).strip("-")

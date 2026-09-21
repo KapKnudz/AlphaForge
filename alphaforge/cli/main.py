@@ -678,7 +678,11 @@ def export_ranking_files(
             for score in ranking.scores
             if score.evidence_packet_hash
         }
-    if evidence_packet_hash is None and len(evidence_packet_hashes) == 1:
+    if (
+        evidence_packet_hash is None
+        and len(ranking.scores) == 1
+        and len(evidence_packet_hashes) == 1
+    ):
         evidence_packet_hash = next(iter(evidence_packet_hashes.values()))
 
     ranking_data = {
@@ -882,7 +886,9 @@ def cmd_rank(args: argparse.Namespace) -> int:
         if score.evidence_packet_hash
     }
     evidence_packet_hash = (
-        next(iter(evidence_packet_hashes.values())) if len(evidence_packet_hashes) == 1 else None
+        next(iter(evidence_packet_hashes.values()))
+        if len(ranking.scores) == 1 and len(evidence_packet_hashes) == 1
+        else None
     )
 
     exports_dir = Path("exports") / as_of
