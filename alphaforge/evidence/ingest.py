@@ -207,7 +207,7 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
         normalized = _quarter_period(explicit)
         if normalized:
             return normalized
-        title_period = _quarter_period(text)
+        title_period = _quarter_period(str(doc.get("title") or ""))
         if title_period:
             return title_period
         return explicit
