@@ -552,16 +552,24 @@ def record_job(
     err_json = json.dumps(error) if error else None
     conn.execute(
         """
-        INSERT INTO jobs (job_type, company_id, borsdata_id, status, attempt, error)
-        VALUES (?, ?, ?, ?, 1, ?)
+        INSERT INTO jobs
+            (job_type, company_id, borsdata_id, status, attempt, error, started_at, finished_at)
+        VALUES (
+            ?, ?, ?, ?, 1, ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+            CASE WHEN ? IN ('running', 'pending') THEN NULL
+                 ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+        )
         ON CONFLICT(job_type, company_id) DO UPDATE SET
             status=excluded.status,
             borsdata_id=excluded.borsdata_id,
             attempt=jobs.attempt + 1,
             error=excluded.error,
-            finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            started_at=COALESCE(jobs.started_at, excluded.started_at),
+            finished_at=CASE WHEN excluded.status IN ('running', 'pending') THEN jobs.finished_at
+                             ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
         """,
-        (job_type, company_id, borsdata_id, status, err_json),
+        (job_type, company_id, borsdata_id, status, err_json, status),
     )
     conn.commit()
 

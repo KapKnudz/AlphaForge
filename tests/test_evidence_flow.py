@@ -23,7 +23,9 @@ from alphaforge.db.repositories import (
 )
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
+    NoEvidenceReason,
     OneCompanyEvidenceFlow,
+    _observation_date,
     download_pdf,
     validate_frozen_packet,
 )
@@ -222,6 +224,18 @@ def test_flow_runs_weekly_page_two_backstop():
     assert result.eligible == 2
 
 
+def test_fiscal_observation_date_uses_reported_period_end_not_calendar_quarter():
+    assert (
+        _observation_date(
+            {
+                "title": "Clas Ohlson Interim Report Q1 2026/2027",
+                "body": "The first quarter covered 1 May–31 July 2026.",
+            }
+        )
+        == "2026-07-31"
+    )
+
+
 def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     conn = _connection()
     company_id = _mapped_company(conn)
@@ -264,6 +278,15 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
+    evidence_job = conn.execute(
+        "SELECT status, error, attempt, started_at, finished_at FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert evidence_job[0] == "success"
+    assert evidence_job[1] is None
+    assert evidence_job[2] == 2
+    assert evidence_job[3] is not None
+    assert evidence_job[4] is not None
     with patch(
         "alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")
     ):
@@ -278,6 +301,34 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         "https://mfn.test/a/flow/missing",
     }
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+
+
+def test_all_future_cutoff_is_typed_no_evidence_and_audited():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/future-only",
+        "title": "Flow AB Interim Report Q1 2027",
+        "published_at": "2027-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/future-only.pdf",
+        "lang": "en",
+    }
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([article]),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "no_evidence"
+    assert result.no_evidence_reason == NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
+    assert result.packet is None
+    job = conn.execute(
+        "SELECT status, error FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert job[0] == "partial"
+    assert json.loads(job[1])["code"] == "no_evidence"
+    assert json.loads(job[1])["no_evidence_reason"] == "all_releases_after_cutoff"
 
 
 def test_flow_rechecks_document_without_complete_evidence_artifacts():

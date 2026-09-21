@@ -660,11 +660,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def export_ranking_files(
-    ranking, as_of: str, model_version: str, exports_dir: Path
+    ranking,
+    as_of: str,
+    model_version: str,
+    exports_dir: Path,
+    *,
+    evidence_packet_hash: str | None = None,
+    evidence_packet_hashes: dict[str, str] | None = None,
 ) -> tuple[Path, Path]:
     from dataclasses import asdict
 
     exports_dir.mkdir(parents=True, exist_ok=True)
+
+    if evidence_packet_hashes is None:
+        evidence_packet_hashes = {
+            str(score.company_id): str(score.evidence_packet_hash)
+            for score in ranking.scores
+            if score.evidence_packet_hash
+        }
+    if evidence_packet_hash is None and len(evidence_packet_hashes) == 1:
+        evidence_packet_hash = next(iter(evidence_packet_hashes.values()))
 
     ranking_data = {
         "as_of": as_of,
@@ -672,6 +687,8 @@ def export_ranking_files(
         "company_count": len(ranking.scores),
         "eligible_count": sum(1 for s in ranking.scores if s.rank_eligible),
         "unranked_count": sum(1 for s in ranking.scores if not s.rank_eligible),
+        "evidence_packet_hash": evidence_packet_hash,
+        "evidence_packet_hashes": evidence_packet_hashes or {},
         "scores": [asdict(s) for s in ranking.scores],
     }
 
@@ -698,6 +715,7 @@ def export_ranking_files(
                 "readiness_status",
                 "readiness_blockers",
                 "readiness_limitations",
+                "evidence_packet_hash",
                 "data_quality",
             ]
         )
@@ -719,6 +737,7 @@ def export_ranking_files(
                     score.readiness_status,
                     ";".join(score.readiness_blockers),
                     ";".join(score.readiness_limitations),
+                    score.evidence_packet_hash or "",
                     score.data_quality,
                 ]
             )
@@ -853,18 +872,39 @@ def cmd_rank(args: argparse.Namespace) -> int:
             f"{item.code}: {item.message}" for item in assessment.limitations
         ]
 
+    # Ranking provenance is the frozen evidence packet input, not a hash of
+    # the resulting score JSON.  A multi-company run records the stable map in
+    # ``evidence_packet_hashes`` and uses its canonical hash in the legacy
+    # single-value column; a one-company run carries the packet hash verbatim.
+    evidence_packet_hashes = {
+        str(company_id): str(score.evidence_packet_hash)
+        for company_id, score in ((score.company_id, score) for score in ranking.scores)
+        if score.evidence_packet_hash
+    }
+    if len(evidence_packet_hashes) == 1:
+        evidence_packet_hash = next(iter(evidence_packet_hashes.values()))
+    elif evidence_packet_hashes:
+        evidence_packet_hash = hashlib.sha256(
+            json.dumps(evidence_packet_hashes, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    else:
+        evidence_packet_hash = None
+
     exports_dir = Path("exports") / as_of
     ranking_json_path, ranking_csv_path = export_ranking_files(
         ranking,
         as_of,
         engine.RANKING_MODEL_VERSION,
         exports_dir,
+        evidence_packet_hash=evidence_packet_hash,
+        evidence_packet_hashes=evidence_packet_hashes,
     )
 
-    # Save ranking run to DB
-    # Generate hashes for reproducibility
+    # Save ranking run to DB. Keep the score hash as a separate audit value;
+    # ``packet_hash`` now has the frozen-evidence meaning promised by the
+    # ranking provenance contract.
     scores_bytes = json.dumps([asdict(s) for s in ranking.scores], sort_keys=True).encode()
-    packet_hash = hashlib.sha256(scores_bytes).hexdigest()
+    ranking_hash = hashlib.sha256(scores_bytes).hexdigest()
 
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()
     universe_hash = hashlib.sha256(universe_bytes).hexdigest()
@@ -874,7 +914,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         conn,
         as_of=as_of,
         model_version=engine.RANKING_MODEL_VERSION,
-        packet_hash=packet_hash,
+        packet_hash=evidence_packet_hash,
         universe_hash=universe_hash,
         company_count=len(ranking.scores),
         eligible_count=eligible_count,
@@ -884,6 +924,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
             "total_companies": len(companies),
             "eligible_count": eligible_count,
             "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
+            "evidence_packet_hashes": evidence_packet_hashes,
+            "ranking_hash": ranking_hash,
         },
     )
 
@@ -894,7 +936,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"ranking_run_id={run_id}")
-    print(f"packet_hash={packet_hash}")
+    print(f"packet_hash={evidence_packet_hash or ''}")
     return 0
 
 
@@ -1005,7 +1047,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         output["sources"] = len(result.packet.get("sources", []))
         output["limitations"] = result.packet.get("limitations", [])
     print(json.dumps(output, ensure_ascii=False, sort_keys=True))
-    if result.status in {"complete", "dry_run"}:
+    if result.status in {"complete", "dry_run", "no_evidence"}:
         return 0
     if result.status.startswith("mapping_"):
         return 2

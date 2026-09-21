@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
@@ -21,6 +22,7 @@ from alphaforge.db.repositories import (
     persist_evidence_document,
     persist_evidence_packet,
     persist_evidence_sibling,
+    record_job,
     record_mfn_feed_check,
 )
 from alphaforge.evidence.ingest import (
@@ -131,7 +133,98 @@ def _coverage_facts(sources: list[dict[str, Any]], limitations: set[str]) -> dic
     }
 
 
+_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+    "januari": 1,
+    "februari": 2,
+    "mars": 3,
+    "maj": 5,
+    "juni": 6,
+    "juli": 7,
+    "augusti": 8,
+    "oktober": 10,
+}
+
+
+def _date_value(day: str, month: str, year: str | None) -> str | None:
+    month_number = _MONTHS.get(month.casefold().rstrip("."))
+    if month_number is None or year is None:
+        return None
+    try:
+        return datetime(int(year), month_number, int(day), tzinfo=UTC).date().isoformat()
+    except ValueError:
+        return None
+
+
+def _body_period_end(article: dict[str, Any]) -> str | None:
+    """Extract an explicitly stated fiscal range end before title heuristics.
+
+    Fiscal Q1 is not necessarily January--March (Clas Ohlson's Q1 is
+    May--July).  The release body is the authoritative deterministic source
+    when it states the covered interval; using a calendar-quarter default here
+    silently shifted the observation date by four months.
+    """
+    body = str(article.get("content_text") or article.get("body") or "").casefold()
+    if not body:
+        return None
+    months = "|".join(sorted(_MONTHS, key=len, reverse=True))
+    year_match = re.search(
+        r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", str(article.get("title") or ""), re.IGNORECASE
+    )
+    fiscal_year = year_match.group(1) if year_match else None
+    # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
+    # ``1 May – 31 July 2026`` are emitted by MFN pages.
+    range_pattern = re.compile(
+        rf"\b\d{{1,2}}\s+(?:{months})(?:\s+20\d{{2}})?\s*"
+        rf"(?:-|–|—|to|through|till|till och med)\s*"
+        rf"(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
+    )
+    match = range_pattern.search(body)
+    if match:
+        end = _date_value(match.group(1), match.group(2), match.group(3) or fiscal_year)
+        if end:
+            return end
+    # Month-first English dates occur in a few release templates.
+    month_first = re.compile(
+        rf"\b(?:{months})\s+\d{{1,2}},?\s+(20\d{{2}})\s+"
+        rf"(?:-|–|—|to|through)\s*(?:{months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
+    )
+    match = month_first.search(body)
+    if match:
+        # The second month is captured by the deliberately separate search
+        # below; retaining this branch only when its full end date is valid.
+        end_match = re.search(
+            rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})\b",
+            body[match.start() : match.end()],
+        )
+        if end_match:
+            return _date_value(
+                end_match.group(2), end_match.group(1), end_match.group(3) or fiscal_year
+            )
+    # ``for the three months ended 31 July 2026`` is also unambiguous.
+    ended = re.search(
+        rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b", body
+    )
+    if ended:
+        return _date_value(ended.group(1), ended.group(2), ended.group(3) or fiscal_year)
+    return None
+
+
 def _observation_date(article: dict[str, Any]) -> str | None:
+    body_end = _body_period_end(article)
+    if body_end:
+        return body_end
     for key in ("observation_date", "period_end", "report_period_end"):
         value = article.get(key)
         if value:
@@ -141,7 +234,7 @@ def _observation_date(article: dict[str, Any]) -> str | None:
     if year_match is None:
         return None
     year = int(year_match.group(1))
-    quarter_match = re.search(r"\bq([1-4])\b", title)
+    quarter_match = re.search(r"\bq\s*([1-4])\b", title)
     if quarter_match:
         return (
             f"{year}-"
@@ -152,6 +245,14 @@ def _observation_date(article: dict[str, Any]) -> str | None:
     ):
         return f"{year}-12-31"
     return None
+
+
+class NoEvidenceReason(StrEnum):
+    """Typed reasons for a deterministic lane with no model-ready evidence."""
+
+    NO_PUBLISHED_RELEASE = "no_published_release"
+    ALL_RELEASES_AFTER_CUTOFF = "all_releases_after_cutoff"
+    NO_COMPLETE_SOURCE = "no_complete_source"
 
 
 def build_frozen_evidence_packet(
@@ -232,13 +333,22 @@ def build_frozen_evidence_packet(
         body_paragraphs = [
             paragraph.strip() for paragraph in re.split(r"\n\s*\n", body_text) if paragraph.strip()
         ]
+        observation_date = _observation_date(
+            {
+                "title": row["title"] or "",
+                "content_text": body_text,
+                "observation_date": raw_metadata.get("observation_date"),
+                "period_end": raw_metadata.get("period_end"),
+                "report_period_end": raw_metadata.get("report_period_end"),
+            }
+        )
         source = {
             "source_id": source_id,
             "source_url": row["source_url"],
             "title": row["title"] or "",
             "report_kind": raw_metadata.get("report_kind"),
             "fiscal_period": raw_metadata.get("fiscal_period") or raw_metadata.get("report_period"),
-            "observation_date": raw_metadata.get("observation_date"),
+            "observation_date": observation_date,
             "language": row["ingested_lang"] or raw_metadata.get("language") or "en",
             "publication_date": row["published_at"],
             "publication_timestamp_authoritative": bool(
@@ -329,6 +439,7 @@ class EvidenceFlowResult:
     skipped: dict[str, int] = field(default_factory=dict)
     packet_hash: str | None = None
     packet: dict[str, Any] | None = None
+    no_evidence_reason: NoEvidenceReason | None = None
     message: str | None = None
 
     def diagnostic(self) -> dict[str, Any]:
@@ -341,6 +452,9 @@ class EvidenceFlowResult:
             "downloaded": self.downloaded,
             "skipped": dict(sorted(self.skipped.items())),
             "packet_hash": self.packet_hash,
+            "no_evidence_reason": (
+                self.no_evidence_reason.value if self.no_evidence_reason is not None else None
+            ),
             "message": self.message,
         }
 
@@ -393,33 +507,88 @@ class OneCompanyEvidenceFlow:
     ) -> EvidenceFlowResult:
         row = self.conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
         if row is None:
-            return EvidenceFlowResult("company_missing", company_id, message="company id not found")
+            result = EvidenceFlowResult(
+                "company_missing", company_id, message="company id not found"
+            )
+            if not dry_run:
+                record_job(
+                    self.conn,
+                    "evidence",
+                    company_id=None,
+                    borsdata_id=None,
+                    status="failed",
+                    error={"code": result.status, "message": result.message},
+                )
+            return result
         company = dict(row)
+        borsdata_id = company.get("borsdata_id")
+        if not dry_run:
+            record_job(
+                self.conn,
+                "evidence",
+                company_id=company_id,
+                borsdata_id=int(borsdata_id) if borsdata_id is not None else None,
+                status="running",
+            )
+
+        def finish(result: EvidenceFlowResult) -> EvidenceFlowResult:
+            if dry_run:
+                return result
+            if result.status in {"complete", "no_evidence"}:
+                job_status = "success" if result.status == "complete" else "partial"
+            else:
+                job_status = "failed"
+            error = None
+            if result.status != "complete":
+                error = {
+                    "code": result.status,
+                    "message": result.message,
+                    "no_evidence_reason": (
+                        result.no_evidence_reason.value
+                        if result.no_evidence_reason is not None
+                        else None
+                    ),
+                    "diagnostic": result.diagnostic(),
+                }
+            record_job(
+                self.conn,
+                "evidence",
+                company_id=company_id,
+                borsdata_id=int(borsdata_id) if borsdata_id is not None else None,
+                status=job_status,
+                error=error,
+            )
+            return result
+
         mapping = get_verified_mfn_mapping(self.conn, company_id)
         if mapping is None:
             try:
                 resolution = self.resolver.discover(company)
             except MfnIssuerAcquisitionError as exc:
-                return EvidenceFlowResult(
-                    "acquisition_failed",
-                    company_id,
-                    mapping_status="unavailable",
-                    skipped={exc.code: 1},
-                    message=str(exc),
+                return finish(
+                    EvidenceFlowResult(
+                        "acquisition_failed",
+                        company_id,
+                        mapping_status="unavailable",
+                        skipped={exc.code: 1},
+                        message=str(exc),
+                    )
                 )
             if not dry_run:
                 self.resolver.persist_resolution(self.conn, company, resolution)
             if resolution.status != "mapped":
-                return EvidenceFlowResult(
-                    "mapping_" + resolution.status,
-                    company_id,
-                    mapping_status=resolution.status,
-                    skipped={"issuer_mapping_review_required": 1},
-                    message=(
-                        "no deterministic MFN issuer mapping"
-                        if not resolution.candidates
-                        else "multiple deterministic MFN issuer candidates require review"
-                    ),
+                return finish(
+                    EvidenceFlowResult(
+                        "mapping_" + resolution.status,
+                        company_id,
+                        mapping_status=resolution.status,
+                        skipped={"issuer_mapping_review_required": 1},
+                        message=(
+                            "no deterministic MFN issuer mapping"
+                            if not resolution.candidates
+                            else "multiple deterministic MFN issuer candidates require review"
+                        ),
+                    )
                 )
             mapping = resolution.selected
             if mapping is not None:
@@ -430,19 +599,23 @@ class OneCompanyEvidenceFlow:
                     "identity_evidence": mapping.get("identity_evidence"),
                 }
         if mapping is None:
-            return EvidenceFlowResult("mapping_unavailable", company_id, mapping_status="unmapped")
+            return finish(
+                EvidenceFlowResult("mapping_unavailable", company_id, mapping_status="unmapped")
+            )
         now = self.now()
         try:
             feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
             if now.weekday() == 6:
                 feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
         except MfnAcquisitionError as exc:
-            return EvidenceFlowResult(
-                "acquisition_failed",
-                company_id,
-                mapping_status="mapped",
-                skipped={exc.code: 1},
-                message=str(exc),
+            return finish(
+                EvidenceFlowResult(
+                    "acquisition_failed",
+                    company_id,
+                    mapping_status="mapped",
+                    skipped={exc.code: 1},
+                    message=str(exc),
+                )
             )
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
@@ -476,13 +649,15 @@ class OneCompanyEvidenceFlow:
         try:
             details = self.scraper.scrape_details(unseen_feed, reports_only=True)
         except MfnAcquisitionError as exc:
-            return EvidenceFlowResult(
-                "acquisition_failed",
-                company_id,
-                mapping_status="mapped",
-                discovered=len(unseen_feed),
-                skipped={exc.code: 1},
-                message=str(exc),
+            return finish(
+                EvidenceFlowResult(
+                    "acquisition_failed",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=len(unseen_feed),
+                    skipped={exc.code: 1},
+                    message=str(exc),
+                )
             )
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
@@ -510,7 +685,15 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("future_dated_release", 0) + 1
                 )
                 continue
-            eligible.append(article)
+            eligible.append(
+                {
+                    **article,
+                    # Identity fallbacks need the reviewed issuer token even
+                    # when a scraper fixture/detail page omits it.
+                    "mfn_slug": mapping["mfn_slug"],
+                    "company_id": company_id,
+                }
+            )
         packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
         persisted_identity = []
         for persisted in complete_evidence_identity_documents(self.conn, company_id, as_of=as_of):
@@ -551,13 +734,16 @@ class OneCompanyEvidenceFlow:
         for article in deduped:
             if article.get("_persisted_evidence"):
                 for sibling in article.get("_suppressed_variants", []):
-                    if not sibling.get("_persisted_evidence"):
-                        persist_evidence_sibling(
-                            self.conn,
-                            company_id=company_id,
-                            canonical_source_url=str(article["source_url"]),
-                            sibling=sibling,
-                        )
+                    # Reconcile already-persisted bilingual rows as well as
+                    # newly discovered siblings.  This repairs databases from
+                    # the pre-semantic-identity flow where both translations
+                    # were accidentally canonical.
+                    persist_evidence_sibling(
+                        self.conn,
+                        company_id=company_id,
+                        canonical_source_url=str(article["source_url"]),
+                        sibling=sibling,
+                    )
                 continue
             attachment_url = article.get("attachment_url") or article.get("storage_url")
             if not attachment_url:
@@ -629,16 +815,43 @@ class OneCompanyEvidenceFlow:
             mapping=mapping,
             additional_limitations=packet_limitations,
         )
+        if not packet.get("sources"):
+            if result.skipped.get("future_dated_release", 0) and not result.eligible:
+                reason = NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
+                message = "all discovered releases are after the requested point-in-time cutoff"
+            elif (
+                result.eligible or result.downloaded or result.skipped.get("missing_pdf_attachment")
+            ):
+                reason = NoEvidenceReason.NO_COMPLETE_SOURCE
+                message = "no complete evidence source was available at the requested cutoff"
+            else:
+                reason = NoEvidenceReason.NO_PUBLISHED_RELEASE
+                message = "no published evidence release was available at the requested cutoff"
+            return finish(
+                EvidenceFlowResult(
+                    "no_evidence",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=result.discovered,
+                    eligible=result.eligible,
+                    downloaded=result.downloaded,
+                    skipped=result.skipped,
+                    no_evidence_reason=reason,
+                    message=message,
+                )
+            )
         if not validate_frozen_packet(packet):
-            return EvidenceFlowResult(
-                "packet_invalid",
-                company_id,
-                mapping_status="mapped",
-                discovered=result.discovered,
-                eligible=result.eligible,
-                downloaded=result.downloaded,
-                skipped=result.skipped,
-                message="canonical packet failed its self-hash or contains no complete source",
+            return finish(
+                EvidenceFlowResult(
+                    "packet_invalid",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=result.discovered,
+                    eligible=result.eligible,
+                    downloaded=result.downloaded,
+                    skipped=result.skipped,
+                    message="canonical packet failed its self-hash or contains an invalid complete source",
+                )
             )
         if shadow_citation is not None or shadow_missing_item is not None:
             try:
@@ -658,4 +871,4 @@ class OneCompanyEvidenceFlow:
         result.status = "complete"
         result.packet = packet
         result.packet_hash = packet["packet_hash"]
-        return result
+        return finish(result)

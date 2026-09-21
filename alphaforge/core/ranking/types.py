@@ -32,6 +32,9 @@ class CompanyScore:
     readiness_status: str | None = None
     readiness_blockers: list[str] = field(default_factory=list)
     readiness_limitations: list[str] = field(default_factory=list)
+    # Frozen evidence provenance is carried with every ranked score.  Ranking
+    # must never replace this with a hash of the score JSON itself.
+    evidence_packet_hash: str | None = None
     scoring_audit: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -61,6 +64,7 @@ class CompanyScore:
             "readiness_status": self.readiness_status,
             "readiness_blockers": self.readiness_blockers,
             "readiness_limitations": self.readiness_limitations,
+            "evidence_packet_hash": self.evidence_packet_hash,
             "scoring_audit": self.scoring_audit,
         }
 

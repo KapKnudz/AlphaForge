@@ -191,6 +191,33 @@ def test_bilingual_dedupe_uses_pdf_identity_and_keeps_suppressed_provenance():
     )
 
 
+def test_bilingual_semantic_period_dedupes_distinct_translated_pdf_urls():
+    docs = [
+        {
+            "title": "Clas Ohlson delårsrapport Q1 2026/2027",
+            "source_url": "https://mfn.test/a/clas-ohlson/delarsrapport-q1-2026-2027",
+            "storage_url": "https://storage.mfn.test/clas/sv-q1.pdf",
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "sv",
+        },
+        {
+            "title": "Clas Ohlson Interim Report Q1 2026/2027",
+            "source_url": "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-2027",
+            "storage_url": "https://storage.mfn.test/clas/en-q1.pdf",
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "en",
+        },
+    ]
+
+    selected = bilingual_dedupe(docs)
+
+    assert len(selected) == 1
+    assert selected[0]["lang"] == "en"
+    assert selected[0]["_suppressed_variants"][0]["lang"] == "sv"
+
+
 def test_identical_bilingual_pdf_checksums_are_both_auditable():
     conn = _connection()
     try:

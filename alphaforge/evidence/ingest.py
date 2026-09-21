@@ -46,16 +46,101 @@ def _attachment_filename(doc: dict[str, Any]) -> str:
     return ""
 
 
+def _issuer_identity(doc: dict[str, Any]) -> str:
+    """Return the stable issuer token used by report identity fallbacks."""
+    explicit = doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id")
+    if explicit not in (None, ""):
+        return str(explicit).casefold()
+    source_url = str(doc.get("source_url") or doc.get("url") or "")
+    parsed = urlparse(source_url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    for marker in ("a", "cision"):
+        if marker in segments:
+            index = segments.index(marker)
+            if index + 1 < len(segments):
+                return segments[index + 1].casefold()
+    return ""
+
+
+def _report_kind_for_identity(doc: dict[str, Any]) -> str:
+    kind = str(doc.get("report_kind") or "").casefold().strip()
+    if kind:
+        return kind
+    title = str(doc.get("title") or "").casefold()
+    if any(term in title for term in ("annual", "year-end", "year end", "årsredovis", "bokslut")):
+        return "annual"
+    if any(
+        term in title
+        for term in ("quarter", "interim", "delårs", "kvartals", "q1", "q2", "q3", "q4")
+    ):
+        return "quarterly"
+    return ""
+
+
+def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
+    """Keep release-specific title terms while dropping language boilerplate."""
+    title = str(doc.get("title") or "").casefold()
+    for token in re.split(r"[^\w]+", issuer):
+        if token:
+            title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    boilerplate = (
+        "interim",
+        "quarterly",
+        "quarter",
+        "report",
+        "delårsrapport",
+        "delarsrapport",
+        "kvartalsrapport",
+        "rapport",
+        "annual",
+        "årsredovisning",
+        "arsredovisning",
+        "year",
+        "end",
+        "bokslutskommuniké",
+        "bokslutskommunike",
+        "publicerar",
+        "offentliggör",
+        "offentliggor",
+        "has",
+        "published",
+        "its",
+    )
+    for word in boilerplate:
+        title = re.sub(rf"\b{re.escape(word)}\b", " ", title)
+    return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
+
+
 def _fiscal_period(doc: dict[str, Any]) -> str:
     for key in ("fiscal_period", "report_period", "period"):
         if doc.get(key) not in (None, ""):
-            return str(doc[key]).lower()
-    title = str(doc.get("title") or "").lower()
-    match = re.search(r"\b(20\d{2})\s*[-/]?\s*(q[1-4]|h[12])\b", title)
+            return str(doc[key]).casefold().strip()
+    text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body")).casefold()
+    # MFN titles commonly use a financial year spanning two calendar years,
+    # e.g. ``Q1 2026/2027``.  Keep both years and the quarter so a Swedish
+    # and English release cannot become separate groups merely because their
+    # URL slugs and translated titles differ.
+    match = re.search(
+        r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b",
+        text,
+    )
     if match:
-        return f"{match.group(1)}-{match.group(2)}"
-    years = re.findall(r"\b20\d{2}\b", title)
-    return years[-1] if years else ""
+        end_year = match.group(3) or match.group(2)
+        return f"{match.group(2)}/{end_year}-q{match.group(1)}"
+    match = re.search(
+        r"\b(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\s*q\s*([1-4])\b",
+        text,
+    )
+    if match:
+        end_year = match.group(2) or match.group(1)
+        return f"{match.group(1)}/{end_year}-q{match.group(3)}"
+    match = re.search(r"\b(?:h\s*([12])\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b", text)
+    if match:
+        end_year = match.group(3) or match.group(2)
+        if match.group(1):
+            return f"{match.group(2)}/{end_year}-h{match.group(1)}"
+        return match.group(2)
+    return ""
 
 
 def canonical_release_url(url: str) -> str:
@@ -69,8 +154,8 @@ def canonical_release_url(url: str) -> str:
 
 
 def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
-    issuer = str(doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id") or "").lower()
-    kind = str(doc.get("report_kind") or "").lower()
+    issuer = _issuer_identity(doc)
+    kind = _report_kind_for_identity(doc)
     period = _fiscal_period(doc)
     published = str(doc.get("published_at") or "")[:10]
     keys: set[str] = set()
@@ -103,6 +188,17 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
         title_kind = kind
     else:
         title_kind = ""
+    # Distinct translated PDFs often have different checksums and entirely
+    # different MFN URL slugs.  The provider's report identity still gives us
+    # a deterministic fallback: one issuer + report kind + fiscal period is one
+    # logical release.  This is deliberately stronger than the URL fallback,
+    # but remains bounded to report-only documents and a concrete period.
+    if issuer and kind and period:
+        title_key = _translation_neutral_title(doc, issuer)
+        identity = f"{issuer}|{kind}|{period}"
+        keys.add(
+            f"report-period:{identity}|{title_key}" if title_key else f"report-period:{identity}"
+        )
     identity_token = str(event_id or attachment_checksum or body_checksum)
     if (issuer or period) and title_kind and period and identity_token:
         keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")
