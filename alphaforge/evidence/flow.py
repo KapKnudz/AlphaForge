@@ -205,6 +205,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             term in before
             for term in (
                 "compared",
+                "comparative",
                 "previous",
                 "prior",
                 "same period",
@@ -239,6 +240,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             context.count(term)
             for term in (
                 "compared",
+                "comparative",
                 "previous",
                 "prior",
                 "same period",
@@ -275,11 +277,56 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 end_match.group(2), end_match.group(1), end_match.group(3) or fiscal_year
             )
     # ``for the three months ended 31 July 2026`` is also unambiguous.
-    ended = re.search(
-        rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b", body
+    ended_pattern = re.compile(
+        rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    if ended:
-        return _date_value(ended.group(1), ended.group(2), ended.group(3) or fiscal_year)
+    ended_candidates: list[tuple[int, str]] = []
+    for ended in ended_pattern.finditer(body):
+        end = _date_value(ended.group(1), ended.group(2), ended.group(3) or fiscal_year)
+        if end is None:
+            continue
+        before = body[max(0, ended.start() - 48) : ended.start()]
+        if any(
+            term in before
+            for term in (
+                "compared",
+                "comparative",
+                "previous",
+                "prior",
+                "same period",
+                "last year",
+                "jämförelse",
+                "föregående",
+                "tidigare",
+                "samma period",
+                "förra året",
+            )
+        ):
+            continue
+        context = body[max(0, ended.start() - 48) : min(len(body), ended.end() + 48)]
+        score = sum(
+            context.count(term)
+            for term in (
+                "covered",
+                "covers",
+                "quarter",
+                "period",
+                "months ended",
+                "three months",
+                "kvartalet",
+                "omfattade",
+                "omfattar",
+                "perioden",
+                "månader",
+            )
+        )
+        ended_candidates.append((score, end))
+    if ended_candidates:
+        ended_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        if len(ended_candidates) > 1 and ended_candidates[0][0] == ended_candidates[1][0]:
+            if ended_candidates[0][1] != ended_candidates[1][1]:
+                return None
+        return ended_candidates[0][1]
     return None
 
 

@@ -171,6 +171,17 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
         if doc.get(key) not in (None, ""):
             return str(doc[key]).casefold().strip()
     text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body")).casefold()
+    for ordinal, quarter in (
+        ("första|first", "q1"),
+        ("andra|second", "q2"),
+        ("tredje|third", "q3"),
+        ("fjärde|fourth", "q4"),
+    ):
+        text = re.sub(
+            rf"\b(?:{ordinal})\s+(?:kvartal(?:et)?|quarter)\b",
+            f" {quarter} ",
+            text,
+        )
     # MFN titles commonly use a financial year spanning two calendar years,
     # e.g. ``Q1 2026/2027``.  Keep both years and the quarter so a Swedish
     # and English release cannot become separate groups merely because their
