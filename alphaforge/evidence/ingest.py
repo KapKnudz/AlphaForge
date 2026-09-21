@@ -179,6 +179,10 @@ def _quarter_period(text: str) -> str | None:
             f" {quarter} ",
             text,
         )
+    text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b", "q1", text)
+    text = re.sub(r"\bapril\s*[-–]\s*(?:june|juni)\b", "q2", text)
+    text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
+    text = re.sub(r"\b(?:october|oktober)\s*[-–]\s*december\b", "q4", text)
     match = re.search(
         r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b",
         text,
@@ -209,6 +213,11 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
             return normalized
         title_period = _quarter_period(str(doc.get("title") or ""))
         if title_period:
+            quarter = re.search(r"-q([1-4])$", title_period)
+            years = re.fullmatch(r"(20\d{2})(?:[/\-](20\d{2}))?", explicit)
+            if quarter and years:
+                end_year = years.group(2) or years.group(1)
+                return f"{years.group(1)}/{end_year}-q{quarter.group(1)}"
             return title_period
         return explicit
     title_period = _quarter_period(str(doc.get("title") or ""))

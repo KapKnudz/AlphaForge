@@ -819,6 +819,13 @@ class OneCompanyEvidenceFlow:
                         future_dated_complete_release = True
                     continue
             unseen_feed.append(entry)
+        if not future_dated_complete_release:
+            future_dated_complete_release = any(
+                str(document.get("published_at") or "")[:10] > as_of[:10]
+                for document in complete_evidence_identity_documents(
+                    self.conn, company_id, as_of=None
+                )
+            )
         if not dry_run:
             record_mfn_feed_check(
                 self.conn,
