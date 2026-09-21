@@ -937,47 +937,64 @@ class OneCompanyEvidenceFlow:
                         sibling=sibling,
                     )
                 continue
-            attachment_url = article.get("attachment_url") or article.get("storage_url")
-            if not attachment_url:
-                result.skipped["missing_pdf_attachment"] = (
-                    result.skipped.get("missing_pdf_attachment", 0) + 1
+            variants = [article, *article.get("_suppressed_variants", [])]
+            selected = None
+            downloaded = None
+            extracted = None
+            failures: dict[str, int] = {}
+            for variant in variants:
+                attachment_url = variant.get("attachment_url") or variant.get("storage_url")
+                if not attachment_url:
+                    failures["missing_pdf_attachment"] = (
+                        failures.get("missing_pdf_attachment", 0) + 1
+                    )
+                    continue
+                existing = find_complete_evidence_attachment(
+                    self.conn, str(attachment_url), company_id
                 )
+                if existing is not None:
+                    continue
+                try:
+                    candidate_download = download_pdf(str(attachment_url), limits=self.limits)
+                except PdfAcquisitionError as exc:
+                    failures[exc.code] = failures.get(exc.code, 0) + 1
+                    continue
+                try:
+                    candidate_extracted = ingestion.extract_pdf_pages(
+                        candidate_download.content, max_pages=self.limits.max_pages
+                    )
+                except Exception:
+                    failures["pdf_extraction_failed"] = (
+                        failures.get("pdf_extraction_failed", 0) + 1
+                    )
+                    continue
+                if not candidate_extracted.pages:
+                    failures["pdf_extraction_failed"] = (
+                        failures.get("pdf_extraction_failed", 0) + 1
+                    )
+                    continue
+                selected = variant
+                downloaded = candidate_download
+                extracted = candidate_extracted
+                break
+            if selected is None or downloaded is None or extracted is None:
+                for code, count in failures.items():
+                    result.skipped[code] = result.skipped.get(code, 0) + count
                 continue
-            existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
-            if existing is not None:
-                continue
-            try:
-                downloaded = download_pdf(str(attachment_url), limits=self.limits)
-            except PdfAcquisitionError as exc:
-                result.skipped[exc.code] = result.skipped.get(exc.code, 0) + 1
-                continue
-            try:
-                extracted = ingestion.extract_pdf_pages(
-                    downloaded.content, max_pages=self.limits.max_pages
-                )
-            except Exception:
-                result.skipped["pdf_extraction_failed"] = (
-                    result.skipped.get("pdf_extraction_failed", 0) + 1
-                )
-                continue
-            if not extracted.pages:
-                result.skipped["pdf_extraction_failed"] = (
-                    result.skipped.get("pdf_extraction_failed", 0) + 1
-                )
-                continue
-            article = {
-                **article,
-                "ingested_lang": article.get("lang") or article.get("ingested_lang") or "en",
-                "observation_date": _observation_date(article),
+            selected_variant = selected
+            selected = {
+                **selected_variant,
+                "ingested_lang": selected.get("lang") or selected.get("ingested_lang") or "en",
+                "observation_date": _observation_date(selected),
                 "observation_date_authoritative": any(
-                    article.get(key) not in (None, "")
+                    selected.get(key) not in (None, "")
                     for key in ("observation_date", "period_end", "report_period_end")
                 ),
             }
             persist_evidence_document(
                 self.conn,
                 company_id=company_id,
-                article=article,
+                article=selected,
                 attachment={
                     "source_url": downloaded.source_url,
                     "content_type": downloaded.content_type,
@@ -996,7 +1013,9 @@ class OneCompanyEvidenceFlow:
                     "limitations": extracted.limitations,
                 },
                 pages=list(extracted.pages),
-                suppressed_variants=article.get("_suppressed_variants", []),
+                suppressed_variants=[
+                    variant for variant in variants if variant is not selected_variant
+                ],
             )
             result.downloaded += 1
         packet_limitations = [

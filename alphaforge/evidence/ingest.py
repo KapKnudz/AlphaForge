@@ -211,6 +211,9 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
         if title_period:
             return title_period
         return explicit
+    title_period = _quarter_period(str(doc.get("title") or ""))
+    if title_period:
+        return title_period
     quarter_period = _quarter_period(text)
     if quarter_period:
         return quarter_period
