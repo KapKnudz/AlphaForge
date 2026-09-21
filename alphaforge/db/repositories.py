@@ -1180,3 +1180,69 @@ def load_evidence_packet(conn: Any, company_id: int, as_of: str) -> dict[str, An
     except (TypeError, ValueError):
         return None
     return packet if isinstance(packet, dict) else None
+
+
+def append_jev_shadow_audit(conn: Any, audit: dict[str, Any]) -> int:
+    """Append one structured Jev shadow observation; never update an old row."""
+    probabilities = audit.get("probabilities")
+    usage = audit.get("usage")
+    cursor = conn.execute(
+        """
+        INSERT INTO jev_shadow_audit (
+            observed_at, feature, packet_hash, source_id, missing_item_id, anchor,
+            span_checksum, coverage_checksum, claim_hash, question_hash,
+            question_version, criteria_version, pinned_model_version, returned_model,
+            selected_class, probabilities, confidence, input_tokens, output_tokens,
+            usage, latency_ms, retry_outcome, error_code, input_hash, action
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(audit.get("observed_at") or ""),
+            str(audit.get("feature") or ""),
+            audit.get("packet_hash"),
+            audit.get("source_id"),
+            audit.get("missing_item_id"),
+            audit.get("anchor"),
+            audit.get("span_checksum"),
+            audit.get("coverage_checksum"),
+            audit.get("claim_hash"),
+            audit.get("question_hash"),
+            str(audit.get("question_version") or ""),
+            str(audit.get("criteria_version") or ""),
+            str(audit.get("pinned_model_version") or ""),
+            audit.get("returned_model"),
+            audit.get("selected_class"),
+            json.dumps(probabilities, ensure_ascii=False, sort_keys=True)
+            if probabilities is not None
+            else None,
+            audit.get("confidence"),
+            audit.get("input_tokens"),
+            audit.get("output_tokens"),
+            json.dumps(usage, ensure_ascii=False, sort_keys=True) if usage is not None else None,
+            audit.get("latency_ms"),
+            str(audit.get("retry_outcome") or ""),
+            audit.get("error_code"),
+            audit.get("input_hash"),
+            str(audit.get("action") or "shadow_only"),
+        ),
+    )
+    return int(getattr(cursor, "lastrowid", 0) or 0)
+
+
+def list_jev_shadow_audits(conn: Any, *, limit: int = 100) -> list[dict[str, Any]]:
+    """Read structured shadow observations for operators; secrets are not stored."""
+    bounded_limit = max(1, min(int(limit), 10_000))
+    rows = conn.execute(
+        "SELECT * FROM jev_shadow_audit ORDER BY id DESC LIMIT ?", (bounded_limit,)
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row) if hasattr(row, "keys") else dict(enumerate(row))
+        for key in ("probabilities", "usage"):
+            if item.get(key) is not None:
+                try:
+                    item[key] = json.loads(item[key])
+                except (TypeError, ValueError):
+                    item[key] = None
+        results.append(item)
+    return results
