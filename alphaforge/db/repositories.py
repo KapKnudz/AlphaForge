@@ -546,6 +546,7 @@ def record_job(
     borsdata_id: int | None,
     status: str,
     error: dict[str, Any] | None = None,
+    begin_attempt: bool = True,
 ) -> None:
     import json
 
@@ -563,12 +564,21 @@ def record_job(
         ON CONFLICT(job_type, company_id) DO UPDATE SET
             status=excluded.status,
             borsdata_id=excluded.borsdata_id,
-            attempt=jobs.attempt + 1,
+            attempt=CASE WHEN ? THEN jobs.attempt + 1 ELSE jobs.attempt END,
             error=excluded.error,
-            started_at=excluded.started_at,
+            started_at=CASE WHEN ? THEN excluded.started_at ELSE jobs.started_at END,
             finished_at=excluded.finished_at
         """,
-        (job_type, company_id, borsdata_id, status, err_json, status),
+        (
+            job_type,
+            company_id,
+            borsdata_id,
+            status,
+            err_json,
+            status,
+            int(begin_attempt),
+            int(begin_attempt),
+        ),
     )
     conn.commit()
 
@@ -968,12 +978,19 @@ def persist_evidence_document(
         "report_kind",
         "report_period",
         "fiscal_period",
-        "observation_date",
+        "period_end",
+        "report_period_end",
         "lang_confidence",
         "_bilingual_group_id",
     ):
         if article.get(key) is not None:
             metadata[key] = article[key]
+    observation_date_authoritative = article.get("observation_date_authoritative")
+    if observation_date_authoritative is None:
+        observation_date_authoritative = article.get("observation_date") is not None
+    if observation_date_authoritative and article.get("observation_date") is not None:
+        metadata["observation_date"] = article["observation_date"]
+        metadata["observation_date_authoritative"] = True
     if article.get("_bilingual_group_id") is not None:
         metadata["bilingual_group_id"] = article["_bilingual_group_id"]
     metadata["authoritative_publication_timestamp"] = True

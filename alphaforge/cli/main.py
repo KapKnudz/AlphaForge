@@ -900,12 +900,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         evidence_packet_hashes=evidence_packet_hashes,
     )
 
-    # Save ranking run to DB. Keep the score hash as a separate audit value;
-    # ``packet_hash`` now has the frozen-evidence meaning promised by the
-    # ranking provenance contract.
-    scores_bytes = json.dumps([asdict(s) for s in ranking.scores], sort_keys=True).encode()
-    ranking_hash = hashlib.sha256(scores_bytes).hexdigest()
-
+    # Save ranking run to DB.
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()
     universe_hash = hashlib.sha256(universe_bytes).hexdigest()
 
@@ -925,7 +920,6 @@ def cmd_rank(args: argparse.Namespace) -> int:
             "eligible_count": eligible_count,
             "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
             "evidence_packet_hashes": evidence_packet_hashes,
-            "ranking_hash": ranking_hash,
         },
     )
 

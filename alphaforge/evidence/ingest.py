@@ -88,6 +88,49 @@ def _report_kind_for_identity(doc: dict[str, Any]) -> str:
     return ""
 
 
+def _title_kind_for_identity(title: str, kind: str) -> str:
+    title = title.casefold()
+    if "årsredovisning" in title or "annual report" in title:
+        return "annual_report"
+    if "bokslutskommuniké" in title or "year-end report" in title or "year end report" in title:
+        return "year_end_report"
+    return kind
+
+
+def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
+    title = str(doc.get("title") or "").casefold()
+    for token in re.split(r"[^\w]+", issuer):
+        if token:
+            title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    for word in (
+        "interim",
+        "quarterly",
+        "quarter",
+        "report",
+        "delårsrapport",
+        "delarsrapport",
+        "kvartalsrapport",
+        "rapport",
+        "annual",
+        "årsredovisning",
+        "arsredovisning",
+        "year",
+        "end",
+        "bokslutskommuniké",
+        "bokslutskommunike",
+        "publicerar",
+        "offentliggör",
+        "offentliggor",
+        "has",
+        "published",
+        "its",
+        "för",
+        "for",
+    ):
+        title = re.sub(rf"\b{re.escape(word)}\b", " ", title)
+    return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
+
+
 def _fiscal_period(doc: dict[str, Any]) -> str:
     for key in ("fiscal_period", "report_period", "period"):
         if doc.get(key) not in (None, ""):
@@ -156,22 +199,12 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
     canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     if canonical:
         keys.add(f"url:{issuer}|{canonical}|{published}")
-    title = str(doc.get("title") or "").lower()
-    if "årsredovisning" in title or "annual report" in title:
-        title_kind = "annual_report"
-    elif "bokslutskommuniké" in title or "year-end report" in title or "year end report" in title:
-        title_kind = "year_end_report"
-    elif kind:
-        title_kind = kind
-    else:
-        title_kind = ""
-    # Distinct translated PDFs often have different checksums and entirely
-    # different MFN URL slugs.  The provider's report identity still gives us
-    # a deterministic fallback: one issuer + report kind + fiscal period is one
-    # logical release.  This is deliberately stronger than the URL fallback,
-    # but remains bounded to report-only documents and a concrete period.
-    if issuer and kind and period:
-        keys.add(f"report-period:{issuer}|{kind}|{period}")
+    title = str(doc.get("title") or "")
+    title_kind = _title_kind_for_identity(title, kind)
+    if issuer and period and title_kind:
+        title_key = _translation_neutral_title(doc, issuer)
+        if title_key:
+            keys.add(f"report-title:{issuer}|{title_kind}|{period}|{title_key}")
     identity_token = str(event_id or attachment_checksum or body_checksum)
     if (issuer or period) and title_kind and period and identity_token:
         keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")

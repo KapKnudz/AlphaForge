@@ -167,6 +167,10 @@ def _date_value(day: str, month: str, year: str | None) -> str | None:
         return None
 
 
+def _has_fiscal_year_span(title: str) -> bool:
+    return bool(re.search(r"\b20\d{2}\s*[/\-]\s*(?:20)?\d{2}\b", title))
+
+
 def _body_period_end(article: dict[str, Any]) -> str | None:
     """Extract an explicitly stated fiscal range end before title heuristics.
 
@@ -179,8 +183,9 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
     if not body:
         return None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
-    year_match = re.search(
-        r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", str(article.get("title") or ""), re.IGNORECASE
+    title = str(article.get("title") or "")
+    year_match = None if _has_fiscal_year_span(title) else re.search(
+        r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", title, re.IGNORECASE
     )
     fiscal_year = year_match.group(1) if year_match else None
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
@@ -234,7 +239,7 @@ def _observation_date(article: dict[str, Any]) -> str | None:
     if year_match is None:
         return None
     year = int(year_match.group(1))
-    if re.search(r"\b20\d{2}\s*[/\-]\s*20\d{2}\b", title):
+    if _has_fiscal_year_span(title):
         return None
     quarter_match = re.search(r"\bq\s*([1-4])\b", title)
     if quarter_match:
@@ -339,7 +344,11 @@ def build_frozen_evidence_packet(
             {
                 "title": row["title"] or "",
                 "content_text": body_text,
-                "observation_date": raw_metadata.get("observation_date"),
+                "observation_date": (
+                    raw_metadata.get("observation_date")
+                    if raw_metadata.get("observation_date_authoritative")
+                    else None
+                ),
                 "period_end": raw_metadata.get("period_end"),
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
@@ -559,6 +568,7 @@ class OneCompanyEvidenceFlow:
                 borsdata_id=int(borsdata_id) if borsdata_id is not None else None,
                 status=job_status,
                 error=error,
+                begin_attempt=False,
             )
             return result
 
@@ -779,6 +789,10 @@ class OneCompanyEvidenceFlow:
                 **article,
                 "ingested_lang": article.get("lang") or article.get("ingested_lang") or "en",
                 "observation_date": _observation_date(article),
+                "observation_date_authoritative": any(
+                    article.get(key) not in (None, "")
+                    for key in ("observation_date", "period_end", "report_period_end")
+                ),
             }
             persist_evidence_document(
                 self.conn,
