@@ -931,7 +931,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"ranking_run_id={run_id}")
-    print(f"packet_hash={evidence_packet_hash or ''}")
+    print(f"evidence_packet_hashes={json.dumps(evidence_packet_hashes, sort_keys=True)}")
     return 0
 
 

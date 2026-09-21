@@ -935,8 +935,13 @@ def find_complete_evidence_attachment(
     )
     row = conn.execute(
         f"""
-        SELECT a.* FROM research_attachments a
+        SELECT a.*, root.id AS canonical_document_id,
+               root.source_url AS canonical_source_url
+        FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
+        JOIN research_documents root
+          ON root.id=COALESCE(d.duplicate_of, d.id)
+         AND root.duplicate_of IS NULL
         JOIN document_extractions e ON e.document_id=d.id
         JOIN document_pages p ON p.extraction_id=e.id
         WHERE a.source_url=?{company_clause} ORDER BY a.id LIMIT 1

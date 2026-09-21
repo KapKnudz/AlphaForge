@@ -974,13 +974,9 @@ class OneCompanyEvidenceFlow:
                     self.conn, str(attachment_url), company_id
                 )
                 if existing is not None:
-                    canonical = self.conn.execute(
-                        "SELECT source_url FROM research_documents WHERE id=?",
-                        (existing["document_id"],),
-                    ).fetchone()
-                    if canonical is not None:
+                    if existing.get("canonical_source_url"):
                         selected = variant
-                        existing_canonical_source_url = str(canonical["source_url"])
+                        existing_canonical_source_url = str(existing["canonical_source_url"])
                         break
                     continue
                 try:
