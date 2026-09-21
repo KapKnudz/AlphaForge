@@ -391,11 +391,13 @@ def build_frozen_evidence_packet(
     as_of: str,
     mapping: dict[str, Any] | None = None,
     additional_limitations: list[str] | None = None,
+    publication_cutoff: str | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
     if mapping is None:
         raise ValueError("cannot build evidence packet without a verified MFN mapping")
+    cutoff = min(as_of[:10], publication_cutoff[:10]) if publication_cutoff else as_of[:10]
     rows = conn.execute(
         """
         SELECT d.id AS document_id, d.source_url, d.title, d.published_at,
@@ -414,7 +416,7 @@ def build_frozen_evidence_packet(
           )
         ORDER BY d.source_url, a.sha256, d.id
         """,
-        (company_id, as_of[:10]),
+        (company_id, cutoff),
     ).fetchall()
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
@@ -438,7 +440,7 @@ def build_frozen_evidence_packet(
               AND substr(published_at, 1, 10) <= ?
             ORDER BY source_url
             """,
-            (document_id, as_of[:10]),
+            (document_id, cutoff),
         ).fetchall()
         row_limitations: list[str] = []
         if row["limitations"]:
@@ -806,7 +808,9 @@ class OneCompanyEvidenceFlow:
                 seen_feed_urls.add(url)
             unique_feed.append(entry)
         unseen_feed = []
+        today = now.date()
         future_dated_complete_release = False
+        not_yet_published_complete_release = False
         for entry in unique_feed:
             entry_url = (
                 entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
@@ -815,17 +819,22 @@ class OneCompanyEvidenceFlow:
                 complete = find_complete_evidence_document(self.conn, company_id, entry_url)
                 if complete is not None:
                     published_at = complete.get("published_at")
-                    if published_at and str(published_at)[:10] > as_of[:10]:
+                    published_date = str(published_at or "")[:10]
+                    if published_date > as_of[:10]:
                         future_dated_complete_release = True
+                    if published_date > today.isoformat():
+                        not_yet_published_complete_release = True
                     continue
             unseen_feed.append(entry)
-        if not future_dated_complete_release:
-            future_dated_complete_release = any(
-                str(document.get("published_at") or "")[:10] > as_of[:10]
-                for document in complete_evidence_identity_documents(
-                    self.conn, company_id, as_of=None
-                )
-            )
+        complete_documents = complete_evidence_identity_documents(
+            self.conn, company_id, as_of=None
+        )
+        for document in complete_documents:
+            published_date = str(document.get("published_at") or "")[:10]
+            if published_date > as_of[:10]:
+                future_dated_complete_release = True
+            if published_date > today.isoformat():
+                not_yet_published_complete_release = True
         if not dry_run:
             record_mfn_feed_check(
                 self.conn,
@@ -856,9 +865,10 @@ class OneCompanyEvidenceFlow:
         )
         if future_dated_complete_release:
             result.skipped["future_dated_release"] = 1
+        if not_yet_published_complete_release:
+            result.skipped["not_yet_published_release"] = 1
         eligible: list[dict[str, Any]] = []
         pre_cutoff_report = False
-        today = now.date()
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
@@ -895,7 +905,10 @@ class OneCompanyEvidenceFlow:
             )
         packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
         persisted_identity = []
-        for persisted in complete_evidence_identity_documents(self.conn, company_id, as_of=as_of):
+        persisted_cutoff = min(as_of[:10], today.isoformat())
+        for persisted in complete_evidence_identity_documents(
+            self.conn, company_id, as_of=persisted_cutoff
+        ):
             metadata = {}
             if persisted["raw_metadata"]:
                 try:
@@ -1040,6 +1053,7 @@ class OneCompanyEvidenceFlow:
             as_of=as_of,
             mapping=mapping,
             additional_limitations=packet_limitations,
+            publication_cutoff=today.isoformat(),
         )
         if not packet.get("sources"):
             if (
