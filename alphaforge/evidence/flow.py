@@ -259,23 +259,57 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
             if candidates[0][1] != candidates[1][1]:
                 return None
         return candidates[0][1]
-    # Month-first English dates occur in a few release templates.
     month_first = re.compile(
-        rf"\b(?:{months})\s+\d{{1,2}},?\s+(20\d{{2}})\s+"
-        rf"(?:-|–|—|to|through)\s*(?:{months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
+        rf"\b(?:{months})\s+\d{{1,2}},?\s+20\d{{2}}\s*"
+        rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
     )
-    match = month_first.search(body)
-    if match:
-        # The second month is captured by the deliberately separate search
-        # below; retaining this branch only when its full end date is valid.
-        end_match = re.search(
-            rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})\b",
-            body[match.start() : match.end()],
-        )
-        if end_match:
-            return _date_value(
-                end_match.group(2), end_match.group(1), end_match.group(3) or fiscal_year
+    month_candidates: list[tuple[int, str]] = []
+    for match in month_first.finditer(body):
+        end = _date_value(match.group(2), match.group(1), match.group(3) or fiscal_year)
+        if end is None:
+            continue
+        before = body[max(0, match.start() - 48) : match.start()]
+        if any(
+            term in before
+            for term in (
+                "compared",
+                "comparative",
+                "previous",
+                "prior",
+                "same period",
+                "last year",
+                "jämförelse",
+                "föregående",
+                "tidigare",
+                "samma period",
+                "förra året",
             )
+        ):
+            continue
+        context = body[max(0, match.start() - 48) : min(len(body), match.end() + 48)]
+        score = sum(
+            context.count(term)
+            for term in (
+                "covered",
+                "covers",
+                "quarter",
+                "period",
+                "months ended",
+                "three months",
+                "kvartalet",
+                "omfattade",
+                "omfattar",
+                "perioden",
+                "månader",
+            )
+        )
+        month_candidates.append((score, end))
+    if month_candidates:
+        month_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        if len(month_candidates) > 1 and month_candidates[0][0] == month_candidates[1][0]:
+            if month_candidates[0][1] != month_candidates[1][1]:
+                return None
+        return month_candidates[0][1]
     # ``for the three months ended 31 July 2026`` is also unambiguous.
     ended_pattern = re.compile(
         rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
@@ -335,27 +369,7 @@ def _observation_date(article: dict[str, Any]) -> str | None:
         value = article.get(key)
         if value:
             return str(value)[:10]
-    body_end = _body_period_end(article)
-    if body_end:
-        return body_end
-    title = str(article.get("title") or "").lower()
-    year_match = re.search(r"\b(20\d{2})\b", title)
-    if year_match is None:
-        return None
-    year = int(year_match.group(1))
-    if _has_fiscal_year_span(title):
-        return None
-    quarter_match = re.search(r"\bq\s*([1-4])\b", title)
-    if quarter_match:
-        return (
-            f"{year}-"
-            + {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}[quarter_match.group(1)]
-        )
-    if any(
-        term in title for term in ("annual", "year-end", "year end", "årsredovisning", "bokslut")
-    ):
-        return f"{year}-12-31"
-    return None
+    return _body_period_end(article)
 
 
 class NoEvidenceReason(StrEnum):
