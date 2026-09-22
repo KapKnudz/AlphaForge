@@ -197,20 +197,11 @@ def test_bilingual_dedupe_persist_with_duplicate_of(mem_conn):
         },
     ]
     _result = svc.persist_articles(cid, docs)
-    # One inserted, one suppressed via bilingual grouping (may be 1 inserted + 1 suppressed)
-    # Due to bilingual_dedupe grouping, only preferred is inserted as primary, suppressed as duplicate_of
-    # Check DB: exactly 2 rows, one with duplicate_of not null, or 1 row if grouping collapsed?
-    cur = mem_conn.execute("SELECT count(*) FROM research_documents WHERE company_id=?", (cid,))
-    count = cur.fetchone()[0]
-    # At least 1, at most 2 — bilingual dedupe must suppress one variant per pair in packet sense
-    # But DB keeps both with duplicate_of pointer, so 2 rows where one has duplicate_of
-    assert count in (1, 2)
-    if count == 2:
-        cur = mem_conn.execute(
-            "SELECT count(*) FROM research_documents WHERE company_id=? AND duplicate_of IS NOT NULL",
-            (cid,),
-        )
-        assert cur.fetchone()[0] == 1
+    rows = mem_conn.execute(
+        "SELECT duplicate_of FROM research_documents WHERE company_id=?", (cid,)
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(row[0] is None for row in rows)
 
 
 def test_pit_filter_report_date_le_as_of(mem_conn):

@@ -841,6 +841,18 @@ class ResearchDocumentIngestionService:
                 reports_only and source_type == "mfn" and not is_report(article.get("title") or "")
             )
         ]
+        eligible = [
+            article
+            if (
+                article.get("pdf_language") in {"en", "sv"}
+                and (
+                    article.get("language_evidence") == "filename"
+                    or str(article.get("language_evidence") or "").startswith("pdf_text:")
+                )
+            )
+            else {**article, "_pdf_language_unresolved": True}
+            for article in eligible
+        ]
         deduped = bilingual_dedupe(eligible)
         inserted = 0
         suppressed = 0

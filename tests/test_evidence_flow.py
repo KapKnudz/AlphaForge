@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from pypdf import PdfWriter
 
+from alphaforge.cli.main import cmd_mfn_map
 from alphaforge.config import Settings
 from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
@@ -907,6 +908,35 @@ def _ambiguous_company(conn):
     )
     conn.commit()
     return company_id
+
+
+def test_operator_ambiguous_mapping_persists_reviewed_provenance(tmp_path):
+    database = tmp_path / "operator-mapping.db"
+    dsn = f"sqlite:////{str(database).lstrip('/')}"
+    conn = get_connection(Settings.from_env(dsn=dsn))
+    migrate(conn)
+    company_id = upsert_company(conn, {"insId": 7006, "name": "Operator AB", "ticker": "OPER"})
+    conn.close()
+
+    args = SimpleNamespace(
+        dsn=dsn,
+        company_id=company_id,
+        ticker=None,
+        status="ambiguous",
+        slug=None,
+        source_url=None,
+        verified_at=None,
+        discovery_source="operator_mapping",
+        identity_evidence=json.dumps({"provenance": "cli", "reason": "operator review"}),
+    )
+
+    assert cmd_mfn_map(args) == 0
+    conn = get_connection(Settings.from_env(dsn=dsn))
+    try:
+        review = get_mfn_mapping_review(conn, company_id)
+        assert review["identity_evidence"]["reviewed"] is True
+    finally:
+        conn.close()
 
 
 def test_automatic_ambiguous_mapping_allows_fresh_exact_discovery():

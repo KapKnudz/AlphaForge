@@ -429,6 +429,8 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
                 "source_url": "https://mfn.test/a/reports/en",
                 "content_text": "English report",
                 "pdf_checksum": "identical-pdf",
+                "pdf_language": "en",
+                "language_evidence": "filename",
                 "mfn_slug": "reports",
                 "report_kind": "annual",
                 "fiscal_period": "2025",
@@ -439,6 +441,8 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
                 "source_url": "https://mfn.test/a/reports/sv",
                 "content_text": "Svensk rapport",
                 "pdf_checksum": "identical-pdf",
+                "pdf_language": "sv",
+                "language_evidence": "filename",
                 "mfn_slug": "reports",
                 "report_kind": "annual",
                 "fiscal_period": "2025",
@@ -458,6 +462,45 @@ def test_identical_bilingual_pdf_checksums_are_both_auditable():
         assert sum(row["duplicate_of"] is None for row in rows) == 1
         assert rows[0]["checksum"] == rows[1]["checksum"] == "identical-pdf"
         assert "bilingual_group_id" in json.loads(rows[0]["raw_metadata"])
+    finally:
+        conn.close()
+
+
+def test_persist_articles_keeps_unresolved_language_variants_separate():
+    conn = _connection()
+    try:
+        result = ResearchDocumentIngestionService(conn).persist_articles(
+            None,
+            [
+                {
+                    "title": "Annual Report 2025",
+                    "source_url": "https://mfn.test/a/reports/en",
+                    "content_text": "Omsättning 100 MSEK; EBIT 10 MSEK.",
+                    "provider_event_id": "reports-2025",
+                    "mfn_slug": "reports",
+                    "report_kind": "annual",
+                    "fiscal_period": "2025",
+                    "lang": "sv",
+                },
+                {
+                    "title": "Årsredovisning 2025",
+                    "source_url": "https://mfn.test/a/reports/sv",
+                    "content_text": "Revenue 100 MSEK; EBIT 10 MSEK.",
+                    "provider_event_id": "reports-2025",
+                    "mfn_slug": "reports",
+                    "report_kind": "annual",
+                    "fiscal_period": "2025",
+                    "lang": "en",
+                },
+            ],
+        )
+        rows = conn.execute(
+            "SELECT duplicate_of, raw_metadata FROM research_documents ORDER BY source_url"
+        ).fetchall()
+        assert result.inserted == 2
+        assert result.suppressed == 0
+        assert all(row["duplicate_of"] is None for row in rows)
+        assert all(json.loads(row["raw_metadata"])["language"] == "" for row in rows)
     finally:
         conn.close()
 
