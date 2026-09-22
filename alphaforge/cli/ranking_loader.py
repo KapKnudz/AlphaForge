@@ -192,6 +192,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     )
     latest_price = _price(price_rows[-1], stock_currency)
     current_raw = compute_raw_valuation(latest_price, current_report)
+    dcf_raw = compute_raw_valuation(latest_price, dcf_current_report)
 
     historical_raw: list[RawValuation] = []
     for row, report in zip(period_rows[:-1], historical_reports, strict=False):
@@ -249,14 +250,12 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         """
         SELECT kpi_id, value FROM kpi_observations
         WHERE company_id=? AND value IS NOT NULL
-          AND (
-              (observation_date IS NOT NULL AND substr(observation_date, 1, 10) <= ?)
-              OR (observation_date IS NULL AND year <= ?)
-          )
+          AND year <= ?
+          AND (observation_date IS NULL OR substr(observation_date, 1, 10) <= ?)
         ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC,
                  CASE WHEN period_type = 'r12' THEN 1 ELSE 0 END ASC
         """,
-        (company_id, cutoff.isoformat(), cutoff.year),
+        (company_id, cutoff.year, cutoff.isoformat()),
     ).fetchall():
         kpis[int(row[0])] = float(row[1])
 
@@ -280,7 +279,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         current_net_debt = None
         net_debt_source = None
     reverse_dcf = {
-        "status": "available" if current_raw.market_cap is not None else "unavailable",
+        "status": "available" if dcf_raw.market_cap is not None else "unavailable",
         "current_price": latest_price.close,
         "current_revenue": dcf_current_report.revenue,
         "current_shares": dcf_current_report.shares_outstanding,
@@ -288,8 +287,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency,
         "financial_currency": dcf_current_report.currency or stock_currency,
-        "market_cap": current_raw.market_cap,
-        "enterprise_value": current_raw.enterprise_value,
+        "market_cap": dcf_raw.market_cap,
+        "enterprise_value": dcf_raw.enterprise_value,
     }
     # ------------------------------------------------------------------
     # Auditable DCF: wire existing pure policy + engine so the ranking
@@ -339,10 +338,10 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         # because Börsdata reports and shares are in millions; required-return
         # buckets are in absolute SEK, so scale to SEK for the hurdle.
         market_cap_for_hurdle = None
-        if current_raw.market_cap is not None:
+        if dcf_raw.market_cap is not None:
             # Heuristic: shares are in millions (63.45 = 63M), so market cap in MSEK.
             # Convert to SEK for bucket selection.
-            market_cap_for_hurdle = float(current_raw.market_cap) * 1_000_000
+            market_cap_for_hurdle = float(dcf_raw.market_cap) * 1_000_000
         dcf_policy_decision = policy.build(
             dcf_current_report,
             latest_annual,
@@ -523,11 +522,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 if decision is not None and decision.warnings
                 else [],
             }
-        reverse_dcf["status"] = (
-            "unavailable"
-            if current_raw.market_cap is None
-            else reverse_dcf.get("status", "unavailable")
-        )
+        reverse_dcf["status"] = "unavailable"
     # Provide DCF artefacts at top level so callers can export them without
     # reaching into candidate.full_results, and keep provenance separate from
     # the heuristic valuation_score.
