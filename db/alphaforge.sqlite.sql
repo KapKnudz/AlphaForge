@@ -314,7 +314,7 @@ CREATE TABLE IF NOT EXISTS theses (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_type            TEXT NOT NULL CHECK (job_type IN ('sync_instruments','sync_reports','sync_kpis','sync_prices','sync_dividends','sync_insider','sync_buyback','sync_shorts','rank','evidence','analyze','export')),
+    job_type            TEXT NOT NULL CHECK (job_type IN ('sync_instruments','sync_reports','sync_kpis','sync_kpis_37_year','sync_kpis_42_year','sync_kpis_37_r12','sync_kpis_42_r12','sync_kpis_allowlist_37','sync_kpis_allowlist_42','sync_prices','sync_dividends','sync_insider','sync_buyback','sync_shorts','rank','evidence','analyze','export')),
     company_id          INTEGER REFERENCES companies(id) ON DELETE SET NULL,
     borsdata_id         INTEGER,
     status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','success','failed','partial')),

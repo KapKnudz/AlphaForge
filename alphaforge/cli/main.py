@@ -508,7 +508,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         sync_failed = True
                                         record_job(
                                             conn,
-                                            f"sync_kpis_allowlist_{kpi_id_int}",
+                                            f"sync_kpis_allowlist_{kpi_id_int}"
+                                            if kpi_id_int in (37, 42)
+                                            else "sync_kpis",
                                             company_id=cid,
                                             borsdata_id=bid,
                                             status="failed",
@@ -991,6 +993,16 @@ def cmd_rank(args: argparse.Namespace) -> int:
             if rd:
                 # Keep only serializable, auditable fields
                 dcf_export[company.ticker or str(company.id)] = rd
+            else:
+                dcf_export[company.ticker or str(company.id)] = {
+                    "status": "unavailable",
+                    "dcf": {
+                        "available": False,
+                        "policy_version": None,
+                        "missing_information": ["ranking_inputs_unavailable"],
+                        "warnings": [],
+                    },
+                }
         dcf_path = exports_dir / "dcf.json"
         dcf_path.write_text(json.dumps(dcf_export, indent=2, ensure_ascii=False, default=str))
     except Exception as exc:

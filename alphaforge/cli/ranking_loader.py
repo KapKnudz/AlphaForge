@@ -114,6 +114,20 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         (company_id, cutoff.isoformat()),
     ).fetchall()
     if not period_rows or not price_rows:
+        _missing = []
+        if not period_rows:
+            _missing.append("financial_period")
+        if not price_rows:
+            _missing.append("price")
+        _unavailable = {
+            "status": "unavailable",
+            "dcf": {
+                "available": False,
+                "policy_version": None,
+                "missing_information": _missing,
+                "warnings": [],
+            },
+        }
         return {
             "financial": None,
             "valuation": None,
@@ -123,6 +137,13 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 "evidence_packet": evidence_packet,
                 "evidence_lane": bool(evidence_packet),
             },
+            "dcf": {
+                "policy": None,
+                "value": None,
+                "implied": {},
+                "reverse_dcf": _unavailable,
+            },
+            "reverse_dcf": _unavailable,
         }
 
     # Börsdata prices are split-adjusted but report share counts are not. Keep
@@ -230,7 +251,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         WHERE company_id=? AND value IS NOT NULL
           AND (
               (observation_date IS NOT NULL AND substr(observation_date, 1, 10) <= ?)
-              OR (observation_date IS NULL AND year < ?)
+              OR (observation_date IS NULL AND year <= ?)
           )
         ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC,
                  CASE WHEN period_type = 'r12' THEN 1 ELSE 0 END ASC
