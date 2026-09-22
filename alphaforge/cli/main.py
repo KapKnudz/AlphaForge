@@ -11,6 +11,15 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 
+def _sanitize_provider_error(exc: BaseException) -> str:
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    name = type(exc).__name__
+    if status is None:
+        return name
+    return f"{name} status={status}"
+
+
 def _get_settings(dsn: str | None = None) -> object:
     from alphaforge.config import Settings
 
@@ -464,7 +473,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "prices_fetch_failed", "message": str(e), "retryable": True},
+                    error={"code": "prices_fetch_failed", "message": f"prices: {_sanitize_provider_error(e)}", "retryable": True},
                 )
             # kpis — per-instrument branch allowlist discovery via summary
             try:
@@ -485,7 +494,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             status="failed",
                             error={
                                 "code": "kpi_summary_fetch_failed",
-                                "message": f"kpi summary/{rt}: {exc}",
+                                "message": f"kpi summary/{rt}: {_sanitize_provider_error(exc)}",
                                 "retryable": True,
                             },
                         )
@@ -496,16 +505,21 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         if isinstance(kpis, dict):
                             kpis = [kpis]
                         for kp in kpis if isinstance(kpis, list) else []:
-                            kpi_id = kp.get("kpiId") or kp.get("id")
-                            values = kp.get("values") or kp.get("value")
-                            # If values non-empty → allow-list
+                            try:
+                                kpi_id = kp.get("kpiId") or kp.get("id")
+                                values = kp.get("values") or kp.get("value")
+                            except AttributeError:
+                                continue
                             has_values = False
                             if isinstance(values, list) and len(values) > 0:
                                 has_values = any(v is not None for v in values)
                             elif values is not None:
                                 has_values = True
                             if kpi_id is not None and has_values:
-                                kpi_id_int = int(kpi_id)
+                                try:
+                                    kpi_id_int = int(kpi_id)
+                                except (TypeError, ValueError):
+                                    continue
                                 if (
                                     rt in ("year", "r12")
                                     and isinstance(values, list)
@@ -525,7 +539,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             status="failed",
                                             error={
                                                 "code": "kpi_history_upsert_failed",
-                                                "message": f"kpi {kpi_id_int}/{rt} summary values: {exc}",
+                                                "message": f"kpi {kpi_id_int}/{rt} summary values: {_sanitize_provider_error(exc)}",
                                                 "retryable": True,
                                             },
                                         )
@@ -548,7 +562,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             status="failed",
                                             error={
                                                 "code": "kpi_allowlist_failed",
-                                                "message": f"kpi {kpi_id_int}/{rt}: {exc}",
+                                                "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
                                                 "retryable": True,
                                             },
                                         )
@@ -567,7 +581,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             status="failed",
                                             error={
                                                 "code": "kpi_history_fetch_failed",
-                                                "message": f"kpi {kpi_id_int}/{rt}: {exc}",
+                                                "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
                                                 "retryable": True,
                                             },
                                         )
@@ -592,7 +606,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                                 status="failed",
                                                 error={
                                                     "code": "kpi_history_upsert_failed",
-                                                    "message": f"kpi {kpi_id_int}/{rt}: {exc}",
+                                                    "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
                                                     "retryable": True,
                                                 },
                                             )
@@ -622,7 +636,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             status="failed",
                             error={
                                 "code": "kpi_history_fetch_failed",
-                                "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
                                 "retryable": True,
                             },
                         )
@@ -640,7 +654,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 status="failed",
                                 error={
                                     "code": "kpi_history_upsert_failed",
-                                    "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                    "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
                                     "retryable": True,
                                 },
                             )
@@ -661,7 +675,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     status="failed",
                                     error={
                                         "code": "kpi_allowlist_failed",
-                                        "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                        "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
                                         "retryable": True,
                                     },
                                 )
@@ -674,7 +688,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "kpi_contract_failed", "message": str(exc), "retryable": True},
+                    error={"code": "kpi_contract_failed", "message": f"kpi contract: {_sanitize_provider_error(exc)}", "retryable": True},
                 )
 
         # Dividends (global calendar, not per-company) — filter by company if possible

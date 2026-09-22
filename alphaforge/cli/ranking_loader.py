@@ -184,7 +184,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     elif dcf_annual_reports:
         dcf_current_report = dcf_annual_reports[-1]
     else:
-        dcf_current_report = current_report
+        dcf_current_report = None
     financial_mapper = FinancialMapper()
     financial = FinancialCalculator().calculate(
         financial_mapper.to_current(current_report),
@@ -266,10 +266,14 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             (company_id, cutoff.isoformat()),
         ).fetchall()
     ]
-    if dcf_current_report.net_debt is not None:
+    if dcf_current_report is not None and dcf_current_report.net_debt is not None:
         current_net_debt = dcf_current_report.net_debt
         net_debt_source = "net_debt"
-    elif dcf_current_report.total_debt is not None and dcf_current_report.cash is not None:
+    elif (
+        dcf_current_report is not None
+        and dcf_current_report.total_debt is not None
+        and dcf_current_report.cash is not None
+    ):
         current_net_debt = dcf_current_report.total_debt - dcf_current_report.cash
         net_debt_source = "total_debt_minus_cash"
     else:
@@ -278,12 +282,15 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     reverse_dcf = {
         "status": "available" if dcf_raw.market_cap is not None else "unavailable",
         "current_price": latest_price.close,
-        "current_revenue": dcf_current_report.revenue,
-        "current_shares": dcf_current_report.shares_outstanding,
+        "current_revenue": dcf_current_report.revenue if dcf_current_report is not None else None,
+        "current_shares": dcf_current_report.shares_outstanding
+        if dcf_current_report is not None
+        else None,
         "current_net_debt": current_net_debt,
         "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency,
-        "financial_currency": dcf_current_report.currency or stock_currency,
+        "financial_currency": (dcf_current_report.currency if dcf_current_report is not None else None)
+        or stock_currency,
         "market_cap": dcf_raw.market_cap,
         "enterprise_value": dcf_raw.enterprise_value,
     }
@@ -344,7 +351,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             latest_annual,
             historical_annuals,
             as_of=cutoff,
-            currency=dcf_current_report.currency or stock_currency or "SEK",
+            currency=(dcf_current_report.currency if dcf_current_report is not None else None)
+            or stock_currency
+            or "SEK",
             market_cap=market_cap_for_hurdle,
             roic=roic_for_dcf,
         )
@@ -363,7 +372,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 }
                 reverse_dcf["status"] = "unavailable"
             elif (
-                dcf_current_report.revenue
+                dcf_current_report is not None
+                and dcf_current_report.revenue
                 and dcf_current_report.shares_outstanding
                 and dcf_current_report.revenue > 0
                 and dcf_current_report.shares_outstanding > 0
