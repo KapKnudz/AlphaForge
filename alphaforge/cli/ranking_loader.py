@@ -231,5 +231,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "valuation": valuation,
         "fundamental_kpis": kpis,
         "sector_kpis": {"current": kpis, "histories": {}},
+        # Top-level research_evidence mirrors the missing-data early return above:
+        # RankingEngine.rank reads results["research_evidence"], not candidate.
+        "research_evidence": candidate.research_evidence,
         "candidate": candidate,
     }

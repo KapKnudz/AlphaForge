@@ -470,6 +470,7 @@ def apply_reviewed_mapping_seed(conn: Any, path: str) -> int:
             discovery_source=record.get("discovery_source", "reviewed_seed"),
             verified_at=record.get("verified_at") or (_now() if status == "mapped" else None),
             identity_evidence=identity_evidence,
+            reviewed=True,
         )
         applied += 1
     return applied

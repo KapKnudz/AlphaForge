@@ -645,6 +645,7 @@ def upsert_mfn_issuer_mapping(
     discovery_source: str,
     verified_at: str | None = None,
     identity_evidence: dict[str, Any] | list[Any] | None = None,
+    reviewed: bool = False,
 ) -> int:
     """Persist an explicit MFN identity decision keyed by ``companies.id``.
 
@@ -658,6 +659,10 @@ def upsert_mfn_issuer_mapping(
         raise ValueError("a mapped MFN issuer requires slug, source_url, and verified_at")
     if status == "mapped" and not _has_structured_mfn_identity_evidence(identity_evidence):
         raise ValueError("a mapped MFN issuer requires structured provenance and reason")
+    if reviewed:
+        if not isinstance(identity_evidence, dict):
+            raise ValueError("a reviewed MFN issuer requires structured identity evidence")
+        identity_evidence = {**identity_evidence, "reviewed": True}
     evidence_json = (
         json.dumps(identity_evidence, ensure_ascii=False, sort_keys=True)
         if identity_evidence is not None
@@ -727,6 +732,12 @@ def get_mfn_mapping_review(conn: Any, company_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     result = dict(row)
+    raw_evidence = result.get("identity_evidence")
+    if isinstance(raw_evidence, str):
+        try:
+            result["identity_evidence"] = json.loads(raw_evidence)
+        except ValueError:
+            result["identity_evidence"] = None
     result["candidates"] = [
         dict(candidate)
         for candidate in conn.execute(
@@ -844,6 +855,15 @@ def complete_evidence_identity_documents(
     return [dict(row) for row in rows]
 
 
+def _delete_demoted_evidence_children(conn: Any, document_id: int) -> None:
+    for (extraction_id,) in conn.execute(
+        "SELECT id FROM document_extractions WHERE document_id=?", (document_id,)
+    ).fetchall():
+        conn.execute("DELETE FROM document_pages WHERE extraction_id=?", (extraction_id,))
+    conn.execute("DELETE FROM document_extractions WHERE document_id=?", (document_id,))
+    conn.execute("DELETE FROM research_attachments WHERE document_id=?", (document_id,))
+
+
 def persist_evidence_sibling(
     conn: Any,
     *,
@@ -869,6 +889,20 @@ def persist_evidence_sibling(
     metadata["bilingual_selection_rule"] = sibling.get(
         "bilingual_selection_rule", "deterministic_en_fallback"
     )
+    metadata["relationship"] = sibling.get("relationship") or "UNRESOLVED"
+    for key in (
+        "provider_event_id",
+        "mfn_event_id",
+        "document_type",
+        "period_start",
+        "period_end",
+        "pdf_checksum",
+        "attachment_checksum",
+        "pdf_language",
+        "language_evidence",
+    ):
+        if sibling.get(key) is not None:
+            metadata[key] = sibling[key]
     conn.execute(
         """
         INSERT INTO research_documents
@@ -891,11 +925,20 @@ def persist_evidence_sibling(
             sibling.get("published_at"),
             sibling.get("content_text") or sibling.get("body"),
             int(canonical[0]),
-            sibling.get("lang") or sibling.get("ingested_lang") or "en",
+            sibling.get("pdf_language")
+            or sibling.get("ingested_lang")
+            or sibling.get("lang")
+            or "en",
             sibling.get("pdf_checksum") or sibling.get("attachment_checksum"),
             json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         ),
     )
+    sibling_row = conn.execute(
+        "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, sibling_url),
+    ).fetchone()
+    if sibling_row is not None:
+        _delete_demoted_evidence_children(conn, int(sibling_row[0]))
     conn.commit()
 
 
@@ -940,7 +983,9 @@ def find_complete_evidence_attachment(
     row = conn.execute(
         f"""
         SELECT a.*, root.id AS canonical_document_id,
-               root.source_url AS canonical_source_url
+               root.source_url AS canonical_source_url,
+               root.ingested_lang AS canonical_ingested_lang,
+               root.raw_metadata AS canonical_raw_metadata
         FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
         JOIN research_documents root
@@ -984,13 +1029,21 @@ def persist_evidence_document(
     if not isinstance(metadata, dict):
         metadata = {}
     for key in (
+        "provider_event_id",
+        "mfn_event_id",
         "mfn_slug",
         "report_kind",
+        "document_type",
         "report_period",
         "fiscal_period",
+        "period_start",
         "period_end",
         "report_period_end",
         "lang_confidence",
+        "pdf_checksum",
+        "attachment_checksum",
+        "pdf_language",
+        "language_evidence",
         "_bilingual_group_id",
     ):
         if article.get(key) is not None:
@@ -1142,6 +1195,20 @@ def persist_evidence_document(
             if sibling.get("_bilingual_group_id") is not None:
                 sibling_meta["bilingual_group_id"] = sibling["_bilingual_group_id"]
             sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
+            sibling_meta["relationship"] = sibling.get("relationship") or "UNRESOLVED"
+            for key in (
+                "provider_event_id",
+                "mfn_event_id",
+                "document_type",
+                "period_start",
+                "period_end",
+                "pdf_checksum",
+                "attachment_checksum",
+                "pdf_language",
+                "language_evidence",
+            ):
+                if sibling.get(key) is not None:
+                    sibling_meta[key] = sibling[key]
             sibling_checksum = sibling.get("pdf_checksum") or sibling.get("attachment_checksum")
             conn.execute(
                 """
@@ -1162,11 +1229,20 @@ def persist_evidence_document(
                     sibling.get("published_at") or published_at,
                     sibling.get("content_text") or sibling.get("body"),
                     document_id,
-                    sibling.get("lang") or sibling.get("ingested_lang") or "sv",
+                    sibling.get("pdf_language")
+                    or sibling.get("ingested_lang")
+                    or sibling.get("lang")
+                    or "sv",
                     sibling_checksum,
                     json.dumps(sibling_meta, ensure_ascii=False, sort_keys=True),
                 ),
             )
+            sibling_row = conn.execute(
+                "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+                (company_id, sibling_url),
+            ).fetchone()
+            if sibling_row is not None:
+                _delete_demoted_evidence_children(conn, int(sibling_row[0]))
         conn.execute("RELEASE SAVEPOINT evidence_document")
         conn.commit()
     except Exception:

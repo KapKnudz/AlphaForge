@@ -7,10 +7,13 @@ from alphaforge.llm.jev_shadow import (
     MISSING_INFORMATION_CLASSES,
     MISSING_INFORMATION_QUESTION_VERSION,
     PINNED_MODEL_VERSION,
+    VARIANT_RELATION_CLASSES,
+    VARIANT_RELATION_QUESTION_VERSION,
     JevShadowBudget,
     JevShadowConfig,
     JevShadowResult,
     JevShadowSidecar,
+    accept_variant_relation_decision,
     run_shadow_signals,
 )
 
@@ -25,5 +28,8 @@ __all__ = [
     "MISSING_INFORMATION_CLASSES",
     "MISSING_INFORMATION_QUESTION_VERSION",
     "PINNED_MODEL_VERSION",
+    "VARIANT_RELATION_CLASSES",
+    "VARIANT_RELATION_QUESTION_VERSION",
+    "accept_variant_relation_decision",
     "run_shadow_signals",
 ]

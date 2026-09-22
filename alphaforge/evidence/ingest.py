@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from alphaforge.evidence.mfn_taxonomy import is_report
+from alphaforge.evidence.mfn_taxonomy import document_type, is_report
 from alphaforge.ownership import (
     build_ownership_evidence,  # noqa: F401 — production wiring for thesis limitations
 )
@@ -24,7 +24,19 @@ def _detect_lang(text: str) -> tuple[str, float]:
     return ("en", 0.6)
 
 
-def _language(doc: dict[str, Any]) -> str:
+def _language_unresolved(doc: dict[str, Any]) -> bool:
+    evidence = str(doc.get("language_evidence") or "")
+    return bool(doc.get("_pdf_language_unresolved")) or evidence.startswith("release_hint:")
+
+
+def _language(doc: dict[str, Any], pdf_language: str | None = None) -> str:
+    # The PDF itself outranks MFN release-language metadata: an explicit PDF
+    # decision (filename marker or first-pages word scoring) always wins.
+    if _language_unresolved(doc):
+        return ""
+    pdf = (pdf_language or doc.get("pdf_language") or "").lower()
+    if pdf in {"sv", "en"}:
+        return pdf
     explicit = (doc.get("ingested_lang") or doc.get("lang") or "").lower()
     if explicit in {"sv", "en"}:
         return explicit
@@ -32,6 +44,107 @@ def _language(doc: dict[str, Any]) -> str:
         f"{doc.get('title') or ''} {doc.get('content_text') or doc.get('body') or ''}"
     )
     return detected
+
+
+# Deterministic Swedish-vs-English word lists for PDF language detection.
+# The extracted PDF language has greater authority than MFN release metadata.
+EN_PDF_WORDS = (
+    "the",
+    "and",
+    "for",
+    "of",
+    "year",
+    "report",
+    "with",
+    "from",
+    "this",
+    "quarter",
+    "financial",
+    "revenue",
+    "profit",
+    "million",
+)
+PDF_LANGUAGE_MIN_HITS = 2
+
+SV_PDF_WORDS = (
+    "och",
+    "att",
+    "för",
+    "av",
+    "året",
+    "rapport",
+    "med",
+    "från",
+    "till",
+    "som",
+    "inte",
+    "samt",
+    "eller",
+    "bokslut",
+    "delår",
+    "kvartalet",
+    "omsättning",
+    "miljoner",
+    "kronor",
+)
+
+
+def _pdf_filename_language(filename: str) -> str:
+    stem = str(filename or "").lower().split("?", 1)[0].rsplit("/", 1)[-1]
+    if re.search(r"(?:^|[-_.\s])(en|eng|english)(?:[-_.\s]|$)", stem):
+        return "en"
+    if re.search(r"(?:^|[-_.\s])(sv|swe|swedish|svenska)(?:[-_.\s]|$)", stem):
+        return "sv"
+    return ""
+
+
+def _word_hits(text: str, words: tuple[str, ...]) -> int:
+    tokens = set(re.findall(r"\w+", text.casefold()))
+    return sum(1 for word in words if word in tokens)
+
+
+def _detect_pdf_language(text: str) -> tuple[str, str]:
+    """Decide PDF language from first-page word hits or return a named fallback case."""
+    if not str(text or "").strip():
+        return "", "pdf_text_empty"
+    sv_hits = _word_hits(text, SV_PDF_WORDS)
+    en_hits = _word_hits(text, EN_PDF_WORDS)
+    if max(sv_hits, en_hits) < PDF_LANGUAGE_MIN_HITS:
+        return "", f"pdf_text_insufficient:sv={sv_hits},en={en_hits}"
+    if sv_hits == en_hits:
+        return "", f"pdf_text_tie:sv={sv_hits},en={en_hits}"
+    evidence = f"pdf_text:sv={sv_hits},en={en_hits}"
+    if sv_hits > en_hits:
+        return "sv", evidence
+    return "en", evidence
+
+
+def resolve_document_language(
+    doc: dict[str, Any] | None = None,
+    *,
+    filename: str = "",
+    pdf_text: str = "",
+    release_title: str = "",
+    release_body: str = "",
+    release_lang: str = "",
+) -> tuple[str, str]:
+    """Decide document language with PDF authority over release metadata."""
+    if doc is not None:
+        filename = filename or _attachment_filename(doc)
+        release_title = release_title or str(doc.get("title") or "")
+        release_body = release_body or str(doc.get("content_text") or doc.get("body") or "")
+        release_lang = release_lang or str(doc.get("lang") or doc.get("ingested_lang") or "")
+    filename_lang = _pdf_filename_language(filename)
+    if filename_lang:
+        return filename_lang, "filename"
+    pdf_lang, pdf_evidence = _detect_pdf_language(pdf_text)
+    if pdf_lang:
+        return pdf_lang, pdf_evidence
+    fallback_evidence = f"release_hint:{pdf_evidence}"
+    if release_lang.lower() in {"sv", "en"}:
+        return release_lang.lower(), fallback_evidence
+    detected, _confidence = _detect_lang(f"{release_title} {release_body}".strip())
+    return detected, fallback_evidence
 
 
 def _attachment_filename(doc: dict[str, Any]) -> str:
@@ -73,7 +186,36 @@ def _issuer_identity(doc: dict[str, Any]) -> str:
     return ""
 
 
+def _document_type_for_identity(doc: dict[str, Any]) -> str:
+    """Return the additive variant-identity type, preferring an explicit key."""
+    explicit = str(doc.get("document_type") or "").strip().upper()
+    if explicit in {
+        "INTERIM_Q1",
+        "INTERIM_Q2",
+        "INTERIM_Q3",
+        "YEAR_END_REPORT",
+        "ANNUAL_REPORT",
+    }:
+        return explicit
+    derived = document_type(str(doc.get("title") or ""))
+    return derived or ""
+
+
+_DOCUMENT_TYPE_IDENTITY = {
+    "INTERIM_Q1": "quarterly",
+    "INTERIM_Q2": "quarterly",
+    "INTERIM_Q3": "quarterly",
+    "YEAR_END_REPORT": "year_end",
+    "ANNUAL_REPORT": "annual",
+}
+
+
 def _report_kind_for_identity(doc: dict[str, Any]) -> str:
+    typed = _document_type_for_identity(doc)
+    if typed:
+        # YEAR_END vs ANNUAL stay distinguishable so the two editions of one
+        # fiscal year never merge as translations of each other.
+        return _DOCUMENT_TYPE_IDENTITY[typed]
     kind = str(doc.get("report_kind") or "").casefold().strip()
     if kind:
         return kind
@@ -182,6 +324,18 @@ def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
 
 
+def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
+    """Normalize a fiscal-range end year, accepting two-digit ends (2026/27)."""
+    if not end_part:
+        return start_year
+    if len(end_part) == 4:
+        return end_part
+    expanded = f"{start_year[:2]}{end_part}"
+    if int(expanded) < int(start_year):
+        expanded = str(int(expanded) + 100)
+    return expanded
+
+
 def _quarter_period(text: str) -> str | None:
     text = text.casefold()
     for ordinal, quarter in (
@@ -208,18 +362,18 @@ def _quarter_period(text: str) -> str | None:
     text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
     text = re.sub(r"\b(?:october|oktober)\s*[-–]\s*december\b", "q4", text)
     match = re.search(
-        r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b",
+        r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\b",
         text,
     )
     if match:
-        end_year = match.group(3) or match.group(2)
+        end_year = _expand_fiscal_year(match.group(2), match.group(3))
         return f"{match.group(2)}/{end_year}-q{match.group(1)}"
     match = re.search(
-        r"\b(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
+        r"\b(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
         text,
     )
     if match:
-        end_year = match.group(2) or match.group(1)
+        end_year = _expand_fiscal_year(match.group(1), match.group(2))
         return f"{match.group(1)}/{end_year}-q{match.group(3)}"
     return None
 
@@ -241,9 +395,9 @@ def _fiscal_period(doc: dict[str, Any]) -> str:
         title_period = _quarter_period(str(doc.get("title") or ""))
         if title_period:
             quarter = re.search(r"-q([1-4])$", title_period)
-            years = re.fullmatch(r"(20\d{2})(?:[/\-](20\d{2}))?", explicit)
+            years = re.fullmatch(r"(20\d{2})(?:[/\-]((?:20)?\d{2}))?", explicit)
             if quarter and years:
-                end_year = years.group(2) or years.group(1)
+                end_year = _expand_fiscal_year(years.group(1), years.group(2))
                 return f"{years.group(1)}/{end_year}-q{quarter.group(1)}"
             return title_period
         return explicit
@@ -380,8 +534,59 @@ def _numeric_key_figure_fingerprint(value: Any) -> tuple[str, ...]:
     return tuple(sorted(figures)) if len(figures) >= 2 else ()
 
 
+# Filename/metadata markers for a corrected or revised edition. A revised
+# financial report is never merely another language edition.
+REVISION_MARKERS = ("correct", "revis", "rättelse", "uppdaterad", "amend")
+
+
+def _has_revision_markers(doc: dict[str, Any]) -> bool:
+    filename = _attachment_filename(doc)
+    haystacks = [
+        filename,
+        str(doc.get("title") or "").casefold(),
+    ]
+    raw = doc.get("raw_metadata")
+    if isinstance(raw, dict):
+        haystacks.extend(str(value).casefold() for value in raw.values())
+    elif isinstance(raw, str):
+        haystacks.append(raw.casefold())
+    return any(marker in haystack for haystack in haystacks for marker in REVISION_MARKERS)
+
+
+def _numeric_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
+    """Jaccard similarity over normalized numeric key-figure tokens."""
+    union = set(left) | set(right)
+    if not union:
+        return 0.0
+    return len(set(left) & set(right)) / len(union)
+
+
+def _variant_relationship(left: dict[str, Any], right: dict[str, Any]) -> str:
+    """Deterministic TRANSLATION / REVISION / DIFFERENT_REPORT label."""
+    issuer = _issuer_identity(left)
+    same_issuer = bool(issuer) and issuer == _issuer_identity(right)
+    kind = _report_kind_for_identity(left)
+    same_kind = bool(kind) and kind == _report_kind_for_identity(right)
+    period_left = _fiscal_period(left)
+    same_period = bool(period_left) and period_left == _fiscal_period(right)
+    if same_issuer and same_kind and same_period:
+        if _language_unresolved(left) or _language_unresolved(right):
+            return "DIFFERENT_REPORT"
+        if _language(left) == _language(right):
+            if _has_revision_markers(left) or _has_revision_markers(right):
+                return "REVISION"
+            return "DIFFERENT_REPORT"
+        if _has_revision_markers(left) or _has_revision_markers(right):
+            return "REVISION"
+        if _cross_language_correspondence(left, right):
+            return "TRANSLATION"
+    return "DIFFERENT_REPORT"
+
+
 def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    if _language(left) == _language(right):
+    left_language = _language(left)
+    right_language = _language(right)
+    if not left_language or not right_language or left_language == right_language:
         return False
     issuer = _issuer_identity(left)
     if not issuer or issuer != _issuer_identity(right):
@@ -392,6 +597,9 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     left_fiscal_config = _fiscal_year_config(left)
     right_fiscal_config = _fiscal_year_config(right)
     if left_fiscal_config and right_fiscal_config and left_fiscal_config != right_fiscal_config:
+        return False
+    if _has_revision_markers(left) or _has_revision_markers(right):
+        # A corrected edition is never merely a translation; fail safe.
         return False
     strong_corroborator = False
     derived_corroborators = 0
@@ -407,15 +615,9 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     body_right = right.get("content_text") or right.get("body")
     numeric_left = _numeric_key_figure_fingerprint(body_left)
     numeric_right = _numeric_key_figure_fingerprint(body_right)
-    numeric_corroborator = bool(numeric_left and numeric_right and numeric_left == numeric_right)
-    if (
-        numeric_left
-        and numeric_right
-        and numeric_left != numeric_right
-        and not shared_event
-        and not shared_checksum
-    ):
-        return False
+    # Numeric similarity corroborates but never vetoes: translations of the
+    # same report carry nearly identical figures in different prose.
+    numeric_corroborator = _numeric_similarity(numeric_left, numeric_right) >= 0.5
     strong_corroborator |= numeric_corroborator
     if not shared_event and not shared_checksum and not numeric_corroborator:
         return False
@@ -434,28 +636,60 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     return strong_corroborator and derived_corroborators >= 2
 
 
-def bilingual_dedupe(
-    docs: list[dict[str, Any]], *, packet_majority: str | None = None
-) -> list[dict[str, Any]]:
-    """Select one report edition while retaining suppressed provenance."""
+def ambiguous_variant_pairs(
+    docs: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Return opposite-language pairs deterministic identity cannot resolve."""
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for index, left in enumerate(docs):
+        for right in docs[index + 1 :]:
+            if _variant_relationship(left, right) != "DIFFERENT_REPORT":
+                continue
+            left_language = _language(left)
+            right_language = _language(right)
+            if not left_language or not right_language or left_language == right_language:
+                continue
+            issuer = _issuer_identity(left)
+            if not issuer or issuer != _issuer_identity(right):
+                continue
+            kind = _report_kind_for_identity(left)
+            if not kind or kind != _report_kind_for_identity(right):
+                continue
+            period = _fiscal_period(left)
+            if not period or period != _fiscal_period(right):
+                continue
+            if _has_revision_markers(left) or _has_revision_markers(right):
+                continue
+            pairs.append((left, right))
+    return pairs
+
+
+def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select one report edition while retaining suppressed provenance.
+
+    Selection is unconditional English-over-Swedish: English is used whenever
+    it exists, Swedish is usable immediately when English is absent, and a
+    later English edition supersedes a previously selected Swedish one.
+    """
     groups: list[list[dict[str, Any]]] = []
     for doc in docs:
         matches = [
             index
             for index, variants in enumerate(groups)
-            if len(variants) == 1 and _cross_language_correspondence(doc, variants[0])
+            if any(
+                _variant_relationship(doc, variant) in {"TRANSLATION", "REVISION"}
+                for variant in variants
+            )
         ]
-        if len(matches) == 1:
-            groups[matches[0]].append(doc)
-        else:
+        if not matches:
             groups.append([doc])
+            continue
+        target = matches[0]
+        groups[target].append(doc)
+        for index in reversed(matches[1:]):
+            groups[target].extend(groups.pop(index))
 
-    preferred_language = packet_majority if packet_majority in {"sv", "en"} else "en"
-    selection_rule = (
-        f"{preferred_language}_packet_majority"
-        if packet_majority in {"sv", "en"}
-        else "deterministic_en_fallback"
-    )
+    selection_rule = "deterministic_en_fallback"
     out: list[dict[str, Any]] = []
     for variants in groups:
         if len(variants) == 1:
@@ -470,8 +704,7 @@ def bilingual_dedupe(
         variants_sorted = sorted(
             variants,
             key=lambda value: (
-                0 if _language(value) == preferred_language else 1,
-                0 if _language(value) == "en" else 1,
+                0 if _language(value) == "en" else 1 if _language(value) == "sv" else 2,
                 str(value.get("source_url") or value.get("url") or ""),
             ),
         )
@@ -479,10 +712,12 @@ def bilingual_dedupe(
         preferred["bilingual_selection_rule"] = selection_rule
         out.append(preferred)
         for suppressed in variants_sorted[1:]:
+            relationship = _variant_relationship(preferred, suppressed)
             suppressed["duplicate_of"] = preferred.get("source_url") or preferred.get("url")
-            suppressed["ingest_status"] = "superseded_by_translation"
+            suppressed["ingest_status"] = f"superseded_by_{relationship.casefold()}"
             suppressed["_bilingual_group_id"] = group_id
             suppressed["bilingual_selection_rule"] = selection_rule
+            suppressed["relationship"] = relationship
             preferred.setdefault("_suppressed_variants", []).append(suppressed)
     return out
 
@@ -531,6 +766,12 @@ def _metadata_json(doc: dict[str, Any], *, language: str, checksum: str | None) 
         "bilingual_selection_rule",
         "_bilingual_group_id",
         "ingest_status",
+        "relationship",
+        "document_type",
+        "period_start",
+        "period_end",
+        "pdf_language",
+        "language_evidence",
     ):
         if doc.get(key) is not None:
             metadata[key.removeprefix("_")] = doc[key]
@@ -591,7 +832,6 @@ class ResearchDocumentIngestionService:
         *,
         source_type: str = "mfn",
         reports_only: bool = True,
-        packet_majority: str | None = None,
     ) -> IngestResult:
         """Persist report documents, suppressing one bilingual edition in packets."""
         eligible = [
@@ -601,7 +841,19 @@ class ResearchDocumentIngestionService:
                 reports_only and source_type == "mfn" and not is_report(article.get("title") or "")
             )
         ]
-        deduped = bilingual_dedupe(eligible, packet_majority=packet_majority)
+        eligible = [
+            article
+            if (
+                article.get("pdf_language") in {"en", "sv"}
+                and (
+                    article.get("language_evidence") == "filename"
+                    or str(article.get("language_evidence") or "").startswith("pdf_text:")
+                )
+            )
+            else {**article, "_pdf_language_unresolved": True}
+            for article in eligible
+        ]
+        deduped = bilingual_dedupe(eligible)
         inserted = 0
         suppressed = 0
         for doc in deduped:

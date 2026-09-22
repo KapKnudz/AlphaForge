@@ -994,6 +994,7 @@ def cmd_mfn_map(args: argparse.Namespace) -> int:
                 else None
             ),
             identity_evidence=evidence,
+            reviewed=args.status == "ambiguous",
         )
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"mfn-map failed: {exc}", file=sys.stderr)

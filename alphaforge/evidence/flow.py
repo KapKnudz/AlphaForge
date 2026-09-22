@@ -12,24 +12,28 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
+from alphaforge.core.frozen_packet import stable_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
     complete_evidence_identity_documents,
-    complete_evidence_language_majority,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
+    get_mfn_mapping_review,
     get_verified_mfn_mapping,
     persist_evidence_document,
     persist_evidence_packet,
     persist_evidence_sibling,
+    persist_mfn_issuer_candidates,
     record_job,
     record_mfn_feed_check,
 )
 from alphaforge.evidence.ingest import (
     ResearchDocumentIngestionService,
+    _variant_relationship,
+    ambiguous_variant_pairs,
     bilingual_dedupe,
+    resolve_document_language,
 )
-from alphaforge.evidence.mfn_taxonomy import is_report
+from alphaforge.evidence.mfn_taxonomy import document_type, is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
@@ -119,6 +123,94 @@ def download_pdf(
     )
 
 
+def _sibling_entry(sibling: Any, document_id: int) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    try:
+        loaded = json.loads(sibling["raw_metadata"]) if sibling["raw_metadata"] else None
+        if isinstance(loaded, dict):
+            metadata = loaded
+    except (TypeError, ValueError, KeyError, IndexError):
+        metadata = {}
+    language = sibling["ingested_lang"] or metadata.get("language") or "en"
+    relationship = metadata.get("relationship") or "UNRESOLVED"
+    return {
+        "source_url": sibling["source_url"],
+        "title": sibling["title"] or "",
+        "publication_date": sibling["published_at"],
+        "language": language,
+        "duplicate_of": f"document:{document_id}",
+        "selected_variant_source_url": metadata.get("duplicate_of_source_url"),
+        "variant_group_id": metadata.get("bilingual_group_id"),
+        "selection_state": f"suppressed_by_{str(relationship).casefold()}",
+        "selection_reason": (
+            "REVISION"
+            if relationship == "REVISION"
+            else ("PREFERRED_LANGUAGE" if language == "en" else "FALLBACK_LANGUAGE")
+        ),
+        "relationship": relationship,
+    }
+
+
+def _is_pdf_backed_language_evidence(value: Any) -> bool:
+    evidence = str(value or "")
+    return evidence == "filename" or evidence.startswith("pdf_text:")
+
+
+def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | None:
+    if existing is None or not existing.get("canonical_raw_metadata"):
+        return None
+    try:
+        metadata = json.loads(existing["canonical_raw_metadata"])
+    except (TypeError, ValueError):
+        return None
+    language = metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    evidence = metadata.get("language_evidence") if isinstance(metadata, dict) else None
+    if language in {"en", "sv"} and _is_pdf_backed_language_evidence(evidence):
+        return str(language), str(evidence)
+    return None
+
+
+def _prepare_selected_article(
+    variant: dict[str, Any], downloaded: PdfDownload, extracted: Any
+) -> dict[str, Any]:
+    release_lang = variant.get("lang") or variant.get("ingested_lang") or ""
+    pdf_first_pages = "\n".join(str(page.get("text") or "") for page in extracted.pages[:3])
+    pdf_language, language_evidence = resolve_document_language(
+        filename=downloaded.source_url,
+        pdf_text=pdf_first_pages,
+        release_title=str(variant.get("title") or ""),
+        release_body=str(variant.get("content_text") or variant.get("body") or ""),
+        release_lang=str(release_lang),
+    )
+    authoritative_language = (
+        pdf_language
+        if pdf_language in {"en", "sv"} and _is_pdf_backed_language_evidence(language_evidence)
+        else ""
+    )
+    return {
+        **variant,
+        "pdf_language": authoritative_language,
+        "pdf_checksum": downloaded.sha256,
+        "language_evidence": language_evidence,
+        "ingested_lang": authoritative_language
+        or (release_lang if variant.get("_pdf_language_unresolved") else ""),
+        "_pdf_language_unresolved": not bool(authoritative_language),
+        "document_type": variant.get("document_type")
+        or document_type(str(variant.get("title") or "")),
+        "period_start": variant.get("period_start")
+        or variant.get("report_period_start")
+        or _period_start(variant),
+        "period_end": variant.get("period_end")
+        or variant.get("report_period_end")
+        or _body_period_end(variant),
+        "observation_date": _observation_date(variant),
+        "observation_date_authoritative": any(
+            variant.get(key) not in (None, "")
+            for key in ("observation_date", "period_end", "report_period_end")
+        ),
+    }
+
+
 def _coverage_facts(sources: list[dict[str, Any]], limitations: set[str]) -> dict[str, Any]:
     return {
         "source_count": len(sources),
@@ -167,12 +259,24 @@ def _date_value(day: str, month: str, year: str | None) -> str | None:
         return None
 
 
-def _has_fiscal_year_span(title: str) -> bool:
-    return bool(re.search(r"\b20\d{2}\s*[/\-]\s*(?:20)?\d{2}\b", title))
+def _range_start(
+    start_day: str, start_month: str, start_year: str | None, end_iso: str
+) -> str | None:
+    """Infer a range start date, rolling back one year across year boundaries."""
+    if start_year is not None:
+        return _date_value(start_day, start_month, start_year)
+    end_month = int(end_iso[5:7])
+    start_month_number = _MONTHS.get(start_month.casefold().rstrip("."))
+    if start_month_number is None:
+        return None
+    year = int(end_iso[:4])
+    if start_month_number > end_month:
+        year -= 1
+    return _date_value(start_day, start_month, str(year))
 
 
-def _body_period_end(article: dict[str, Any]) -> str | None:
-    """Extract an explicitly stated fiscal range end before title heuristics.
+def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract an explicitly stated fiscal (start, end) range from the body.
 
     Fiscal Q1 is not necessarily January--March (Clas Ohlson's Q1 is
     May--July).  The release body is the authoritative deterministic source
@@ -181,27 +285,35 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
     """
     body = str(article.get("content_text") or article.get("body") or "").casefold()
     if not body:
-        return None
+        return None, None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
     title = str(article.get("title") or "")
+    fiscal_span_match = re.search(r"\b(20\d{2})\s*[/\-]\s*(?:20)?\d{2}\b", title, re.IGNORECASE)
     year_match = (
         None
-        if _has_fiscal_year_span(title)
+        if fiscal_span_match
         else re.search(r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", title, re.IGNORECASE)
     )
-    fiscal_year = year_match.group(1) if year_match else None
+    fiscal_year = (
+        fiscal_span_match.group(1)
+        if fiscal_span_match
+        else year_match.group(1)
+        if year_match
+        else None
+    )
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
     # ``1 May – 31 July 2026`` are emitted by MFN pages.
     range_pattern = re.compile(
-        rf"\b\d{{1,2}}\s+(?:{months})(?:\s+20\d{{2}})?\s*"
+        rf"\b(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\s*"
         rf"(?:-|–|—|to|through|till|till och med)\s*"
         rf"(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    candidates: list[tuple[int, str]] = []
+    candidates: list[tuple[int, str | None, str]] = []
     for match in range_pattern.finditer(body):
-        end = _date_value(match.group(1), match.group(2), match.group(3) or fiscal_year)
+        end = _date_value(match.group(4), match.group(5), match.group(6) or fiscal_year)
         if end is None:
             continue
+        start = _range_start(match.group(1), match.group(2), match.group(3), end)
         before = body[max(0, match.start() - 48) : match.start()]
         if any(
             term in before
@@ -256,22 +368,23 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "förra året",
             )
         )
-        candidates.append((score, end))
+        candidates.append((score, start, end))
     if candidates:
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
-            if candidates[0][1] != candidates[1][1]:
-                return None
-        return candidates[0][1]
+            if candidates[0][2] != candidates[1][2]:
+                return None, None
+        return candidates[0][1], candidates[0][2]
     month_first = re.compile(
-        rf"\b(?:{months})\s+\d{{1,2}},?\s+20\d{{2}}\s*"
-        rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
+        rf"\b({months})\s+(\d{{1,2}}),?(?:\s+(20\d{{2}}))?\s*"
+        rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?(?:\s+(20\d{{2}}))?\b"
     )
-    month_candidates: list[tuple[int, str]] = []
+    month_candidates: list[tuple[int, str | None, str]] = []
     for match in month_first.finditer(body):
-        end = _date_value(match.group(2), match.group(1), match.group(3) or fiscal_year)
+        end = _date_value(match.group(5), match.group(4), match.group(6) or fiscal_year)
         if end is None:
             continue
+        start = _range_start(match.group(2), match.group(1), match.group(3), end)
         before = body[max(0, match.start() - 48) : match.start()]
         if any(
             term in before
@@ -308,18 +421,18 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "månader",
             )
         )
-        month_candidates.append((score, end))
+        month_candidates.append((score, start, end))
     if month_candidates:
         month_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(month_candidates) > 1 and month_candidates[0][0] == month_candidates[1][0]:
-            if month_candidates[0][1] != month_candidates[1][1]:
-                return None
-        return month_candidates[0][1]
+            if month_candidates[0][2] != month_candidates[1][2]:
+                return None, None
+        return month_candidates[0][1], month_candidates[0][2]
     # ``for the three months ended 31 July 2026`` is also unambiguous.
     ended_pattern = re.compile(
         rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    ended_candidates: list[tuple[int, str]] = []
+    ended_candidates: list[tuple[int, str | None, str]] = []
     for ended in ended_pattern.finditer(body):
         end = _date_value(ended.group(1), ended.group(2), ended.group(3) or fiscal_year)
         if end is None:
@@ -360,14 +473,29 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "månader",
             )
         )
-        ended_candidates.append((score, end))
+        ended_candidates.append((score, None, end))
     if ended_candidates:
         ended_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(ended_candidates) > 1 and ended_candidates[0][0] == ended_candidates[1][0]:
-            if ended_candidates[0][1] != ended_candidates[1][1]:
-                return None
-        return ended_candidates[0][1]
-    return None
+            if ended_candidates[0][2] != ended_candidates[1][2]:
+                return None, None
+        return ended_candidates[0][1], ended_candidates[0][2]
+    return None, None
+
+
+def _body_period_end(article: dict[str, Any]) -> str | None:
+    """Extract an explicitly stated fiscal range end before title heuristics."""
+    _start, end = _body_period_range(article)
+    return end
+
+
+def _period_start(article: dict[str, Any]) -> str | None:
+    for key in ("period_start", "report_period_start"):
+        value = article.get(key)
+        if value:
+            return str(value)[:10]
+    start, _end = _body_period_range(article)
+    return start
 
 
 def _observation_date(article: dict[str, Any]) -> str | None:
@@ -394,6 +522,7 @@ def build_frozen_evidence_packet(
     mapping: dict[str, Any] | None = None,
     additional_limitations: list[str] | None = None,
     publication_cutoff: str | None = None,
+    excluded_source_urls: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
@@ -422,7 +551,11 @@ def build_frozen_evidence_packet(
     ).fetchall()
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
+    fallback_source_count = 0
+    excluded_source_urls = excluded_source_urls or set()
     for row in rows:
+        if str(row["source_url"]) in excluded_source_urls:
+            continue
         document_id = int(row["document_id"])
         page_rows = conn.execute(
             """
@@ -435,7 +568,7 @@ def build_frozen_evidence_packet(
         ).fetchall()
         sibling_rows = conn.execute(
             """
-            SELECT source_url, title, published_at, ingested_lang, duplicate_of
+            SELECT source_url, title, published_at, ingested_lang, duplicate_of, raw_metadata
             FROM research_documents
             WHERE duplicate_of=?
               AND published_at IS NOT NULL
@@ -479,14 +612,26 @@ def build_frozen_evidence_packet(
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
         )
+        language_evidence = str(raw_metadata.get("language_evidence") or "")
+        if language_evidence.startswith("release_hint:"):
+            fallback_source_count += 1
+        source_language = row["ingested_lang"] or raw_metadata.get("language") or "en"
         source = {
             "source_id": source_id,
             "source_url": row["source_url"],
             "title": row["title"] or "",
             "report_kind": raw_metadata.get("report_kind"),
+            "document_type": raw_metadata.get("document_type"),
             "fiscal_period": raw_metadata.get("fiscal_period") or raw_metadata.get("report_period"),
+            "period_start": raw_metadata.get("period_start"),
+            "period_end": raw_metadata.get("period_end") or raw_metadata.get("report_period_end"),
             "observation_date": observation_date,
-            "language": row["ingested_lang"] or raw_metadata.get("language") or "en",
+            "language": source_language,
+            "variant_group_id": raw_metadata.get("bilingual_group_id"),
+            "selection_state": "selected",
+            "selection_reason": (
+                "PREFERRED_LANGUAGE" if source_language == "en" else "FALLBACK_LANGUAGE"
+            ),
             "publication_date": row["published_at"],
             "publication_timestamp_authoritative": bool(
                 raw_metadata.get("authoritative_publication_timestamp")
@@ -527,20 +672,15 @@ def build_frozen_evidence_packet(
                 for page in page_rows
             ],
             "bilingual_siblings": [
-                {
-                    "source_url": sibling["source_url"],
-                    "title": sibling["title"] or "",
-                    "publication_date": sibling["published_at"],
-                    "language": sibling["ingested_lang"] or "en",
-                    "duplicate_of": f"document:{document_id}",
-                }
-                for sibling in sibling_rows
+                _sibling_entry(sibling, document_id) for sibling in sibling_rows
             ],
         }
         sources.append(source)
     sources.sort(
         key=lambda source: (source["publication_date"], source["source_url"], source["source_id"])
     )
+    if fallback_source_count:
+        limitations.add(f"pdf_language_fallback:{fallback_source_count}")
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
@@ -561,7 +701,7 @@ def build_frozen_evidence_packet(
         sources,
         set(base["limitations"]),
     )
-    base["packet_hash"] = canonical_packet_hash(base)
+    base["packet_hash"] = stable_packet_hash(base)
     return base
 
 
@@ -743,6 +883,49 @@ class OneCompanyEvidenceFlow:
 
         mapping = get_verified_mfn_mapping(self.conn, company_id)
         if mapping is None:
+            # A reviewed `ambiguous` mapping is authoritative until re-reviewed:
+            # later exact-identifier discovery is queued as candidates, never
+            # applied. Fresh discovery keeps working for never-reviewed issuers.
+            review = get_mfn_mapping_review(self.conn, company_id)
+            reviewed_evidence = review.get("identity_evidence") if review is not None else None
+            is_reviewed_ambiguous = (
+                review is not None
+                and review.get("status") == "ambiguous"
+                and isinstance(reviewed_evidence, dict)
+                and reviewed_evidence.get("reviewed") is True
+            )
+            if is_reviewed_ambiguous:
+                try:
+                    resolution = self.resolver.discover(company)
+                except MfnIssuerAcquisitionError as exc:
+                    return finish(
+                        EvidenceFlowResult(
+                            "acquisition_failed",
+                            company_id,
+                            mapping_status="ambiguous",
+                            skipped={exc.code: 1},
+                            message=str(exc),
+                        )
+                    )
+                if not dry_run:
+                    persist_mfn_issuer_candidates(
+                        self.conn,
+                        company_id,
+                        list(resolution.candidates),
+                        discovery_source="mfn_search_or_index",
+                    )
+                return finish(
+                    EvidenceFlowResult(
+                        "mapping_ambiguous",
+                        company_id,
+                        mapping_status="ambiguous",
+                        skipped={"issuer_mapping_review_required": 1},
+                        message=(
+                            "reviewed ambiguous MFN issuer mapping blocks discovery "
+                            "until re-reviewed"
+                        ),
+                    )
+                )
             try:
                 resolution = self.resolver.discover(company)
             except MfnIssuerAcquisitionError as exc:
@@ -901,7 +1084,24 @@ class OneCompanyEvidenceFlow:
                     "company_id": company_id,
                 }
             )
-        packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
+        # Resolve identity dates once per article so variant grouping compares
+        # real fiscal periods instead of synthesized calendar quarters, and a
+        # later English edition can attach even when published on another day.
+        for article in eligible:
+            if not (article.get("attachment_url") or article.get("storage_url")):
+                article["_pdf_language_unresolved"] = True
+            if article.get("document_type") is None:
+                article["document_type"] = document_type(str(article.get("title") or ""))
+            if article.get("period_start") is None:
+                article["period_start"] = article.get("report_period_start") or _period_start(
+                    article
+                )
+            if article.get("period_end") is None:
+                article["period_end"] = article.get("report_period_end") or _body_period_end(
+                    article
+                )
+            if article.get("observation_date") is None:
+                article["observation_date"] = _observation_date(article)
         persisted_identity = []
         persisted_cutoff = min(as_of[:10], today.isoformat())
         for persisted in complete_evidence_identity_documents(
@@ -915,6 +1115,11 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
+            pdf_language = (
+                metadata.get("pdf_language")
+                if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))
+                else ""
+            )
             persisted_identity.append(
                 {
                     "source_url": persisted["source_url"],
@@ -923,47 +1128,170 @@ class OneCompanyEvidenceFlow:
                     "content_text": persisted["content_text"],
                     "mfn_slug": metadata.get("mfn_slug"),
                     "report_kind": metadata.get("report_kind"),
+                    "document_type": metadata.get("document_type"),
                     "fiscal_period": metadata.get("fiscal_period") or metadata.get("report_period"),
+                    "period_start": metadata.get("period_start"),
+                    "period_end": metadata.get("period_end") or metadata.get("report_period_end"),
+                    "observation_date": (
+                        metadata.get("observation_date")
+                        if metadata.get("observation_date_authoritative")
+                        else None
+                    ),
+                    "provider_event_id": metadata.get("provider_event_id"),
+                    "mfn_event_id": metadata.get("mfn_event_id"),
+                    "pdf_language": pdf_language,
                     "attachment_url": persisted["attachment_url"],
                     "attachment_checksum": persisted["attachment_checksum"],
-                    "ingested_lang": persisted["ingested_lang"],
-                    "lang": persisted["ingested_lang"],
+                    "pdf_checksum": persisted["attachment_checksum"],
+                    "ingested_lang": persisted["ingested_lang"] if pdf_language else "",
+                    "lang": persisted["ingested_lang"] if pdf_language else "",
+                    "_pdf_language_unresolved": not bool(pdf_language),
                     "_bilingual_group_id": metadata.get("bilingual_group_id"),
                     "_persisted_evidence": True,
                 }
             )
-        deduped = bilingual_dedupe(
-            persisted_identity + eligible,
-            packet_majority=packet_majority,
-        )
-        result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
+        identity_candidates = persisted_identity + eligible
         if dry_run:
+            deduped = bilingual_dedupe(identity_candidates)
+            result.eligible = sum(
+                1 for article in deduped if not article.get("_persisted_evidence")
+            )
             result.status = "dry_run"
             return result
+
         ingestion = ResearchDocumentIngestionService(self.conn)
-        for article in deduped:
-            if article.get("_persisted_evidence"):
-                for sibling in article.get("_suppressed_variants", []):
-                    # Reconcile already-persisted bilingual rows as well as
-                    # newly discovered siblings.  This repairs databases from
-                    # the pre-semantic-identity flow where both translations
-                    # were accidentally canonical.
-                    persist_evidence_sibling(
-                        self.conn,
-                        company_id=company_id,
-                        canonical_source_url=str(article["source_url"]),
-                        sibling=sibling,
-                    )
+        resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
+        indeterminate_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
+        stored_pdf_language_cache: dict[str, tuple[str, str]] = {}
+        unresolved_existing_source_urls: set[str] = set()
+
+        def mark_pdf_language_unresolved(
+            index: int, candidate: dict[str, Any], existing: dict[str, Any] | None
+        ) -> None:
+            identity_candidates[index] = {
+                **candidate,
+                "pdf_language": "",
+                "language_evidence": "unresolved",
+                "ingested_lang": "",
+                "lang": "",
+                "_pdf_language_unresolved": True,
+            }
+            if existing is not None and existing.get("canonical_source_url"):
+                unresolved_existing_source_urls.add(str(existing["canonical_source_url"]))
+
+        for index, candidate in enumerate(identity_candidates):
+            attachment_url = candidate.get("attachment_url") or candidate.get("storage_url")
+            if not attachment_url:
                 continue
+            existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
+            stored_pdf_language = _stored_pdf_language(existing)
+            if stored_pdf_language is not None:
+                language, evidence = stored_pdf_language
+                identity_candidates[index] = {
+                    **candidate,
+                    "pdf_language": language,
+                    "language_evidence": evidence,
+                    "ingested_lang": language,
+                    "lang": language,
+                    "_pdf_language_unresolved": False,
+                }
+                stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                continue
+            try:
+                candidate_download = download_pdf(str(attachment_url), limits=self.limits)
+                candidate_extracted = ingestion.extract_pdf_pages(
+                    candidate_download.content, max_pages=self.limits.max_pages
+                )
+            except Exception:
+                if stored_pdf_language is not None:
+                    language, evidence = stored_pdf_language
+                    identity_candidates[index] = {
+                        **candidate,
+                        "pdf_language": language,
+                        "language_evidence": evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                else:
+                    mark_pdf_language_unresolved(index, candidate, existing)
+                continue
+            if not candidate_extracted.pages:
+                if stored_pdf_language is not None:
+                    language, evidence = stored_pdf_language
+                    identity_candidates[index] = {
+                        **candidate,
+                        "pdf_language": language,
+                        "language_evidence": evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                else:
+                    mark_pdf_language_unresolved(index, candidate, existing)
+                continue
+            pdf_first_pages = "\n".join(
+                str(page.get("text") or "") for page in candidate_extracted.pages[:3]
+            )
+            release_lang = candidate.get("lang") or candidate.get("ingested_lang") or ""
+            pdf_language, language_evidence = resolve_document_language(
+                filename=candidate_download.source_url,
+                pdf_text=pdf_first_pages,
+                release_title=str(candidate.get("title") or ""),
+                release_body=str(candidate.get("content_text") or candidate.get("body") or ""),
+                release_lang=str(release_lang),
+            )
+            if not (
+                pdf_language in {"en", "sv"} and _is_pdf_backed_language_evidence(language_evidence)
+            ):
+                if release_lang.lower() in {"en", "sv"}:
+                    indeterminate_pdf_cache[str(attachment_url)] = (
+                        candidate_download,
+                        candidate_extracted,
+                        release_lang.lower(),
+                        language_evidence,
+                    )
+                mark_pdf_language_unresolved(index, candidate, existing)
+                continue
+            resolved = {
+                **candidate,
+                "pdf_language": pdf_language,
+                "pdf_checksum": candidate_download.sha256,
+                "language_evidence": language_evidence,
+                "ingested_lang": pdf_language,
+                "_pdf_language_unresolved": False,
+            }
+            identity_candidates[index] = resolved
+            if existing is not None and existing.get("canonical_source_url"):
+                unresolved_existing_source_urls.discard(str(existing["canonical_source_url"]))
+            resolved_pdf_cache[str(attachment_url)] = (
+                candidate_download,
+                candidate_extracted,
+                pdf_language,
+                language_evidence,
+            )
+
+        shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
+        deduped = bilingual_dedupe(identity_candidates)
+        result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
+        language_fallback_count = 0
+        for article in deduped:
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
             downloaded = None
             extracted = None
             existing_canonical_source_url = None
             failures: dict[str, int] = {}
+            prepared_variants: list[dict[str, Any]] = []
+            candidate_options: list[
+                tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]
+            ] = []
             for variant in variants:
                 attachment_url = variant.get("attachment_url") or variant.get("storage_url")
                 if not attachment_url:
+                    prepared_variants.append(variant)
                     failures["missing_pdf_attachment"] = (
                         failures.get("missing_pdf_attachment", 0) + 1
                     )
@@ -971,15 +1299,65 @@ class OneCompanyEvidenceFlow:
                 existing = find_complete_evidence_attachment(
                     self.conn, str(attachment_url), company_id
                 )
-                if existing is not None:
-                    if existing.get("canonical_source_url"):
-                        selected = variant
-                        existing_canonical_source_url = str(existing["canonical_source_url"])
-                        break
+                resolved_pdf = resolved_pdf_cache.get(str(attachment_url))
+                if resolved_pdf is not None:
+                    candidate_download, candidate_extracted, pdf_language, language_evidence = (
+                        resolved_pdf
+                    )
+                    release_lang = variant.get("lang") or variant.get("ingested_lang") or ""
+                    prepared = {
+                        **variant,
+                        "pdf_language": pdf_language,
+                        "pdf_checksum": candidate_download.sha256,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": pdf_language or release_lang or "en",
+                        "_pdf_language_unresolved": False,
+                    }
+                    if existing is not None and existing.get("canonical_source_url"):
+                        unresolved_existing_source_urls.discard(
+                            str(existing["canonical_source_url"])
+                        )
+                    prepared_variants.append(prepared)
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, existing)
+                    )
+                    continue
+                indeterminate_pdf = indeterminate_pdf_cache.get(str(attachment_url))
+                if indeterminate_pdf is not None:
+                    candidate_download, candidate_extracted, release_lang, language_evidence = (
+                        indeterminate_pdf
+                    )
+                    prepared = {
+                        **variant,
+                        "pdf_language": "",
+                        "pdf_checksum": candidate_download.sha256,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": release_lang,
+                        "_pdf_language_unresolved": True,
+                    }
+                    prepared_variants.append(prepared)
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, existing)
+                    )
+                    continue
+                stored_pdf_language = stored_pdf_language_cache.get(str(attachment_url))
+                if stored_pdf_language is not None:
+                    language, language_evidence = stored_pdf_language
+                    prepared = {
+                        **variant,
+                        "pdf_language": language,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    prepared_variants.append(prepared)
+                    candidate_options.append((prepared, None, None, existing))
                     continue
                 try:
                     candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 except PdfAcquisitionError as exc:
+                    prepared_variants.append(variant)
                     failures[exc.code] = failures.get(exc.code, 0) + 1
                     continue
                 try:
@@ -987,67 +1365,215 @@ class OneCompanyEvidenceFlow:
                         candidate_download.content, max_pages=self.limits.max_pages
                     )
                 except Exception:
+                    prepared_variants.append(variant)
                     failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
                 if not candidate_extracted.pages:
+                    prepared_variants.append(variant)
                     failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
-                selected = variant
-                downloaded = candidate_download
-                extracted = candidate_extracted
-                break
-            if existing_canonical_source_url is not None:
-                for variant in variants:
-                    sibling_url = str(variant.get("source_url") or variant.get("url") or "")
-                    if sibling_url and sibling_url != existing_canonical_source_url:
-                        persist_evidence_sibling(
-                            self.conn,
-                            company_id=company_id,
-                            canonical_source_url=existing_canonical_source_url,
-                            sibling=variant,
+                pdf_first_pages = "\n".join(
+                    str(page.get("text") or "") for page in candidate_extracted.pages[:3]
+                )
+                release_lang = variant.get("lang") or variant.get("ingested_lang") or ""
+                pdf_language, language_evidence = resolve_document_language(
+                    filename=candidate_download.source_url,
+                    pdf_text=pdf_first_pages,
+                    release_title=str(variant.get("title") or ""),
+                    release_body=str(variant.get("content_text") or variant.get("body") or ""),
+                    release_lang=str(release_lang),
+                )
+                if not (
+                    pdf_language in {"en", "sv"}
+                    and _is_pdf_backed_language_evidence(language_evidence)
+                ):
+                    if release_lang.lower() not in {"en", "sv"}:
+                        prepared_variants.append(variant)
+                        failures["pdf_language_unresolved"] = (
+                            failures.get("pdf_language_unresolved", 0) + 1
                         )
-                continue
+                        continue
+                    prepared = {
+                        **variant,
+                        "pdf_language": "",
+                        "pdf_checksum": candidate_download.sha256,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": release_lang.lower(),
+                        "_pdf_language_unresolved": True,
+                    }
+                    prepared_variants.append(prepared)
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, None)
+                    )
+                    continue
+                prepared = {
+                    **variant,
+                    "pdf_language": pdf_language,
+                    "pdf_checksum": candidate_download.sha256,
+                    "language_evidence": language_evidence,
+                    "ingested_lang": pdf_language,
+                    "_pdf_language_unresolved": False,
+                }
+                if existing is not None and existing.get("canonical_source_url"):
+                    unresolved_existing_source_urls.discard(str(existing["canonical_source_url"]))
+                prepared_variants.append(prepared)
+                candidate_options.append((prepared, candidate_download, candidate_extracted, None))
+            variants = prepared_variants
+
+            def persist_option(
+                article: dict[str, Any],
+                candidate_download: PdfDownload,
+                candidate_extracted: Any,
+                siblings: list[dict[str, Any]],
+            ) -> None:
+                nonlocal language_fallback_count
+                if article.get("_pdf_language_unresolved"):
+                    language_fallback_count += 1
+                persist_evidence_document(
+                    self.conn,
+                    company_id=company_id,
+                    article=article,
+                    attachment={
+                        "source_url": candidate_download.source_url,
+                        "content_type": candidate_download.content_type,
+                        "byte_size": len(candidate_download.content),
+                        "sha256": candidate_download.sha256,
+                        "magic_valid": True,
+                        "http_status": candidate_download.http_status,
+                    },
+                    extraction={
+                        "extractor": "pypdf",
+                        "text_checksum": hashlib.sha256(
+                            candidate_extracted.text.encode("utf-8")
+                        ).hexdigest(),
+                        "page_count": candidate_extracted.page_count,
+                        "pages_included": candidate_extracted.pages_included,
+                        "page_truncated": candidate_extracted.page_truncated,
+                        "scanned": candidate_extracted.scanned,
+                        "limitations": candidate_extracted.limitations,
+                    },
+                    pages=list(candidate_extracted.pages),
+                    suppressed_variants=siblings,
+                )
+
+            selected_existing = None
+            if candidate_options:
+                selected, downloaded, extracted, selected_existing = sorted(
+                    candidate_options,
+                    key=lambda option: (
+                        0 if option[0].get("pdf_language") == "en" else 1,
+                        str(option[0].get("source_url") or option[0].get("url") or ""),
+                    ),
+                )[0]
+                if selected_existing is not None:
+                    existing_canonical_source_url = str(selected_existing["canonical_source_url"])
+                    if (
+                        selected.get("_persisted_evidence")
+                        and downloaded is not None
+                        and extracted is not None
+                    ):
+                        persist_option(
+                            _prepare_selected_article(selected, downloaded, extracted),
+                            downloaded,
+                            extracted,
+                            [],
+                        )
+                    successful_variants = {id(option[0]) for option in candidate_options}
+                    for option in candidate_options:
+                        if option[0] is selected:
+                            continue
+                        relation = _variant_relationship(selected, option[0])
+                        if relation in {"TRANSLATION", "REVISION"}:
+                            persist_evidence_sibling(
+                                self.conn,
+                                company_id=company_id,
+                                canonical_source_url=existing_canonical_source_url,
+                                sibling={**option[0], "relationship": relation},
+                            )
+                        elif option[3] is None and option[1] is not None and option[2] is not None:
+                            independent_article = _prepare_selected_article(
+                                option[0], option[1], option[2]
+                            )
+                            independent_article = {
+                                key: value
+                                for key, value in independent_article.items()
+                                if key
+                                not in {
+                                    "_bilingual_group_id",
+                                    "bilingual_selection_rule",
+                                    "relationship",
+                                    "duplicate_of",
+                                    "ingest_status",
+                                    "_suppressed_variants",
+                                }
+                            }
+                            persist_option(independent_article, option[1], option[2], [])
+                            result.downloaded += 1
+                    for variant in variants:
+                        if id(variant) in successful_variants or variant is selected:
+                            continue
+                        relation = _variant_relationship(selected, variant)
+                        if relation in {"TRANSLATION", "REVISION"}:
+                            persist_evidence_sibling(
+                                self.conn,
+                                company_id=company_id,
+                                canonical_source_url=existing_canonical_source_url,
+                                sibling={**variant, "relationship": relation},
+                            )
+                    continue
             if selected is None or downloaded is None or extracted is None:
                 for code, count in failures.items():
                     result.skipped[code] = result.skipped.get(code, 0) + count
                 continue
             selected_variant = selected
-            selected = {
-                **selected_variant,
-                "ingested_lang": selected.get("lang") or selected.get("ingested_lang") or "en",
-                "observation_date": _observation_date(selected),
-                "observation_date_authoritative": any(
-                    selected.get(key) not in (None, "")
-                    for key in ("observation_date", "period_end", "report_period_end")
-                ),
-            }
-            persist_evidence_document(
-                self.conn,
-                company_id=company_id,
-                article=selected,
-                attachment={
-                    "source_url": downloaded.source_url,
-                    "content_type": downloaded.content_type,
-                    "byte_size": len(downloaded.content),
-                    "sha256": downloaded.sha256,
-                    "magic_valid": True,
-                    "http_status": downloaded.http_status,
-                },
-                extraction={
-                    "extractor": "pypdf",
-                    "text_checksum": hashlib.sha256(extracted.text.encode("utf-8")).hexdigest(),
-                    "page_count": extracted.page_count,
-                    "pages_included": extracted.pages_included,
-                    "page_truncated": extracted.page_truncated,
-                    "scanned": extracted.scanned,
-                    "limitations": extracted.limitations,
-                },
-                pages=list(extracted.pages),
-                suppressed_variants=[
-                    variant for variant in variants if variant is not selected_variant
-                ],
-            )
+            successful_variants = {id(option[0]) for option in candidate_options}
+            related_variants: list[dict[str, Any]] = []
+            independent_options: list[
+                tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]
+            ] = []
+            for option in candidate_options:
+                if option[0] is selected_variant:
+                    continue
+                relation = _variant_relationship(selected_variant, option[0])
+                if relation in {"TRANSLATION", "REVISION"}:
+                    related_variants.append({**option[0], "relationship": relation})
+                else:
+                    independent_options.append(option)
+            for variant in variants:
+                if id(variant) in successful_variants or variant is selected_variant:
+                    continue
+                relation = _variant_relationship(selected_variant, variant)
+                if relation in {"TRANSLATION", "REVISION"}:
+                    related_variants.append({**variant, "relationship": relation})
+
+            selected_article = _prepare_selected_article(selected_variant, downloaded, extracted)
+            persist_option(selected_article, downloaded, extracted, related_variants)
             result.downloaded += 1
+            for variant, candidate_download, candidate_extracted, existing in independent_options:
+                if (
+                    existing is not None
+                    or candidate_download is None
+                    or candidate_extracted is None
+                ):
+                    continue
+                independent_article = _prepare_selected_article(
+                    variant, candidate_download, candidate_extracted
+                )
+                independent_article = {
+                    key: value
+                    for key, value in independent_article.items()
+                    if key
+                    not in {
+                        "_bilingual_group_id",
+                        "bilingual_selection_rule",
+                        "relationship",
+                        "duplicate_of",
+                        "ingest_status",
+                        "_suppressed_variants",
+                    }
+                }
+                persist_option(independent_article, candidate_download, candidate_extracted, [])
+                result.downloaded += 1
         packet_limitations = [
             f"evidence_flow_{code}:{count}"
             for code, count in sorted(result.skipped.items())
@@ -1058,6 +1584,8 @@ class OneCompanyEvidenceFlow:
                 "not_yet_published_release",
             }
         ]
+        if language_fallback_count:
+            packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
         packet = build_frozen_evidence_packet(
             self.conn,
             company_id=company_id,
@@ -1065,6 +1593,7 @@ class OneCompanyEvidenceFlow:
             mapping=mapping,
             additional_limitations=packet_limitations,
             publication_cutoff=today.isoformat(),
+            excluded_source_urls=unresolved_existing_source_urls,
         )
         if not packet.get("sources"):
             if (
@@ -1115,7 +1644,7 @@ class OneCompanyEvidenceFlow:
                     message="canonical packet failed its self-hash or contains an invalid complete source",
                 )
             )
-        if shadow_citation is not None or shadow_missing_item is not None:
+        if shadow_citation is not None or shadow_missing_item is not None or shadow_variant_pairs:
             try:
                 from alphaforge.llm import run_shadow_signals
 
@@ -1125,6 +1654,7 @@ class OneCompanyEvidenceFlow:
                     claim=shadow_claim,
                     missing_item=shadow_missing_item,
                     specialist_requirement=shadow_specialist_requirement,
+                    variant_pairs=shadow_variant_pairs,
                     conn=self.conn,
                 )
             except Exception:

@@ -102,6 +102,30 @@ def report_kind(title: str) -> str | None:
     return None
 
 
+def document_type(title: str) -> str | None:
+    """Return the additive variant-identity document type for a report title.
+
+    This never changes :func:`report_kind` (which keeps its ``annual`` /
+    ``quarterly`` contract for the report filter and packets); it only keeps
+    year-end and annual reports distinguishable for variant grouping. A Q4
+    interim title without year-end markers maps to ``None`` so grouping falls
+    back to the existing ``report_kind`` behavior.
+    """
+    lower = " ".join(title.lower().split())
+    if any(term in lower for term in ("årsredovis", "annual report")):
+        return "ANNUAL_REPORT"
+    if any(term in lower for term in ("year-end report", "year end report", "bokslutskommunik")):
+        return "YEAR_END_REPORT"
+    quarter = re.search(r"\bq\s*([1-4])\b", lower)
+    if quarter and any(
+        word in lower for word in ("report", "rapport", "kommuniké", "interim", "delårs")
+    ):
+        if quarter.group(1) in {"1", "2", "3"}:
+            return f"INTERIM_Q{quarter.group(1)}"
+        return None
+    return None
+
+
 def is_report(title: str) -> bool:
     lower = " ".join(title.lower().split())
     if any(term in lower for term in ("report schedule", "rapportkalender", "financial calendar")):
