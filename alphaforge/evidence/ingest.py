@@ -411,7 +411,13 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     numeric_left = _numeric_key_figure_fingerprint(body_left)
     numeric_right = _numeric_key_figure_fingerprint(body_right)
     numeric_corroborator = bool(numeric_left and numeric_right and numeric_left == numeric_right)
-    if numeric_left and numeric_right and numeric_left != numeric_right and not shared_event:
+    if (
+        numeric_left
+        and numeric_right
+        and numeric_left != numeric_right
+        and not shared_event
+        and not shared_checksum
+    ):
         return False
     strong_corroborator |= numeric_corroborator
     if not shared_event and not shared_checksum and not numeric_corroborator:

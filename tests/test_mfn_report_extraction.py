@@ -305,6 +305,39 @@ def test_numeric_corroboration_requires_multiple_derived_signals():
     assert all("_suppressed_variants" not in document for document in selected)
 
 
+def test_shared_pdf_checksum_overrides_numeric_translation_mismatch():
+    docs = [
+        {
+            "title": "Acme Interim Report Q1 2025",
+            "source_url": "https://mfn.test/a/acme/en",
+            "content_text": "Revenue 100 MSEK; EBIT 10 MSEK.",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "published_at": "2025-05-01",
+            "pdf_checksum": "same-pdf",
+            "lang": "en",
+        },
+        {
+            "title": "Acme Delårsrapport Q1 2025",
+            "source_url": "https://mfn.test/a/acme/sv",
+            "content_text": "Revenue 100 MSEK; EBIT 11 MSEK.",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "published_at": "2025-05-01",
+            "pdf_checksum": "same-pdf",
+            "lang": "sv",
+        },
+    ]
+
+    selected = bilingual_dedupe(docs)
+
+    assert len(selected) == 1
+    assert selected[0]["lang"] == "en"
+    assert selected[0]["_suppressed_variants"][0]["lang"] == "sv"
+
+
 def test_identical_bilingual_pdf_checksums_are_both_auditable():
     conn = _connection()
     try:

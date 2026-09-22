@@ -1082,7 +1082,8 @@ class OneCompanyEvidenceFlow:
                 reason = NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
                 message = "all discovered releases are after the requested point-in-time cutoff"
             elif (
-                result.eligible
+                pre_cutoff_report
+                or result.eligible
                 or result.downloaded
                 or result.skipped.get("missing_pdf_attachment")
                 or result.skipped.get("missing_publication_timestamp")
