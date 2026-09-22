@@ -645,6 +645,7 @@ def upsert_mfn_issuer_mapping(
     discovery_source: str,
     verified_at: str | None = None,
     identity_evidence: dict[str, Any] | list[Any] | None = None,
+    reviewed: bool = False,
 ) -> int:
     """Persist an explicit MFN identity decision keyed by ``companies.id``.
 
@@ -658,6 +659,10 @@ def upsert_mfn_issuer_mapping(
         raise ValueError("a mapped MFN issuer requires slug, source_url, and verified_at")
     if status == "mapped" and not _has_structured_mfn_identity_evidence(identity_evidence):
         raise ValueError("a mapped MFN issuer requires structured provenance and reason")
+    if reviewed:
+        if not isinstance(identity_evidence, dict):
+            raise ValueError("a reviewed MFN issuer requires structured identity evidence")
+        identity_evidence = {**identity_evidence, "reviewed": True}
     evidence_json = (
         json.dumps(identity_evidence, ensure_ascii=False, sort_keys=True)
         if identity_evidence is not None
@@ -727,6 +732,12 @@ def get_mfn_mapping_review(conn: Any, company_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     result = dict(row)
+    raw_evidence = result.get("identity_evidence")
+    if isinstance(raw_evidence, str):
+        try:
+            result["identity_evidence"] = json.loads(raw_evidence)
+        except ValueError:
+            result["identity_evidence"] = None
     result["candidates"] = [
         dict(candidate)
         for candidate in conn.execute(

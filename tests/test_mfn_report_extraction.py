@@ -315,6 +315,45 @@ def test_revision_marker_groups_pair_and_preserves_revision_relationship():
     assert selected[0]["_suppressed_variants"][0]["relationship"] == "REVISION"
 
 
+def test_revision_joins_existing_translation_group():
+    docs = [
+        {
+            "title": "Acme Interim Report Q1 2025",
+            "source_url": "https://mfn.test/a/acme/en",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "provider_event_id": "acme-q1-2025",
+            "lang": "en",
+        },
+        {
+            "title": "Acme Delårsrapport Q1 2025",
+            "source_url": "https://mfn.test/a/acme/sv",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "provider_event_id": "acme-q1-2025",
+            "lang": "sv",
+        },
+        {
+            "title": "Acme Interim Report Q1 2025 correction",
+            "source_url": "https://mfn.test/a/acme/en-correction",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "provider_event_id": "acme-q1-2025",
+            "lang": "en",
+        },
+    ]
+
+    selected = bilingual_dedupe(docs)
+
+    assert len(selected) == 1
+    assert {
+        variant["relationship"] for variant in selected[0]["_suppressed_variants"]
+    } == {"TRANSLATION", "REVISION"}
+
+
 def test_shared_pdf_checksum_overrides_numeric_translation_mismatch():
     docs = [
         {
@@ -638,7 +677,7 @@ def test_pdf_first_pages_word_scoring_outranks_release_hint():
     assert evidence.startswith("pdf_text:")
 
 
-def test_pdf_language_falls_back_to_release_hint():
+def test_pdf_language_falls_back_to_release_hint_outside_authoritative_flow():
     language, evidence = resolve_document_language(
         filename="https://storage.mfn.test/uuid/q1.pdf",
         pdf_text="",

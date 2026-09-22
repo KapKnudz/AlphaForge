@@ -156,6 +156,20 @@ def _is_pdf_backed_language_evidence(value: Any) -> bool:
     return evidence == "filename" or evidence.startswith("pdf_text:")
 
 
+def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | None:
+    if existing is None or not existing.get("canonical_raw_metadata"):
+        return None
+    try:
+        metadata = json.loads(existing["canonical_raw_metadata"])
+    except (TypeError, ValueError):
+        return None
+    language = metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    evidence = metadata.get("language_evidence") if isinstance(metadata, dict) else None
+    if language in {"en", "sv"} and _is_pdf_backed_language_evidence(evidence):
+        return str(language), str(evidence)
+    return None
+
+
 def _prepare_selected_article(
     variant: dict[str, Any], downloaded: PdfDownload, extracted: Any
 ) -> dict[str, Any]:
@@ -168,12 +182,20 @@ def _prepare_selected_article(
         release_body=str(variant.get("content_text") or variant.get("body") or ""),
         release_lang=str(release_lang),
     )
+    authoritative_language = (
+        pdf_language
+        if pdf_language in {"en", "sv"}
+        and _is_pdf_backed_language_evidence(language_evidence)
+        else ""
+    )
     return {
         **variant,
-        "pdf_language": pdf_language,
+        "pdf_language": authoritative_language,
         "pdf_checksum": downloaded.sha256,
         "language_evidence": language_evidence,
-        "ingested_lang": pdf_language or release_lang or "en",
+        "ingested_lang": authoritative_language
+        or (release_lang if variant.get("_pdf_language_unresolved") else ""),
+        "_pdf_language_unresolved": not bool(authoritative_language),
         "document_type": variant.get("document_type")
         or document_type(str(variant.get("title") or "")),
         "period_start": variant.get("period_start")
@@ -857,7 +879,14 @@ class OneCompanyEvidenceFlow:
             # later exact-identifier discovery is queued as candidates, never
             # applied. Fresh discovery keeps working for never-reviewed issuers.
             review = get_mfn_mapping_review(self.conn, company_id)
-            if review is not None and review.get("status") == "ambiguous":
+            reviewed_evidence = review.get("identity_evidence") if review is not None else None
+            is_reviewed_ambiguous = (
+                review is not None
+                and review.get("status") == "ambiguous"
+                and isinstance(reviewed_evidence, dict)
+                and reviewed_evidence.get("reviewed") is True
+            )
+            if is_reviewed_ambiguous:
                 try:
                     resolution = self.resolver.discover(company)
                 except MfnIssuerAcquisitionError as exc:
@@ -1122,6 +1151,8 @@ class OneCompanyEvidenceFlow:
 
         ingestion = ResearchDocumentIngestionService(self.conn)
         resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
+        indeterminate_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
+        stored_pdf_language_cache: dict[str, tuple[str, str]] = {}
         unresolved_existing_source_urls: set[str] = set()
 
         def mark_pdf_language_unresolved(
@@ -1145,16 +1176,41 @@ class OneCompanyEvidenceFlow:
             existing = find_complete_evidence_attachment(
                 self.conn, str(attachment_url), company_id
             )
+            stored_pdf_language = _stored_pdf_language(existing)
             try:
                 candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 candidate_extracted = ingestion.extract_pdf_pages(
                     candidate_download.content, max_pages=self.limits.max_pages
                 )
             except Exception:
-                mark_pdf_language_unresolved(index, candidate, existing)
+                if stored_pdf_language is not None:
+                    language, evidence = stored_pdf_language
+                    identity_candidates[index] = {
+                        **candidate,
+                        "pdf_language": language,
+                        "language_evidence": evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                else:
+                    mark_pdf_language_unresolved(index, candidate, existing)
                 continue
             if not candidate_extracted.pages:
-                mark_pdf_language_unresolved(index, candidate, existing)
+                if stored_pdf_language is not None:
+                    language, evidence = stored_pdf_language
+                    identity_candidates[index] = {
+                        **candidate,
+                        "pdf_language": language,
+                        "language_evidence": evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                else:
+                    mark_pdf_language_unresolved(index, candidate, existing)
                 continue
             pdf_first_pages = "\n".join(
                 str(page.get("text") or "") for page in candidate_extracted.pages[:3]
@@ -1167,12 +1223,24 @@ class OneCompanyEvidenceFlow:
                 release_body=str(candidate.get("content_text") or candidate.get("body") or ""),
                 release_lang=str(release_lang),
             )
+            if not (
+                pdf_language in {"en", "sv"}
+                and _is_pdf_backed_language_evidence(language_evidence)
+            ):
+                indeterminate_pdf_cache[str(attachment_url)] = (
+                    candidate_download,
+                    candidate_extracted,
+                    release_lang,
+                    language_evidence,
+                )
+                mark_pdf_language_unresolved(index, candidate, existing)
+                continue
             resolved = {
                 **candidate,
                 "pdf_language": pdf_language,
                 "pdf_checksum": candidate_download.sha256,
                 "language_evidence": language_evidence,
-                "ingested_lang": pdf_language or release_lang or "en",
+                "ingested_lang": pdf_language,
                 "_pdf_language_unresolved": False,
             }
             identity_candidates[index] = resolved
@@ -1233,6 +1301,42 @@ class OneCompanyEvidenceFlow:
                         (prepared, candidate_download, candidate_extracted, existing)
                     )
                     continue
+                indeterminate_pdf = indeterminate_pdf_cache.get(str(attachment_url))
+                if indeterminate_pdf is not None:
+                    candidate_download, candidate_extracted, release_lang, language_evidence = (
+                        indeterminate_pdf
+                    )
+                    prepared = {
+                        **variant,
+                        "pdf_language": "",
+                        "pdf_checksum": candidate_download.sha256,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": release_lang,
+                        "_pdf_language_unresolved": True,
+                    }
+                    if existing is not None and existing.get("canonical_source_url"):
+                        unresolved_existing_source_urls.discard(
+                            str(existing["canonical_source_url"])
+                        )
+                    prepared_variants.append(prepared)
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, existing)
+                    )
+                    continue
+                stored_pdf_language = stored_pdf_language_cache.get(str(attachment_url))
+                if stored_pdf_language is not None:
+                    language, language_evidence = stored_pdf_language
+                    prepared = {
+                        **variant,
+                        "pdf_language": language,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": language,
+                        "lang": language,
+                        "_pdf_language_unresolved": False,
+                    }
+                    prepared_variants.append(prepared)
+                    candidate_options.append((prepared, None, None, existing))
+                    continue
                 try:
                     candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 except PdfAcquisitionError as exc:
@@ -1262,12 +1366,31 @@ class OneCompanyEvidenceFlow:
                     release_body=str(variant.get("content_text") or variant.get("body") or ""),
                     release_lang=str(release_lang),
                 )
+                if not (
+                    pdf_language in {"en", "sv"}
+                    and _is_pdf_backed_language_evidence(language_evidence)
+                ):
+                    prepared = {
+                        **variant,
+                        "pdf_language": "",
+                        "pdf_checksum": candidate_download.sha256,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": release_lang,
+                        "_pdf_language_unresolved": True,
+                    }
+                    if existing is not None and existing.get("canonical_source_url"):
+                        unresolved_existing_source_urls.discard(
+                            str(existing["canonical_source_url"])
+                        )
+                    prepared_variants.append(prepared)
+                    candidate_options.append((prepared, candidate_download, candidate_extracted, None))
+                    continue
                 prepared = {
                     **variant,
                     "pdf_language": pdf_language,
                     "pdf_checksum": candidate_download.sha256,
                     "language_evidence": language_evidence,
-                    "ingested_lang": pdf_language or release_lang or "en",
+                    "ingested_lang": pdf_language,
                     "_pdf_language_unresolved": False,
                 }
                 if existing is not None and existing.get("canonical_source_url"):

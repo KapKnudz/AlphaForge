@@ -664,13 +664,18 @@ def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         matches = [
             index
             for index, variants in enumerate(groups)
-            if len(variants) == 1
-            and _variant_relationship(doc, variants[0]) in {"TRANSLATION", "REVISION"}
+            if any(
+                _variant_relationship(doc, variant) in {"TRANSLATION", "REVISION"}
+                for variant in variants
+            )
         ]
-        if len(matches) == 1:
-            groups[matches[0]].append(doc)
-        else:
+        if not matches:
             groups.append([doc])
+            continue
+        target = matches[0]
+        groups[target].append(doc)
+        for index in reversed(matches[1:]):
+            groups[target].extend(groups.pop(index))
 
     selection_rule = "deterministic_en_fallback"
     out: list[dict[str, Any]] = []

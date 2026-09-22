@@ -872,6 +872,18 @@ class _ExactMatchResolver:
     def discover(self, company, **kwargs):
         return IssuerResolution("mapped", (self.candidate,), self.candidate, "2026-09-20T00:00:00Z")
 
+    def persist_resolution(self, conn, company, resolution):
+        upsert_mfn_issuer_mapping(
+            conn,
+            int(company["id"]),
+            status="mapped",
+            mfn_slug=self.candidate["mfn_slug"],
+            source_url=self.candidate["source_url"],
+            discovery_source="mfn_search_or_index",
+            verified_at=resolution.verified_at,
+            identity_evidence=self.candidate["identity_evidence"],
+        )
+
 
 def _ambiguous_company(conn):
     company_id = upsert_company(conn, {"insId": 7004, "name": "Reviewed AB", "ticker": "REVW"})
@@ -881,9 +893,39 @@ def _ambiguous_company(conn):
         status="ambiguous",
         discovery_source="operator_review",
         identity_evidence={"provenance": "operator", "reason": "two similar issuer pages"},
+        reviewed=True,
     )
     conn.commit()
     return company_id
+
+
+def test_automatic_ambiguous_mapping_allows_fresh_exact_discovery():
+    conn = _connection()
+    company_id = upsert_company(conn, {"insId": 7005, "name": "Automatic AB", "ticker": "AUTO"})
+    upsert_mfn_issuer_mapping(
+        conn,
+        company_id,
+        status="ambiguous",
+        discovery_source="mfn_search_or_index",
+        identity_evidence={"provenance": "automatic", "reason": "two candidates"},
+    )
+    candidate = {
+        "mfn_slug": "all/a/automatic",
+        "source_url": "https://mfn.test/all/a/automatic",
+        "match_basis": "exact_ticker",
+        "identity_evidence": {"provenance": "exact", "reason": "ticker match", "ticker": "AUTO"},
+    }
+
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([]),
+        resolver=_ExactMatchResolver(candidate),
+    ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "no_evidence"
+    mapping = get_verified_mfn_mapping(conn, company_id)
+    assert mapping is not None
+    assert mapping["mfn_slug"] == "all/a/automatic"
 
 
 def test_reviewed_ambiguous_mapping_blocks_fresh_exact_discovery():
