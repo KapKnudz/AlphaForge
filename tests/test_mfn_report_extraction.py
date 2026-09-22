@@ -719,6 +719,65 @@ def test_numeric_corroboration_survives_unit_wording():
     assert _numeric_similarity((), ()) == 0.0
 
 
+def test_swedish_currency_shorthands_map_to_currency():
+    for shorthand in ("Mkr", "mkr", "kr", "KR", "kronor", "Kronor", "tkr", "Tkr", "mdr", "Mdr"):
+        left = _numeric_key_figure_fingerprint(f"Belopp 100 {shorthand} och 200 {shorthand}.")
+        right = _numeric_key_figure_fingerprint("Amount 100 SEK and 200 SEK.")
+        assert left == ("100|currency", "200|currency"), (
+            f"shorthand {shorthand!r} did not map to currency: {left}"
+        )
+        assert right == ("100|currency", "200|currency")
+        assert _numeric_similarity(left, right) == 1.0
+
+
+def test_live_clas_ohlson_mfn_body_formatting_groups_as_translation():
+    sv_body = (
+        "Nettoomsättningen uppgick till 3 278 Mkr (2 814), en ökning med 16 procent. "
+        "Rörelseresultatet uppgick till 393 Mkr (278). "
+        "Resultat per aktie 4,75 kr (3,27). "
+        "Försäljning 734 Mkr (542). "
+        "Fritt kassaflöde 363 miljoner kronor (306)."
+    )
+    en_body = (
+        "Net sales amounted to 3,278 MSEK (2,814), an increase of 16%. "
+        "Operating profit amounted to 393 MSEK (278). "
+        "Earnings per share 4.75 SEK (3.27). "
+        "Sales 734 MSEK (542). "
+        "Free cash flow 363 MSEK (306)."
+    )
+    sv_fp = _numeric_key_figure_fingerprint(sv_body)
+    en_fp = _numeric_key_figure_fingerprint(en_body)
+    assert sv_fp and en_fp
+    assert _numeric_similarity(sv_fp, en_fp) >= 0.5
+    docs = [
+        {
+            "title": "Clas Ohlson delårsrapport Q1 2026/2027",
+            "source_url": "https://mfn.se/a/clas-ohlson/clas-ohlsons-delarsrapport-q1-2026-2027",
+            "published_at": "2026-09-03T07:00:00Z",
+            "content_text": sv_body,
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "sv",
+        },
+        {
+            "title": "Clas Ohlson Interim report Q1 2026/27",
+            "source_url": "https://mfn.se/a/clas-ohlson/clas-ohlson-interim-report-q1-2026-27",
+            "published_at": "2026-09-03T07:00:00Z",
+            "content_text": en_body,
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "en",
+        },
+    ]
+    selected = bilingual_dedupe(docs)
+    assert len(selected) == 1
+    assert selected[0]["lang"] == "en"
+    assert selected[0]["bilingual_selection_rule"] == "deterministic_en_fallback"
+    suppressed = selected[0]["_suppressed_variants"][0]
+    assert suppressed["lang"] == "sv"
+    assert suppressed["relationship"] == "TRANSLATION"
+
+
 def test_pdf_filename_markers_outrank_release_hint():
     language, evidence = resolve_document_language(
         filename="https://storage.mfn.test/uuid/interim-report-q1-english.pdf",
