@@ -53,10 +53,18 @@ group, selection-rule, and relationship audit record, surfaced in the packet as
 
 Document language is decided from the PDF itself — attachment-filename markers,
 then word scoring over the first three extracted pages — and outranks MFN
-release-language metadata; the evidence and source used are stored as
-`pdf_language` / `language_evidence`. Identity dates (`period_start` /
-`period_end`) are resolved once per article from provider metadata or the
-release body and carried into packet sources next to `observation_date`.
+release-language metadata. PDF word scoring requires at least
+`PDF_LANGUAGE_MIN_HITS = 2` hits for one language; an empty extraction records
+`pdf_text_empty`, below-threshold non-ties record
+`pdf_text_insufficient:sv=N,en=N`, and equal qualifying counts record
+`pdf_text_tie:sv=N,en=N`. When PDF evidence is indeterminate, an MFN release
+hint may remain an explicit fallback as `release_hint:<case>`, never as PDF
+verification; fallback documents remain outside automatic language-based
+grouping and add `pdf_language_fallback:N` to packet limitations. The evidence
+and source used are stored as `pdf_language` / `language_evidence`. Identity
+dates (`period_start` / `period_end`) are resolved once per article from
+provider metadata or the release body and carried into packet sources next to
+`observation_date`.
 
 An explicit `observation_date`, `period_end`, or `report_period_end` is used
 first. Otherwise the flow extracts an unambiguous covered-period end date from

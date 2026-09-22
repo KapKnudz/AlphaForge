@@ -16,6 +16,7 @@ from alphaforge.db.repositories import (
     persist_evidence_sibling,
 )
 from alphaforge.evidence.ingest import (
+    PDF_LANGUAGE_MIN_HITS,
     ResearchDocumentIngestionService,
     _document_type_for_identity,
     _language,
@@ -354,6 +355,36 @@ def test_revision_joins_existing_translation_group():
     } == {"TRANSLATION", "REVISION"}
 
 
+def test_unresolved_pdf_languages_never_merge_as_revision_or_translation():
+    original = {
+        "title": "Acme Interim Report Q1 2025",
+        "source_url": "https://mfn.test/a/acme/en",
+        "mfn_slug": "acme",
+        "report_kind": "quarterly",
+        "fiscal_period": "Q1 2025",
+        "provider_event_id": "acme-q1-2025",
+        "lang": "en",
+        "_pdf_language_unresolved": True,
+    }
+    corrected = {
+        **original,
+        "title": "Acme Interim Report Q1 2025 correction",
+        "source_url": "https://mfn.test/a/acme/en-correction",
+    }
+    selected = bilingual_dedupe([original, corrected])
+    assert len(selected) == 2
+    assert all("_suppressed_variants" not in document for document in selected)
+
+    translated = {
+        **original,
+        "title": "Acme Delårsrapport Q1 2025",
+        "source_url": "https://mfn.test/a/acme/sv",
+        "lang": "sv",
+    }
+    selected = bilingual_dedupe([original, translated])
+    assert len(selected) == 2
+
+
 def test_shared_pdf_checksum_overrides_numeric_translation_mismatch():
     docs = [
         {
@@ -683,6 +714,23 @@ def test_pdf_language_falls_back_to_release_hint_outside_authoritative_flow():
         pdf_text="",
         release_lang="sv",
     )
-    assert (language, evidence) == ("sv", "release_hint")
+    assert language == "sv"
+    assert evidence == "release_hint:pdf_text_empty"
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/q1.pdf",
+        pdf_text="Revenue",
+        release_lang="sv",
+    )
+    assert language == "sv"
+    assert evidence == "release_hint:pdf_text_insufficient:sv=0,en=1"
+    tie_text = "the and och att"
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/q1.pdf",
+        pdf_text=tie_text,
+        release_lang="sv",
+    )
+    assert language == "sv"
+    assert evidence == "release_hint:pdf_text_tie:sv=2,en=2"
+    assert PDF_LANGUAGE_MIN_HITS == 2
     assert _language({"title": "Acme Interim Report", "pdf_language": "sv"}) == "sv"
     assert _language({"title": "Acme Interim Report", "lang": "en"}) == "en"

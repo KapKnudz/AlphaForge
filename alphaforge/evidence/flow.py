@@ -552,6 +552,7 @@ def build_frozen_evidence_packet(
     ).fetchall()
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
+    fallback_source_count = 0
     excluded_source_urls = excluded_source_urls or set()
     for row in rows:
         if str(row["source_url"]) in excluded_source_urls:
@@ -612,6 +613,9 @@ def build_frozen_evidence_packet(
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
         )
+        language_evidence = str(raw_metadata.get("language_evidence") or "")
+        if language_evidence.startswith("release_hint:"):
+            fallback_source_count += 1
         source_language = row["ingested_lang"] or raw_metadata.get("language") or "en"
         source = {
             "source_id": source_id,
@@ -676,6 +680,8 @@ def build_frozen_evidence_packet(
     sources.sort(
         key=lambda source: (source["publication_date"], source["source_url"], source["source_id"])
     )
+    if fallback_source_count:
+        limitations.add(f"pdf_language_fallback:{fallback_source_count}")
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
@@ -1230,12 +1236,13 @@ class OneCompanyEvidenceFlow:
                 pdf_language in {"en", "sv"}
                 and _is_pdf_backed_language_evidence(language_evidence)
             ):
-                indeterminate_pdf_cache[str(attachment_url)] = (
-                    candidate_download,
-                    candidate_extracted,
-                    release_lang,
-                    language_evidence,
-                )
+                if release_lang.lower() in {"en", "sv"}:
+                    indeterminate_pdf_cache[str(attachment_url)] = (
+                        candidate_download,
+                        candidate_extracted,
+                        release_lang.lower(),
+                        language_evidence,
+                    )
                 mark_pdf_language_unresolved(index, candidate, existing)
                 continue
             resolved = {
@@ -1259,6 +1266,7 @@ class OneCompanyEvidenceFlow:
         shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
+        language_fallback_count = 0
         for article in deduped:
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
@@ -1317,10 +1325,6 @@ class OneCompanyEvidenceFlow:
                         "ingested_lang": release_lang,
                         "_pdf_language_unresolved": True,
                     }
-                    if existing is not None and existing.get("canonical_source_url"):
-                        unresolved_existing_source_urls.discard(
-                            str(existing["canonical_source_url"])
-                        )
                     prepared_variants.append(prepared)
                     candidate_options.append(
                         (prepared, candidate_download, candidate_extracted, existing)
@@ -1373,18 +1377,20 @@ class OneCompanyEvidenceFlow:
                     pdf_language in {"en", "sv"}
                     and _is_pdf_backed_language_evidence(language_evidence)
                 ):
+                    if release_lang.lower() not in {"en", "sv"}:
+                        prepared_variants.append(variant)
+                        failures["pdf_language_unresolved"] = (
+                            failures.get("pdf_language_unresolved", 0) + 1
+                        )
+                        continue
                     prepared = {
                         **variant,
                         "pdf_language": "",
                         "pdf_checksum": candidate_download.sha256,
                         "language_evidence": language_evidence,
-                        "ingested_lang": release_lang,
+                        "ingested_lang": release_lang.lower(),
                         "_pdf_language_unresolved": True,
                     }
-                    if existing is not None and existing.get("canonical_source_url"):
-                        unresolved_existing_source_urls.discard(
-                            str(existing["canonical_source_url"])
-                        )
                     prepared_variants.append(prepared)
                     candidate_options.append((prepared, candidate_download, candidate_extracted, None))
                     continue
@@ -1410,6 +1416,9 @@ class OneCompanyEvidenceFlow:
                 candidate_extracted: Any,
                 siblings: list[dict[str, Any]],
             ) -> None:
+                nonlocal language_fallback_count
+                if article.get("_pdf_language_unresolved"):
+                    language_fallback_count += 1
                 persist_evidence_document(
                     self.conn,
                     company_id=company_id,
@@ -1565,6 +1574,8 @@ class OneCompanyEvidenceFlow:
                 "not_yet_published_release",
             }
         ]
+        if language_fallback_count:
+            packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
         packet = build_frozen_evidence_packet(
             self.conn,
             company_id=company_id,

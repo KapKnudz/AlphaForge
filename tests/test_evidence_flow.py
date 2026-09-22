@@ -370,6 +370,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
+    assert "pdf_language_fallback:1" in first.packet["limitations"]
     evidence_job = conn.execute(
         "SELECT status, error, attempt, started_at, finished_at FROM jobs WHERE job_type='evidence' AND company_id=?",
         (company_id,),
@@ -381,9 +382,9 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert evidence_job[4] is not None
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         second = flow.run(company_id, as_of="2026-09-20")
-    assert second.status == "complete"
+    assert second.status == "no_evidence"
     assert second.downloaded == 0
-    assert second.packet_hash == first.packet_hash
+    assert second.packet is None
     second_scrape_urls = {entry["url"] for entry in scraper.scrape_calls[-1]}
     assert "https://mfn.test/a/flow/q1" not in second_scrape_urls
     assert second_scrape_urls == {

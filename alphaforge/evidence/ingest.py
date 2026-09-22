@@ -24,10 +24,15 @@ def _detect_lang(text: str) -> tuple[str, float]:
     return ("en", 0.6)
 
 
+def _language_unresolved(doc: dict[str, Any]) -> bool:
+    evidence = str(doc.get("language_evidence") or "")
+    return bool(doc.get("_pdf_language_unresolved")) or evidence.startswith("release_hint:")
+
+
 def _language(doc: dict[str, Any], pdf_language: str | None = None) -> str:
     # The PDF itself outranks MFN release-language metadata: an explicit PDF
     # decision (filename marker or first-pages word scoring) always wins.
-    if doc.get("_pdf_language_unresolved"):
+    if _language_unresolved(doc):
         return ""
     pdf = (pdf_language or doc.get("pdf_language") or "").lower()
     if pdf in {"sv", "en"}:
@@ -59,6 +64,8 @@ EN_PDF_WORDS = (
     "profit",
     "million",
 )
+PDF_LANGUAGE_MIN_HITS = 2
+
 SV_PDF_WORDS = (
     "och",
     "att",
@@ -97,17 +104,19 @@ def _word_hits(text: str, words: tuple[str, ...]) -> int:
 
 
 def _detect_pdf_language(text: str) -> tuple[str, str]:
-    """Score first-pages PDF text; return ("", evidence) when indeterminate."""
+    """Decide PDF language from first-page word hits or return a named fallback case."""
     if not str(text or "").strip():
         return "", "pdf_text_empty"
     sv_hits = _word_hits(text, SV_PDF_WORDS)
     en_hits = _word_hits(text, EN_PDF_WORDS)
+    if max(sv_hits, en_hits) < PDF_LANGUAGE_MIN_HITS:
+        return "", f"pdf_text_insufficient:sv={sv_hits},en={en_hits}"
+    if sv_hits == en_hits:
+        return "", f"pdf_text_tie:sv={sv_hits},en={en_hits}"
     evidence = f"pdf_text:sv={sv_hits},en={en_hits}"
-    if sv_hits >= 2 and sv_hits > en_hits:
+    if sv_hits > en_hits:
         return "sv", evidence
-    if en_hits >= 2 and en_hits > sv_hits:
-        return "en", evidence
-    return "", evidence
+    return "en", evidence
 
 
 def resolve_document_language(
@@ -131,10 +140,11 @@ def resolve_document_language(
     pdf_lang, pdf_evidence = _detect_pdf_language(pdf_text)
     if pdf_lang:
         return pdf_lang, pdf_evidence
+    fallback_evidence = f"release_hint:{pdf_evidence}"
     if release_lang.lower() in {"sv", "en"}:
-        return release_lang.lower(), "release_hint"
+        return release_lang.lower(), fallback_evidence
     detected, _confidence = _detect_lang(f"{release_title} {release_body}".strip())
-    return detected, "release_hint"
+    return detected, fallback_evidence
 
 
 def _attachment_filename(doc: dict[str, Any]) -> str:
@@ -560,6 +570,8 @@ def _variant_relationship(left: dict[str, Any], right: dict[str, Any]) -> str:
     period_left = _fiscal_period(left)
     same_period = bool(period_left) and period_left == _fiscal_period(right)
     if same_issuer and same_kind and same_period:
+        if _language_unresolved(left) or _language_unresolved(right):
+            return "DIFFERENT_REPORT"
         if _language(left) == _language(right):
             if _has_revision_markers(left) or _has_revision_markers(right):
                 return "REVISION"
