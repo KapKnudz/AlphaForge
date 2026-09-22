@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
-from alphaforge.evidence.mfn_taxonomy import is_report, report_kind
+from alphaforge.evidence.mfn_taxonomy import document_type, is_report, report_kind
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 
@@ -316,6 +316,7 @@ def _report_identity_seed(article: dict[str, Any]) -> dict[str, Any]:
     title = article.get("title") or ""
     return {
         "report_kind": article.get("report_kind") or report_kind(title),
+        "document_type": article.get("document_type") or document_type(title),
         "lang": article.get("lang") or _language_hint(title),
     }
 

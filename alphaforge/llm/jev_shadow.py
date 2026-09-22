@@ -18,7 +18,7 @@ from datetime import UTC, date, datetime
 from time import perf_counter
 from typing import Any, Literal
 
-from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
+from alphaforge.core.frozen_packet import packet_hash_matches, validate_frozen_packet
 
 CITATION_RELATION_CLASSES = (
     "supports",
@@ -34,11 +34,37 @@ MISSING_INFORMATION_CLASSES = (
 )
 CITATION_QUESTION_VERSION = "citation-relation-v1"
 MISSING_INFORMATION_QUESTION_VERSION = "missing-information-impact-v1"
+VARIANT_RELATION_QUESTION_VERSION = "variant-relation-v1"
 CRITERIA_VERSION = "jev-shadow-criteria-v1"
 PINNED_MODEL_VERSION = "jev-1.13.0"
 JEV_INPUT_COST_USD_PER_TOKEN = 0.042 / 1_000_000
 
-FeatureName = Literal["citation_relation", "missing_information"]
+VARIANT_RELATION_CLASSES = (
+    "translation",
+    "revision",
+    "different_report",
+    "uncertain",
+)
+
+FeatureName = Literal["citation_relation", "missing_information", "variant_relation"]
+
+
+def accept_variant_relation_decision(selected_class: str | None) -> str:
+    """Deterministic acceptance rule for shadow variant-relation hints.
+
+    This slice never auto-merges on a model answer: every outcome keeps the
+    pair separate so ambiguity fails safe. High-confidence hints are surfaced
+    in the evidence diagnostic only.
+    """
+    return "keep_separate"
+
+
+def _question_version_for(feature: FeatureName) -> str:
+    if feature == "citation_relation":
+        return CITATION_QUESTION_VERSION
+    if feature == "variant_relation":
+        return VARIANT_RELATION_QUESTION_VERSION
+    return MISSING_INFORMATION_QUESTION_VERSION
 
 
 @dataclass(frozen=True)
@@ -52,6 +78,7 @@ class JevShadowConfig:
     enabled: bool = False
     citation_relations: bool = False
     missing_information: bool = False
+    variant_relations: bool = False
     model_version: str = PINNED_MODEL_VERSION
     timeout_seconds: float = 5.0
     max_transport_retries: int = 1
@@ -60,6 +87,7 @@ class JevShadowConfig:
     max_cost_usd: float = 0.50
     citation_review_confidence: float = 0.80
     missing_information_review_confidence: float = 0.80
+    variant_relation_review_confidence: float = 0.80
 
     @classmethod
     def from_env(cls) -> JevShadowConfig:
@@ -69,6 +97,7 @@ class JevShadowConfig:
             enabled=_env_bool("ALPHAFORGE_JEV_SHADOW_ENABLED", False),
             citation_relations=_env_bool("ALPHAFORGE_JEV_CITATION_RELATIONS", False),
             missing_information=_env_bool("ALPHAFORGE_JEV_MISSING_INFORMATION", False),
+            variant_relations=_env_bool("ALPHAFORGE_JEV_VARIANT_RELATIONS", False),
             model_version=os.environ.get("ALPHAFORGE_JEV_MODEL", PINNED_MODEL_VERSION).strip()
             or PINNED_MODEL_VERSION,
             timeout_seconds=_env_float("ALPHAFORGE_JEV_TIMEOUT_SECONDS", 5.0, minimum=0.1),
@@ -81,6 +110,12 @@ class JevShadowConfig:
             ),
             missing_information_review_confidence=_env_float(
                 "ALPHAFORGE_JEV_MISSING_INFORMATION_REVIEW_CONFIDENCE",
+                0.80,
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            variant_relation_review_confidence=_env_float(
+                "ALPHAFORGE_JEV_VARIANT_RELATION_REVIEW_CONFIDENCE",
                 0.80,
                 minimum=0.0,
                 maximum=1.0,
@@ -214,8 +249,7 @@ def _packet_error(packet: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, "packet_not_object"
     packet_hash = packet.get("packet_hash")
     if isinstance(packet_hash, str) and packet_hash:
-        without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
-        if canonical_packet_hash(without_hash) != packet_hash:
+        if not packet_hash_matches(packet):
             return None, "packet_hash_mismatch"
     if not validate_frozen_packet(packet):
         return None, "packet_invalid"
@@ -353,6 +387,26 @@ def _missing_item_id(missing_item: Any) -> tuple[str | None, str | None]:
     return None, "missing_item_identity_invalid"
 
 
+def _variant_candidate_summary(candidate: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(candidate, Mapping):
+        return None, "variant_candidate_not_object"
+    summary = {
+        key: candidate.get(key)
+        for key in (
+            "company",
+            "language",
+            "type_guess",
+            "period_start",
+            "period_end",
+            "published_at",
+            "title",
+        )
+    }
+    if not summary["language"] or not summary["title"]:
+        return None, "variant_candidate_missing_language_or_title"
+    return summary, None
+
+
 def _estimate_input_tokens(state: Any, instructions: Any, criteria: Any) -> int:
     payload = json.dumps(
         {"state": state, "instructions": instructions, "criteria": criteria},
@@ -383,6 +437,26 @@ def _choice_question(feature: FeatureName) -> tuple[str, Any, tuple[str, ...], s
             "contradicts": "The cited source context conflicts with or refutes the claim.",
             "says_nothing": "The cited source context is relevant text but neither supports nor contradicts the claim.",
             "insufficient_context": "The supplied context is too incomplete or ambiguous to determine the relation.",
+        }
+    elif feature == "variant_relation":
+        question_id = "variant_relation"
+        question_version = VARIANT_RELATION_QUESTION_VERSION
+        labels = VARIANT_RELATION_CLASSES
+        instructions = {
+            "question_version": question_version,
+            "question": (
+                "Decide whether the two report candidates describe the same "
+                "reporting event using only the supplied metadata. Select "
+                "uncertain when the metadata does not distinguish the relation."
+            ),
+            "candidate_a_field": "`candidate_a`",
+            "candidate_b_field": "`candidate_b`",
+        }
+        criteria = {
+            "translation": "The candidates are Swedish and English editions of the same report for the same fiscal period.",
+            "revision": "One candidate corrects or revises the other for the same fiscal period.",
+            "different_report": "The candidates cover different reporting events or periods.",
+            "uncertain": "The metadata does not distinguish whether the candidates share a reporting event.",
         }
     else:
         question_id = "missing_information_impact"
@@ -561,6 +635,42 @@ class JevShadowSidecar:
             budget=budget,
         )
 
+    def classify_variant_relation(
+        self,
+        packet: dict[str, Any],
+        candidate_a: Mapping[str, Any],
+        candidate_b: Mapping[str, Any],
+        *,
+        budget: JevShadowBudget | None = None,
+    ) -> JevShadowResult:
+        """Shadow-only typed relation for a pair deterministic code left separate.
+
+        Never auto-merges: apply :func:`accept_variant_relation_decision` to
+        the outcome, which always keeps the pair separate in this slice.
+        """
+
+        def precheck(frozen: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+            summary_a, error_a = _variant_candidate_summary(candidate_a)
+            if error_a or summary_a is None:
+                return None, error_a
+            summary_b, error_b = _variant_candidate_summary(candidate_b)
+            if error_b or summary_b is None:
+                return None, error_b
+            return {"candidate_a": summary_a, "candidate_b": summary_b}, None
+
+        return self._classify(
+            feature="variant_relation",
+            packet=packet,
+            identity={},
+            precheck=precheck,
+            state_builder=lambda frozen, checked: {
+                "packet_hash": frozen["packet_hash"],
+                "candidate_a": checked["candidate_a"],
+                "candidate_b": checked["candidate_b"],
+            },
+            budget=budget,
+        )
+
     def _get_client(self) -> Any | None:
         if self.client is not None:
             return self.client
@@ -621,16 +731,13 @@ class JevShadowSidecar:
             not self.config.enabled
             or (feature == "citation_relation" and not self.config.citation_relations)
             or (feature == "missing_information" and not self.config.missing_information)
+            or (feature == "variant_relation" and not self.config.variant_relations)
         ):
             return self._finish(
                 feature,
                 packet_hash=packet.get("packet_hash") if isinstance(packet, dict) else None,
                 identity=identity,
-                question_version=(
-                    CITATION_QUESTION_VERSION
-                    if feature == "citation_relation"
-                    else MISSING_INFORMATION_QUESTION_VERSION
-                ),
+                question_version=_question_version_for(feature),
                 error_code="shadow_disabled",
                 status="disabled",
             )
@@ -655,11 +762,7 @@ class JevShadowSidecar:
                 feature,
                 packet_hash=frozen["packet_hash"],
                 identity={**identity, **({} if checked is None else checked)},
-                question_version=(
-                    CITATION_QUESTION_VERSION
-                    if feature == "citation_relation"
-                    else MISSING_INFORMATION_QUESTION_VERSION
-                ),
+                question_version=_question_version_for(feature),
                 error_code=precheck_error,
                 status="invalid_input",
             )
@@ -727,11 +830,12 @@ class JevShadowSidecar:
             ):
                 raise _JevResponseError("cost_budget_exceeded")
             latency_ms = round((perf_counter() - started) * 1000)
-            threshold = (
-                self.config.citation_review_confidence
-                if feature == "citation_relation"
-                else self.config.missing_information_review_confidence
-            )
+            if feature == "citation_relation":
+                threshold = self.config.citation_review_confidence
+            elif feature == "variant_relation":
+                threshold = self.config.variant_relation_review_confidence
+            else:
+                threshold = self.config.missing_information_review_confidence
             audit = self._audit(
                 feature=feature,
                 packet_hash=frozen["packet_hash"],
@@ -761,7 +865,7 @@ class JevShadowSidecar:
                 output_tokens=output_tokens,
                 review_required=(
                     confidence < threshold
-                    or selected in {"insufficient_context", "ambiguous_review"}
+                    or selected in {"insufficient_context", "ambiguous_review", "uncertain"}
                 ),
                 audit=audit,
             )
@@ -980,5 +1084,8 @@ __all__ = [
     "MISSING_INFORMATION_CLASSES",
     "MISSING_INFORMATION_QUESTION_VERSION",
     "PINNED_MODEL_VERSION",
+    "VARIANT_RELATION_CLASSES",
+    "VARIANT_RELATION_QUESTION_VERSION",
+    "accept_variant_relation_decision",
     "run_shadow_signals",
 ]

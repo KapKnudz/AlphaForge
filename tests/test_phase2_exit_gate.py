@@ -5,9 +5,20 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 
+from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.config import Settings
 from alphaforge.core.coverage.liquidity import PriceBar, build
+from alphaforge.core.frozen_packet import stable_packet_hash, validate_frozen_packet
 from alphaforge.core.ranking.engine import RankingEngine
 from alphaforge.core.types import RankingModel
+from alphaforge.db.connection import get_connection
+from alphaforge.db.migrations import migrate
+from alphaforge.db.repositories import (
+    persist_evidence_packet,
+    upsert_company,
+    upsert_financial_periods,
+    upsert_prices,
+)
 
 # --- Test fixtures ---
 
@@ -161,6 +172,129 @@ class TestGoldenPacketRoundTrip:
             ranking, "2026-01-01", RankingEngine.RANKING_MODEL_VERSION, tmp_path
         )
         assert json.loads(ranking_json_path.read_text())["evidence_packet_hash"] == packet_hash
+
+    def test_ranked_path_carries_packet_hash_on_eligible_score(self):
+        """R1 proof: the ranked loader path feeds evidence_packet_hash to scores."""
+        conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+        migrate(conn)
+        company_id = upsert_company(
+            conn,
+            {
+                "insId": 303,
+                "name": "Ranked Packet AB",
+                "ticker": "RPK",
+                "stockPriceCurrency": "SEK",
+                "reportCurrency": "SEK",
+            },
+        )
+        upsert_financial_periods(
+            conn,
+            company_id,
+            [
+                {
+                    "period_type": "year",
+                    "period_end": "2024-12-31",
+                    "report_Date": "2025-02-01T00:00:00",
+                    "revenues": 100,
+                    "operating_Income": 20,
+                    "profit_To_Equity_Holders": 10,
+                    "book_Value": 40,
+                    "number_Of_Shares": 10,
+                    "currency": "SEK",
+                },
+                {
+                    "period_type": "year",
+                    "period_end": "2025-12-31",
+                    "report_Date": "2026-02-01",
+                    "revenues": 200,
+                    "operating_Income": 40,
+                    "profit_To_Equity_Holders": 20,
+                    "book_Value": 80,
+                    "number_Of_Shares": 50,
+                    "currency": "SEK",
+                },
+            ],
+        )
+        upsert_prices(
+            conn,
+            company_id,
+            [
+                {"d": "2025-03-01T00:00:00", "c": 10, "v": 100},
+                {"d": "2026-03-01", "c": 20, "v": 100},
+            ],
+            currency="SEK",
+        )
+        text = "Evidence"
+        page = {
+            "page_number": 1,
+            "anchor": "document:1#page:1",
+            "text": text,
+            "text_checksum": hashlib.sha256(text.encode()).hexdigest(),
+        }
+        packet = {
+            "schema_version": "evidence-packet-v1",
+            "frozen": True,
+            "company_id": company_id,
+            "as_of": "2026-09-20",
+            "issuer": {
+                "mfn_slug": "all/a/rpk",
+                "source_url": "https://mfn.test/all/a/rpk",
+                "discovery_source": "fixture",
+                "verified_at": "2026-09-20T00:00:00Z",
+                "identity_evidence": None,
+            },
+            "sources": [
+                {
+                    "source_id": "document:1",
+                    "source_url": "https://mfn.test/a/rpk/en",
+                    "title": "Ranked Packet AB Annual Report 2025",
+                    "publication_date": "2026-03-01T00:00:00Z",
+                    "publication_timestamp_authoritative": True,
+                    "ingestion_date": "2026-09-20T01:00:00Z",
+                    "attachment": {
+                        "source_url": "https://storage.mfn.test/rpk.pdf",
+                        "sha256": "b" * 64,
+                    },
+                    "extraction": {
+                        "extractor": "pypdf",
+                        "text_checksum": hashlib.sha256(f"[page 1]\n{text}".encode()).hexdigest(),
+                        "page_count": 1,
+                    },
+                    "pages": [page],
+                }
+            ],
+            "evidence_catalog": {"canonical_source_ids": ["document:1"]},
+            "limitations": [],
+        }
+        packet["coverage_facts"] = {
+            "source_count": 1,
+            "source_ids": ["document:1"],
+            "report_kinds": [],
+            "languages": ["en"],
+            "limitations": [],
+        }
+        packet["packet_hash"] = stable_packet_hash(packet)
+        assert validate_frozen_packet(packet)
+        persist_evidence_packet(conn, company_id=company_id, as_of="2026-09-20", packet=packet)
+
+        results = load_results_for_company(conn, company_id, "2026-09-20")
+        assert (
+            results["research_evidence"]["evidence_packet"]["packet_hash"]
+            == (packet["packet_hash"])
+        )
+        company = MockCompany(id=company_id, name="Ranked Packet AB", ticker="RPK", branch_id=None)
+        ranking = RankingEngine().rank([company], {company.id: results})
+        (score,) = ranking.scores
+        assert score.rank_eligible
+        assert score.evidence_packet_hash == packet["packet_hash"]
+        inputs_summary = {
+            "evidence_packet_hashes": {
+                str(s.company_id): str(s.evidence_packet_hash)
+                for s in ranking.scores
+                if s.evidence_packet_hash
+            }
+        }
+        assert inputs_summary["evidence_packet_hashes"] == {str(company_id): packet["packet_hash"]}
 
     def test_packet_hash_reproducibility(self):
         """Packet hash is reproducible from same inputs."""

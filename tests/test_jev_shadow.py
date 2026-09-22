@@ -9,8 +9,10 @@ from alphaforge.core.frozen_packet import canonical_packet_hash
 from alphaforge.db.connection import get_connection, init_db
 from alphaforge.llm import (
     MISSING_INFORMATION_CLASSES,
+    VARIANT_RELATION_CLASSES,
     JevShadowConfig,
     JevShadowSidecar,
+    accept_variant_relation_decision,
 )
 
 LABELS = (
@@ -43,7 +45,12 @@ class FakeClient:
     def system_one(self, **kwargs):
         self.calls.append(kwargs)
         question_id = next(iter(kwargs["questions"]))
-        labels = LABELS if question_id == "citation_relation" else MISSING_INFORMATION_CLASSES
+        if question_id == "citation_relation":
+            labels = LABELS
+        elif question_id == "variant_relation":
+            labels = VARIANT_RELATION_CLASSES
+        else:
+            labels = MISSING_INFORMATION_CLASSES
         probabilities = dict.fromkeys(labels, 0.02)
         probabilities[self.label] = 0.94
         return Response(
@@ -56,6 +63,12 @@ class FakeClient:
                     "confidence": self.confidence,
                 },
                 "missing_information_impact": {
+                    "type": "choice",
+                    "choice": self.label,
+                    "probabilities": probabilities,
+                    "confidence": self.confidence,
+                },
+                "variant_relation": {
                     "type": "choice",
                     "choice": self.label,
                     "probabilities": probabilities,
@@ -327,3 +340,61 @@ def test_persisted_audit_is_append_only_and_contains_no_secret():
     assert "TYPESAFE_API_KEY" not in str(dict(row))
     with pytest.raises(Exception, match="append-only"):
         conn.execute("DELETE FROM jev_shadow_audit")
+
+
+def _variant_pair():
+    return (
+        {
+            "company": "Kinnevik",
+            "language": "en",
+            "type_guess": "INTERIM_Q2",
+            "period_start": "2026-01-01",
+            "period_end": "2026-06-30",
+            "published_at": "2026-07-18T07:30:00Z",
+            "title": "Kinnevik Interim Report Q2 2026",
+        },
+        {
+            "company": "Kinnevik",
+            "language": "sv",
+            "type_guess": "INTERIM_Q2",
+            "period_start": "2026-01-01",
+            "period_end": "2026-06-30",
+            "published_at": "2026-07-18T07:30:00Z",
+            "title": "Kinnevik delårsrapport Q2 2026",
+        },
+    )
+
+
+@pytest.mark.parametrize("label", ["translation", "revision", "different_report", "uncertain"])
+def test_variant_relation_is_shadow_only_and_never_merges(label: str):
+    candidate_a, candidate_b = _variant_pair()
+    client = FakeClient(label=label)
+    result = JevShadowSidecar(
+        config=_config(variant_relations=True), client=client
+    ).classify_variant_relation(_packet(), candidate_a, candidate_b)
+    assert result.status == "shadow_result"
+    assert result.selected_class == label
+    assert set(result.probabilities or {}) == set(VARIANT_RELATION_CLASSES)
+    assert result.deterministic_output_unchanged is True
+    assert result.audit["action"] == "shadow_only"
+    assert result.audit["question_version"] == "variant-relation-v1"
+    assert accept_variant_relation_decision(result.selected_class) == "keep_separate"
+    state = client.calls[0]["state"]
+    assert state["candidate_a"]["language"] == "en"
+    assert state["candidate_b"]["language"] == "sv"
+
+
+def test_variant_relation_accept_rule_keeps_everything_separate():
+    for label in (*VARIANT_RELATION_CLASSES, None, "unexpected"):
+        assert accept_variant_relation_decision(label) == "keep_separate"
+
+
+def test_variant_relation_stays_disabled_without_opt_in():
+    candidate_a, candidate_b = _variant_pair()
+    client = FakeClient(label="translation")
+    result = JevShadowSidecar(config=_config(), client=client).classify_variant_relation(
+        _packet(), candidate_a, candidate_b
+    )
+    assert result.status == "disabled"
+    assert result.error_code == "shadow_disabled"
+    assert client.calls == []

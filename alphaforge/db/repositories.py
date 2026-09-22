@@ -869,6 +869,10 @@ def persist_evidence_sibling(
     metadata["bilingual_selection_rule"] = sibling.get(
         "bilingual_selection_rule", "deterministic_en_fallback"
     )
+    metadata["relationship"] = sibling.get("relationship") or "TRANSLATION"
+    for key in ("document_type", "period_start", "period_end", "pdf_language", "language_evidence"):
+        if sibling.get(key) is not None:
+            metadata[key] = sibling[key]
     conn.execute(
         """
         INSERT INTO research_documents
@@ -986,11 +990,15 @@ def persist_evidence_document(
     for key in (
         "mfn_slug",
         "report_kind",
+        "document_type",
         "report_period",
         "fiscal_period",
+        "period_start",
         "period_end",
         "report_period_end",
         "lang_confidence",
+        "pdf_language",
+        "language_evidence",
         "_bilingual_group_id",
     ):
         if article.get(key) is not None:
@@ -1142,6 +1150,16 @@ def persist_evidence_document(
             if sibling.get("_bilingual_group_id") is not None:
                 sibling_meta["bilingual_group_id"] = sibling["_bilingual_group_id"]
             sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
+            sibling_meta["relationship"] = sibling.get("relationship") or "TRANSLATION"
+            for key in (
+                "document_type",
+                "period_start",
+                "period_end",
+                "pdf_language",
+                "language_evidence",
+            ):
+                if sibling.get(key) is not None:
+                    sibling_meta[key] = sibling[key]
             sibling_checksum = sibling.get("pdf_checksum") or sibling.get("attachment_checksum")
             conn.execute(
                 """

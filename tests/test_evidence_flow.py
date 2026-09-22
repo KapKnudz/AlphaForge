@@ -27,10 +27,15 @@ from alphaforge.evidence.flow import (
     NoEvidenceReason,
     OneCompanyEvidenceFlow,
     _observation_date,
+    build_frozen_evidence_packet,
     download_pdf,
     validate_frozen_packet,
 )
-from alphaforge.providers.mfn.issuer import MfnIssuerResolver, parse_mfn_company_search_candidates
+from alphaforge.providers.mfn.issuer import (
+    IssuerResolution,
+    MfnIssuerResolver,
+    parse_mfn_company_search_candidates,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mfn"
 
@@ -527,6 +532,16 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     assert packet["sources"][0]["bilingual_siblings"][0]["language"] == "sv"
     assert "scanned_pdf_no_ocr" in packet["limitations"]
     assert "page_resource_limit" in packet["limitations"]
+    source = packet["sources"][0]
+    assert source["selection_state"] == "selected"
+    assert source["selection_reason"] == "PREFERRED_LANGUAGE"
+    assert source["variant_group_id"]
+    sibling = source["bilingual_siblings"][0]
+    assert sibling["selection_state"] == "suppressed_by_translation"
+    assert sibling["selection_reason"] == "FALLBACK_LANGUAGE"
+    assert sibling["selected_variant_source_url"] == source["source_url"]
+    assert sibling["variant_group_id"] == source["variant_group_id"]
+    assert sibling["relationship"] == "TRANSLATION"
     second = OneCompanyEvidenceFlow(
         conn,
         scraper=_FakeScraper([articles[0]]),
@@ -627,3 +642,209 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
     ).hexdigest()
     candidate.research_evidence["evidence_packet"] = packet
     assert gate.assess(candidate).status == "ready"
+
+
+def _delayed_english_articles(*, with_english: bool):
+    sv = {
+        "source_url": "https://mfn.test/a/delayed/delarsrapport-q1-2026-2027",
+        "title": "Delayed AB delårsrapport Q1 2026/2027",
+        "published_at": "2026-09-09T07:30:00Z",
+        "attachment_url": "https://storage.mfn.test/delayed-q1-sv.pdf",
+        "body": (
+            "Omsättning 2847 Msek. Rörelseresultat 312 Msek. "
+            "Kvartalet omfattade 1 maj – 31 juli 2026."
+        ),
+        "content_text": (
+            "Omsättning 2847 Msek. Rörelseresultat 312 Msek. "
+            "Kvartalet omfattade 1 maj – 31 juli 2026."
+        ),
+        "lang": "sv",
+    }
+    if not with_english:
+        return [sv]
+    en = {
+        "source_url": "https://mfn.test/a/delayed/interim-report-q1-2026-27",
+        "title": "Delayed AB Interim report Q1 2026/27",
+        "published_at": "2026-09-12T07:30:00Z",
+        "attachment_url": "https://storage.mfn.test/delayed-q1-en.pdf",
+        "body": (
+            "Revenue 2847 MSEK. Operating profit 312 MSEK. "
+            "The quarter covered 1 May - 31 July 2026."
+        ),
+        "content_text": (
+            "Revenue 2847 MSEK. Operating profit 312 MSEK. "
+            "The quarter covered 1 May - 31 July 2026."
+        ),
+        "lang": "en",
+    }
+    return [sv, en]
+
+
+def test_delayed_english_attaches_to_existing_logical_report():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        day_one = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeScraper(_delayed_english_articles(with_english=False))
+        ).run(company_id, as_of="2026-09-20")
+    assert day_one.status == "complete"
+    assert len(day_one.packet["sources"]) == 1
+    assert day_one.packet["sources"][0]["language"] == "sv"
+    assert day_one.packet["sources"][0]["selection_reason"] == "FALLBACK_LANGUAGE"
+    assert day_one.packet["sources"][0]["period_start"] == "2026-05-01"
+    assert day_one.packet["sources"][0]["period_end"] == "2026-07-31"
+
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        day_ten = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeScraper(_delayed_english_articles(with_english=True))
+        ).run(company_id, as_of="2026-09-20")
+    assert day_ten.status == "complete"
+    assert len(day_ten.packet["sources"]) == 1
+    source = day_ten.packet["sources"][0]
+    assert source["language"] == "en"
+    assert source["selection_reason"] == "PREFERRED_LANGUAGE"
+    assert source["period_start"] == "2026-05-01"
+    assert source["period_end"] == "2026-07-31"
+    assert source["document_type"] == "INTERIM_Q1"
+    assert len(source["bilingual_siblings"]) == 1
+    assert source["bilingual_siblings"][0]["language"] == "sv"
+    assert source["bilingual_siblings"][0]["relationship"] == "TRANSLATION"
+    canonical = conn.execute(
+        "SELECT source_url, duplicate_of FROM research_documents WHERE company_id=? ORDER BY source_url",
+        (company_id,),
+    ).fetchall()
+    assert len(canonical) == 2
+    by_url = {row[0]: row[1] for row in canonical}
+    assert by_url["https://mfn.test/a/delayed/interim-report-q1-2026-27"] is None
+    assert by_url["https://mfn.test/a/delayed/delarsrapport-q1-2026-2027"] is not None
+
+
+def test_packet_hash_stable_across_run_timestamps():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/stable",
+        "title": "Flow AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/stable.pdf",
+        "lang": "en",
+    }
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert first.status == "complete"
+    conn.execute("UPDATE research_documents SET fetched_at='2030-01-02T03:04:05Z'")
+    conn.execute("UPDATE mfn_issuer_mappings SET verified_at='2030-01-03T04:05:06Z'")
+    conn.commit()
+    rebuilt = build_frozen_evidence_packet(conn, company_id=company_id, as_of="2026-09-20")
+    assert validate_frozen_packet(rebuilt)
+    assert rebuilt["packet_hash"] == first.packet_hash
+
+
+class _ExactMatchResolver:
+    base_url = "https://mfn.test"
+
+    def __init__(self, candidate):
+        self.candidate = candidate
+
+    def discover(self, company, **kwargs):
+        return IssuerResolution("mapped", (self.candidate,), self.candidate, "2026-09-20T00:00:00Z")
+
+
+def _ambiguous_company(conn):
+    company_id = upsert_company(conn, {"insId": 7004, "name": "Reviewed AB", "ticker": "REVW"})
+    upsert_mfn_issuer_mapping(
+        conn,
+        company_id,
+        status="ambiguous",
+        discovery_source="operator_review",
+        identity_evidence={"provenance": "operator", "reason": "two similar issuer pages"},
+    )
+    conn.commit()
+    return company_id
+
+
+def test_reviewed_ambiguous_mapping_blocks_fresh_exact_discovery():
+    conn = _connection()
+    company_id = _ambiguous_company(conn)
+    candidate = {
+        "mfn_slug": "all/a/reviewed",
+        "source_url": "https://mfn.test/all/a/reviewed",
+        "match_basis": "exact_ticker",
+        "identity_evidence": {"ticker": "REVW"},
+    }
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([]),
+        resolver=_ExactMatchResolver(candidate),
+    ).run(company_id, as_of="2026-09-20")
+    assert result.status == "mapping_ambiguous"
+    assert result.mapping_status == "ambiguous"
+    assert get_verified_mfn_mapping(conn, company_id) is None
+    review = get_mfn_mapping_review(conn, company_id)
+    assert review["status"] == "ambiguous"
+    assert [item["mfn_slug"] for item in review["candidates"]] == ["all/a/reviewed"]
+    assert conn.execute("SELECT count(*) FROM research_documents").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 0
+    job = conn.execute(
+        "SELECT status, error FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert job[0] == "failed"
+    assert json.loads(job[1])["code"] == "mapping_ambiguous"
+
+
+def test_re_review_clears_ambiguous_block():
+    conn = _connection()
+    company_id = _ambiguous_company(conn)
+    candidate = {
+        "mfn_slug": "all/a/reviewed",
+        "source_url": "https://mfn.test/all/a/reviewed",
+        "match_basis": "exact_ticker",
+        "identity_evidence": {"ticker": "REVW"},
+    }
+    resolver = _ExactMatchResolver(candidate)
+    blocked = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([]), resolver=resolver).run(
+        company_id, as_of="2026-09-20"
+    )
+    assert blocked.status == "mapping_ambiguous"
+    upsert_mfn_issuer_mapping(
+        conn,
+        company_id,
+        status="mapped",
+        mfn_slug="all/a/reviewed",
+        source_url="https://mfn.test/all/a/reviewed",
+        discovery_source="operator_mapping",
+        verified_at="2026-09-20T00:00:00Z",
+        identity_evidence={"provenance": "operator", "reason": "re-reviewed exact match"},
+    )
+    article = {
+        "source_url": "https://mfn.test/a/reviewed/q1",
+        "title": "Reviewed AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/reviewed-q1-en.pdf",
+        "lang": "en",
+    }
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        cleared = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeScraper([article]), resolver=resolver
+        ).run(company_id, as_of="2026-09-20")
+    assert cleared.status == "complete"
+    assert cleared.packet_hash and validate_frozen_packet(cleared.packet)
+    assert len(cleared.packet["sources"]) == 1

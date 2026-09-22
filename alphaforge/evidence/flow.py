@@ -12,24 +12,26 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from alphaforge.core.frozen_packet import canonical_packet_hash, validate_frozen_packet
+from alphaforge.core.frozen_packet import stable_packet_hash, validate_frozen_packet
 from alphaforge.db.repositories import (
     complete_evidence_identity_documents,
-    complete_evidence_language_majority,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
+    get_mfn_mapping_review,
     get_verified_mfn_mapping,
     persist_evidence_document,
     persist_evidence_packet,
     persist_evidence_sibling,
+    persist_mfn_issuer_candidates,
     record_job,
     record_mfn_feed_check,
 )
 from alphaforge.evidence.ingest import (
     ResearchDocumentIngestionService,
     bilingual_dedupe,
+    resolve_document_language,
 )
-from alphaforge.evidence.mfn_taxonomy import is_report
+from alphaforge.evidence.mfn_taxonomy import document_type, is_report
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
@@ -119,6 +121,29 @@ def download_pdf(
     )
 
 
+def _sibling_entry(sibling: Any, document_id: int) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    try:
+        loaded = json.loads(sibling["raw_metadata"]) if sibling["raw_metadata"] else None
+        if isinstance(loaded, dict):
+            metadata = loaded
+    except (TypeError, ValueError, KeyError, IndexError):
+        metadata = {}
+    language = sibling["ingested_lang"] or metadata.get("language") or "en"
+    return {
+        "source_url": sibling["source_url"],
+        "title": sibling["title"] or "",
+        "publication_date": sibling["published_at"],
+        "language": language,
+        "duplicate_of": f"document:{document_id}",
+        "selected_variant_source_url": metadata.get("duplicate_of_source_url"),
+        "variant_group_id": metadata.get("bilingual_group_id"),
+        "selection_state": "suppressed_by_translation",
+        "selection_reason": "PREFERRED_LANGUAGE" if language == "en" else "FALLBACK_LANGUAGE",
+        "relationship": metadata.get("relationship") or "TRANSLATION",
+    }
+
+
 def _coverage_facts(sources: list[dict[str, Any]], limitations: set[str]) -> dict[str, Any]:
     return {
         "source_count": len(sources),
@@ -171,8 +196,24 @@ def _has_fiscal_year_span(title: str) -> bool:
     return bool(re.search(r"\b20\d{2}\s*[/\-]\s*(?:20)?\d{2}\b", title))
 
 
-def _body_period_end(article: dict[str, Any]) -> str | None:
-    """Extract an explicitly stated fiscal range end before title heuristics.
+def _range_start(
+    start_day: str, start_month: str, start_year: str | None, end_iso: str
+) -> str | None:
+    """Infer a range start date, rolling back one year across year boundaries."""
+    if start_year is not None:
+        return _date_value(start_day, start_month, start_year)
+    end_month = int(end_iso[5:7])
+    start_month_number = _MONTHS.get(start_month.casefold().rstrip("."))
+    if start_month_number is None:
+        return None
+    year = int(end_iso[:4])
+    if start_month_number > end_month:
+        year -= 1
+    return _date_value(start_day, start_month, str(year))
+
+
+def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract an explicitly stated fiscal (start, end) range from the body.
 
     Fiscal Q1 is not necessarily January--March (Clas Ohlson's Q1 is
     May--July).  The release body is the authoritative deterministic source
@@ -181,7 +222,7 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
     """
     body = str(article.get("content_text") or article.get("body") or "").casefold()
     if not body:
-        return None
+        return None, None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
     title = str(article.get("title") or "")
     year_match = (
@@ -193,15 +234,16 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
     # ``1 May – 31 July 2026`` are emitted by MFN pages.
     range_pattern = re.compile(
-        rf"\b\d{{1,2}}\s+(?:{months})(?:\s+20\d{{2}})?\s*"
+        rf"\b(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\s*"
         rf"(?:-|–|—|to|through|till|till och med)\s*"
         rf"(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    candidates: list[tuple[int, str]] = []
+    candidates: list[tuple[int, str | None, str]] = []
     for match in range_pattern.finditer(body):
-        end = _date_value(match.group(1), match.group(2), match.group(3) or fiscal_year)
+        end = _date_value(match.group(4), match.group(5), match.group(6) or fiscal_year)
         if end is None:
             continue
+        start = _range_start(match.group(1), match.group(2), match.group(3), end)
         before = body[max(0, match.start() - 48) : match.start()]
         if any(
             term in before
@@ -256,22 +298,23 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "förra året",
             )
         )
-        candidates.append((score, end))
+        candidates.append((score, start, end))
     if candidates:
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
-            if candidates[0][1] != candidates[1][1]:
-                return None
-        return candidates[0][1]
+            if candidates[0][2] != candidates[1][2]:
+                return None, None
+        return candidates[0][1], candidates[0][2]
     month_first = re.compile(
-        rf"\b(?:{months})\s+\d{{1,2}},?\s+20\d{{2}}\s*"
+        rf"\b({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})\s*"
         rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
     )
-    month_candidates: list[tuple[int, str]] = []
+    month_candidates: list[tuple[int, str | None, str]] = []
     for match in month_first.finditer(body):
-        end = _date_value(match.group(2), match.group(1), match.group(3) or fiscal_year)
+        end = _date_value(match.group(5), match.group(4), match.group(6) or fiscal_year)
         if end is None:
             continue
+        start = _range_start(match.group(2), match.group(1), match.group(3), end)
         before = body[max(0, match.start() - 48) : match.start()]
         if any(
             term in before
@@ -308,18 +351,18 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "månader",
             )
         )
-        month_candidates.append((score, end))
+        month_candidates.append((score, start, end))
     if month_candidates:
         month_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(month_candidates) > 1 and month_candidates[0][0] == month_candidates[1][0]:
-            if month_candidates[0][1] != month_candidates[1][1]:
-                return None
-        return month_candidates[0][1]
+            if month_candidates[0][2] != month_candidates[1][2]:
+                return None, None
+        return month_candidates[0][1], month_candidates[0][2]
     # ``for the three months ended 31 July 2026`` is also unambiguous.
     ended_pattern = re.compile(
         rf"\b(?:ended|ending|per|slutade)\s+(\d{{1,2}})\s+({months})(?:\s+(20\d{{2}}))?\b"
     )
-    ended_candidates: list[tuple[int, str]] = []
+    ended_candidates: list[tuple[int, str | None, str]] = []
     for ended in ended_pattern.finditer(body):
         end = _date_value(ended.group(1), ended.group(2), ended.group(3) or fiscal_year)
         if end is None:
@@ -360,14 +403,29 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
                 "månader",
             )
         )
-        ended_candidates.append((score, end))
+        ended_candidates.append((score, None, end))
     if ended_candidates:
         ended_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         if len(ended_candidates) > 1 and ended_candidates[0][0] == ended_candidates[1][0]:
-            if ended_candidates[0][1] != ended_candidates[1][1]:
-                return None
-        return ended_candidates[0][1]
-    return None
+            if ended_candidates[0][2] != ended_candidates[1][2]:
+                return None, None
+        return ended_candidates[0][1], ended_candidates[0][2]
+    return None, None
+
+
+def _body_period_end(article: dict[str, Any]) -> str | None:
+    """Extract an explicitly stated fiscal range end before title heuristics."""
+    _start, end = _body_period_range(article)
+    return end
+
+
+def _period_start(article: dict[str, Any]) -> str | None:
+    for key in ("period_start", "report_period_start"):
+        value = article.get(key)
+        if value:
+            return str(value)[:10]
+    start, _end = _body_period_range(article)
+    return start
 
 
 def _observation_date(article: dict[str, Any]) -> str | None:
@@ -435,7 +493,7 @@ def build_frozen_evidence_packet(
         ).fetchall()
         sibling_rows = conn.execute(
             """
-            SELECT source_url, title, published_at, ingested_lang, duplicate_of
+            SELECT source_url, title, published_at, ingested_lang, duplicate_of, raw_metadata
             FROM research_documents
             WHERE duplicate_of=?
               AND published_at IS NOT NULL
@@ -479,14 +537,23 @@ def build_frozen_evidence_packet(
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
         )
+        source_language = row["ingested_lang"] or raw_metadata.get("language") or "en"
         source = {
             "source_id": source_id,
             "source_url": row["source_url"],
             "title": row["title"] or "",
             "report_kind": raw_metadata.get("report_kind"),
+            "document_type": raw_metadata.get("document_type"),
             "fiscal_period": raw_metadata.get("fiscal_period") or raw_metadata.get("report_period"),
+            "period_start": raw_metadata.get("period_start"),
+            "period_end": raw_metadata.get("period_end") or raw_metadata.get("report_period_end"),
             "observation_date": observation_date,
-            "language": row["ingested_lang"] or raw_metadata.get("language") or "en",
+            "language": source_language,
+            "variant_group_id": raw_metadata.get("bilingual_group_id"),
+            "selection_state": "selected",
+            "selection_reason": (
+                "PREFERRED_LANGUAGE" if source_language == "en" else "FALLBACK_LANGUAGE"
+            ),
             "publication_date": row["published_at"],
             "publication_timestamp_authoritative": bool(
                 raw_metadata.get("authoritative_publication_timestamp")
@@ -527,14 +594,7 @@ def build_frozen_evidence_packet(
                 for page in page_rows
             ],
             "bilingual_siblings": [
-                {
-                    "source_url": sibling["source_url"],
-                    "title": sibling["title"] or "",
-                    "publication_date": sibling["published_at"],
-                    "language": sibling["ingested_lang"] or "en",
-                    "duplicate_of": f"document:{document_id}",
-                }
-                for sibling in sibling_rows
+                _sibling_entry(sibling, document_id) for sibling in sibling_rows
             ],
         }
         sources.append(source)
@@ -561,7 +621,7 @@ def build_frozen_evidence_packet(
         sources,
         set(base["limitations"]),
     )
-    base["packet_hash"] = canonical_packet_hash(base)
+    base["packet_hash"] = stable_packet_hash(base)
     return base
 
 
@@ -743,6 +803,42 @@ class OneCompanyEvidenceFlow:
 
         mapping = get_verified_mfn_mapping(self.conn, company_id)
         if mapping is None:
+            # A reviewed `ambiguous` mapping is authoritative until re-reviewed:
+            # later exact-identifier discovery is queued as candidates, never
+            # applied. Fresh discovery keeps working for never-reviewed issuers.
+            review = get_mfn_mapping_review(self.conn, company_id)
+            if review is not None and review.get("status") == "ambiguous":
+                try:
+                    resolution = self.resolver.discover(company)
+                except MfnIssuerAcquisitionError as exc:
+                    return finish(
+                        EvidenceFlowResult(
+                            "acquisition_failed",
+                            company_id,
+                            mapping_status="ambiguous",
+                            skipped={exc.code: 1},
+                            message=str(exc),
+                        )
+                    )
+                if not dry_run:
+                    persist_mfn_issuer_candidates(
+                        self.conn,
+                        company_id,
+                        list(resolution.candidates),
+                        discovery_source="mfn_search_or_index",
+                    )
+                return finish(
+                    EvidenceFlowResult(
+                        "mapping_ambiguous",
+                        company_id,
+                        mapping_status="ambiguous",
+                        skipped={"issuer_mapping_review_required": 1},
+                        message=(
+                            "reviewed ambiguous MFN issuer mapping blocks discovery "
+                            "until re-reviewed"
+                        ),
+                    )
+                )
             try:
                 resolution = self.resolver.discover(company)
             except MfnIssuerAcquisitionError as exc:
@@ -901,7 +997,22 @@ class OneCompanyEvidenceFlow:
                     "company_id": company_id,
                 }
             )
-        packet_majority = complete_evidence_language_majority(self.conn, company_id, as_of)
+        # Resolve identity dates once per article so variant grouping compares
+        # real fiscal periods instead of synthesized calendar quarters, and a
+        # later English edition can attach even when published on another day.
+        for article in eligible:
+            if article.get("document_type") is None:
+                article["document_type"] = document_type(str(article.get("title") or ""))
+            if article.get("period_start") is None:
+                article["period_start"] = article.get("report_period_start") or _period_start(
+                    article
+                )
+            if article.get("period_end") is None:
+                article["period_end"] = article.get("report_period_end") or _body_period_end(
+                    article
+                )
+            if article.get("observation_date") is None:
+                article["observation_date"] = _observation_date(article)
         persisted_identity = []
         persisted_cutoff = min(as_of[:10], today.isoformat())
         for persisted in complete_evidence_identity_documents(
@@ -923,7 +1034,16 @@ class OneCompanyEvidenceFlow:
                     "content_text": persisted["content_text"],
                     "mfn_slug": metadata.get("mfn_slug"),
                     "report_kind": metadata.get("report_kind"),
+                    "document_type": metadata.get("document_type"),
                     "fiscal_period": metadata.get("fiscal_period") or metadata.get("report_period"),
+                    "period_start": metadata.get("period_start"),
+                    "period_end": metadata.get("period_end") or metadata.get("report_period_end"),
+                    "observation_date": (
+                        metadata.get("observation_date")
+                        if metadata.get("observation_date_authoritative")
+                        else None
+                    ),
+                    "pdf_language": metadata.get("pdf_language"),
                     "attachment_url": persisted["attachment_url"],
                     "attachment_checksum": persisted["attachment_checksum"],
                     "ingested_lang": persisted["ingested_lang"],
@@ -932,10 +1052,7 @@ class OneCompanyEvidenceFlow:
                     "_persisted_evidence": True,
                 }
             )
-        deduped = bilingual_dedupe(
-            persisted_identity + eligible,
-            packet_majority=packet_majority,
-        )
+        deduped = bilingual_dedupe(persisted_identity + eligible)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
         if dry_run:
             result.status = "dry_run"
@@ -1012,9 +1129,29 @@ class OneCompanyEvidenceFlow:
                     result.skipped[code] = result.skipped.get(code, 0) + count
                 continue
             selected_variant = selected
+            release_lang = selected.get("lang") or selected.get("ingested_lang") or ""
+            pdf_first_pages = "\n".join(str(page.get("text") or "") for page in extracted.pages[:3])
+            pdf_language, language_evidence = resolve_document_language(
+                filename=downloaded.source_url,
+                pdf_text=pdf_first_pages,
+                release_title=str(selected.get("title") or ""),
+                release_body=str(selected.get("content_text") or selected.get("body") or ""),
+                release_lang=str(release_lang),
+            )
             selected = {
                 **selected_variant,
-                "ingested_lang": selected.get("lang") or selected.get("ingested_lang") or "en",
+                # The PDF itself outranks MFN release-language metadata.
+                "pdf_language": pdf_language,
+                "language_evidence": language_evidence,
+                "ingested_lang": pdf_language or release_lang or "en",
+                "document_type": selected.get("document_type")
+                or document_type(str(selected.get("title") or "")),
+                "period_start": selected.get("period_start")
+                or selected.get("report_period_start")
+                or _period_start(selected),
+                "period_end": selected.get("period_end")
+                or selected.get("report_period_end")
+                or _body_period_end(selected),
                 "observation_date": _observation_date(selected),
                 "observation_date_authoritative": any(
                     selected.get(key) not in (None, "")

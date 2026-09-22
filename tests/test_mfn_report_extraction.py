@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,8 +15,19 @@ from alphaforge.db.repositories import (
     persist_evidence_document,
     persist_evidence_sibling,
 )
-from alphaforge.evidence.ingest import ResearchDocumentIngestionService, bilingual_dedupe
+from alphaforge.evidence.ingest import (
+    ResearchDocumentIngestionService,
+    _document_type_for_identity,
+    _language,
+    _numeric_key_figure_fingerprint,
+    _numeric_similarity,
+    bilingual_dedupe,
+    resolve_document_language,
+)
+from alphaforge.evidence.mfn_taxonomy import document_type
 from alphaforge.providers.mfn.scraper import MfnScraper
+
+FIXTURES = Path(__file__).parent / "fixtures" / "mfn"
 
 
 def _connection():
@@ -480,3 +492,158 @@ def test_pypdf_extraction_keeps_all_page_anchors():
     assert result.page_truncated == 0
     assert result.scanned is True
     assert len(result.pages) == 51
+
+
+def _clas_ohlson_pair():
+    sv_body = "Omsättning 2847 Msek. Rörelseresultat 312 Msek. Resultat per aktie 12 kronor."
+    en_body = "Revenue 2847 MSEK. Operating profit 312 MSEK. Earnings per share 12 SEK."
+    return [
+        {
+            "title": "Clas Ohlson delårsrapport Q1 2026/2027",
+            "source_url": "https://mfn.test/a/clas-ohlson/delarsrapport-q1-2026-2027",
+            "storage_url": "https://storage.mfn.test/clas/delarsrapport-q1-sv.pdf",
+            "published_at": "2026-09-09T07:30:00Z",
+            "content_text": sv_body,
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "sv",
+        },
+        {
+            "title": "Clas Ohlson Interim report Q1 2026/27",
+            "source_url": "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-27",
+            "storage_url": "https://storage.mfn.test/clas/interim-report-q1-en.pdf",
+            "published_at": "2026-09-09T07:30:00Z",
+            "content_text": en_body,
+            "mfn_slug": "all/a/clas-ohlson",
+            "report_kind": "quarterly",
+            "lang": "en",
+        },
+    ]
+
+
+def test_bilingual_groups_clas_ohlson_detail_fixtures():
+    fixtures = FIXTURES
+    scraper = MfnScraper(base_url="https://mfn.test")
+    articles = []
+    for name, url in (
+        ("clas_ohlson_q1_sv.html", "https://mfn.test/a/clas-ohlson/delarsrapport-q1-2026-2027"),
+        ("clas_ohlson_q1_en.html", "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-27"),
+    ):
+        html = (fixtures / name).read_text(encoding="utf-8")
+        response = SimpleNamespace(status_code=200, text=html)
+        with (
+            patch(
+                "alphaforge.providers.mfn.scraper.request_with_retry",
+                return_value=response,
+            ),
+            patch("alphaforge.providers.mfn.scraper.time.sleep"),
+        ):
+            (article,) = scraper.scrape_details([{"url": url}])
+        article["mfn_slug"] = "all/a/clas-ohlson"
+        articles.append(article)
+    assert articles[0]["title"] == "Clas Ohlson delårsrapport Q1 2026/2027"
+    assert articles[1]["title"] == "Clas Ohlson Interim report Q1 2026/27"
+    assert articles[0]["document_type"] == "INTERIM_Q1"
+    assert articles[1]["document_type"] == "INTERIM_Q1"
+    assert articles[0]["lang"] == "sv"
+    assert articles[1]["lang"] == "en"
+
+    selected = bilingual_dedupe(articles)
+
+    assert len(selected) == 1
+    assert selected[0]["lang"] == "en"
+    assert selected[0]["_suppressed_variants"][0]["lang"] == "sv"
+
+
+def test_bilingual_groups_clas_ohlson_title_shapes():
+    selected = bilingual_dedupe(_clas_ohlson_pair())
+
+    assert len(selected) == 1
+    assert selected[0]["lang"] == "en"
+    assert selected[0]["bilingual_selection_rule"] == "deterministic_en_fallback"
+    suppressed = selected[0]["_suppressed_variants"][0]
+    assert suppressed["lang"] == "sv"
+    assert suppressed["duplicate_of"] == selected[0]["source_url"]
+    assert suppressed["_bilingual_group_id"] == selected[0]["_bilingual_group_id"]
+    assert suppressed["relationship"] == "TRANSLATION"
+
+
+def test_document_type_distinguishes_year_end_from_annual():
+    assert document_type("Acme bokslutskommuniké 2025") == "YEAR_END_REPORT"
+    assert document_type("Acme Year-End Report 2025") == "YEAR_END_REPORT"
+    assert document_type("Acme Årsredovisning 2025") == "ANNUAL_REPORT"
+    assert document_type("Acme Annual Report 2025") == "ANNUAL_REPORT"
+    assert document_type("Acme delårsrapport Q1 2026/2027") == "INTERIM_Q1"
+    assert document_type("Acme Interim report Q1 2026/27") == "INTERIM_Q1"
+    assert _document_type_for_identity({"title": "Acme Interim report Q4 2025"}) == ""
+    year_end = {
+        "title": "Acme bokslutskommuniké 2025",
+        "source_url": "https://mfn.test/a/acme/year-end",
+        "published_at": "2026-02-01",
+        "content_text": "Resultat 100 Msek.",
+        "mfn_slug": "acme",
+        "lang": "sv",
+    }
+    annual = {
+        "title": "Acme Annual Report 2025",
+        "source_url": "https://mfn.test/a/acme/annual",
+        "published_at": "2026-03-01",
+        "content_text": "Profit 100 MSEK.",
+        "mfn_slug": "acme",
+        "lang": "en",
+    }
+    selected = bilingual_dedupe([year_end, annual])
+    assert len(selected) == 2
+
+
+def test_numeric_corroboration_survives_unit_wording():
+    left = _numeric_key_figure_fingerprint("Revenue 100 Msek; EBIT 10 Msek.")
+    right = _numeric_key_figure_fingerprint("Revenue 100 SEK million; EBIT 10 SEK million.")
+    assert left and right
+    assert _numeric_similarity(left, right) == 1.0
+    assert _numeric_similarity((), ()) == 0.0
+
+
+def test_pdf_filename_markers_outrank_release_hint():
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/interim-report-q1-english.pdf",
+        pdf_text="",
+        release_lang="sv",
+    )
+    assert (language, evidence) == ("en", "filename")
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/delarsrapport-q1-sv.pdf",
+        pdf_text="",
+        release_lang="en",
+    )
+    assert (language, evidence) == ("sv", "filename")
+
+
+def test_pdf_first_pages_word_scoring_outranks_release_hint():
+    sv_text = "Omsättning och resultat för kvartalet. Rapporten omfattar perioden."
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/q1.pdf",
+        pdf_text=sv_text,
+        release_lang="en",
+    )
+    assert language == "sv"
+    assert evidence.startswith("pdf_text:")
+    en_text = "Revenue and profit for the quarter. The report covers the financial year."
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/q1.pdf",
+        pdf_text=en_text,
+        release_lang="sv",
+    )
+    assert language == "en"
+    assert evidence.startswith("pdf_text:")
+
+
+def test_pdf_language_falls_back_to_release_hint():
+    language, evidence = resolve_document_language(
+        filename="https://storage.mfn.test/uuid/q1.pdf",
+        pdf_text="",
+        release_lang="sv",
+    )
+    assert (language, evidence) == ("sv", "release_hint")
+    assert _language({"title": "Acme Interim Report", "pdf_language": "sv"}) == "sv"
+    assert _language({"title": "Acme Interim Report", "lang": "en"}) == "en"

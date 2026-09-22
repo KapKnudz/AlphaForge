@@ -17,14 +17,53 @@ def canonical_packet_hash(packet_without_hash: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
-    if not isinstance(packet, dict) or packet.get("frozen") is not True:
-        return False
+# Run-specific provenance excluded from the stable packet hash. These fields
+# stay in the stored packet JSON for auditability, but identical artifacts
+# must hash identically across databases built at different times.
+HASH_EXCLUDED_ISSUER_KEYS = ("verified_at",)
+HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date",)
+
+
+def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
+    """Project the hashed subset: everything except run-timestamp provenance."""
+    body = {key: value for key, value in packet_without_hash.items() if key != "packet_hash"}
+    issuer = body.get("issuer")
+    if isinstance(issuer, dict):
+        body["issuer"] = {
+            key: value for key, value in issuer.items() if key not in HASH_EXCLUDED_ISSUER_KEYS
+        }
+    sources = body.get("sources")
+    if isinstance(sources, list):
+        body["sources"] = [
+            {key: value for key, value in source.items() if key not in HASH_EXCLUDED_SOURCE_KEYS}
+            if isinstance(source, dict)
+            else source
+            for source in sources
+        ]
+    return body
+
+
+def stable_packet_hash(packet_without_hash: dict[str, Any]) -> str:
+    """Hash new packets over the provenance-excluded canonical subset."""
+    return canonical_packet_hash(packet_hash_body(packet_without_hash))
+
+
+def packet_hash_matches(packet: dict[str, Any]) -> bool:
     packet_hash = packet.get("packet_hash")
     if not isinstance(packet_hash, str) or not packet_hash:
         return False
+    if stable_packet_hash(packet) == packet_hash:
+        return True
+    # Legacy packets hashed the full body including run timestamps; they keep
+    # validating against their stored hash without being rewritten.
     without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
-    if canonical_packet_hash(without_hash) != packet_hash:
+    return canonical_packet_hash(without_hash) == packet_hash
+
+
+def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
+    if not isinstance(packet, dict) or packet.get("frozen") is not True:
+        return False
+    if not packet_hash_matches(packet):
         return False
     if packet.get("schema_version") != "evidence-packet-v1":
         return False
