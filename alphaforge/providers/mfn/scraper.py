@@ -326,6 +326,52 @@ class MfnScraper:
         self.base_url = base_url.rstrip("/")
         self.max_articles = max_articles
 
+    def _parse_json_feed_items(
+        self, payload: Any, *, reports_only: bool = True
+    ) -> list[dict[str, Any]]:
+        """Parse MFN JSON feed ``items`` into the same shape as HTML discovery."""
+        items: list[dict[str, Any]]
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            items = payload["items"]
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            return []
+        articles: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            content = entry.get("content") if isinstance(entry.get("content"), dict) else {}
+            title = str(content.get("title") or entry.get("title") or "").strip()
+            url = str(entry.get("url") or content.get("url") or "").strip()
+            if not url:
+                url = str(entry.get("source_url") or "").strip()
+            if not url or not title:
+                continue
+            absolute = urljoin(f"{self.base_url}/", url)
+            if absolute in seen or not _is_mfn_release_url(absolute, self.base_url):
+                continue
+            if reports_only and not is_report(title):
+                continue
+            seen.add(absolute)
+            article: dict[str, Any] = {
+                "url": absolute,
+                "source_url": absolute,
+                "title": " ".join(title.split()),
+                "published_at": content.get("publish_date") or entry.get("publish_date"),
+            }
+            # Preserve feed-level language when available
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            feed_lang = str(props.get("lang") or "").lower()
+            if feed_lang in {"sv", "en"}:
+                article["lang"] = feed_lang
+            article.update(_report_identity_seed(article))
+            articles.append(article)
+            if len(articles) >= self.max_articles:
+                break
+        return articles
+
     def discover_feed(
         self,
         mfn_slug: str,
@@ -340,9 +386,17 @@ class MfnScraper:
         source because feed cards do not expose a stable one-to-one date
         association in every MFN layout.
         """
-        url = f"{self.base_url}/{mfn_slug.lstrip('/')}"
+        # ``?page=`` is legacy HTML pagination; MFN's real pagination is
+        # ``offset``/``limit`` (JSON feed or ``*.html`` fragment).  Map page
+        # to the offset/limit contract so ``page=2`` actually advances.
         if page > 1:
-            url += f"?page={page}"
+            limit = self.max_articles if self.max_articles else 48
+            offset = (page - 1) * limit
+            paginated = self.discover_feed_paginated(
+                mfn_slug, offset=offset, limit=limit, reports_only=reports_only
+            )
+            return paginated[0]
+        url = f"{self.base_url}/{mfn_slug.lstrip('/')}"
         time.sleep(1.0)
         try:
             resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
@@ -382,6 +436,137 @@ class MfnScraper:
             if len(articles) >= self.max_articles:
                 break
         return articles
+
+    def discover_feed_paginated(
+        self,
+        mfn_slug: str,
+        *,
+        offset: int = 0,
+        limit: int = 48,
+        reports_only: bool = True,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Paginated discovery via MFN JSON feed with HTML fragment fallback.
+
+        Returns ``(articles, next_offset)`` where ``next_offset`` is ``None``
+        at the tail (``len(items) < limit`` or no ``next_url``).  ``articles``
+        are already filtered by ``is_report`` when ``reports_only`` is true
+        and capped by ``max_articles``.  The JSON feed at
+        ``/{slug}?offset=&limit=`` is preferred; ``/{slug}.html?offset=&limit=``
+        is the HTML fragment that the ``show-more`` JS consumes.
+        """
+        # Try JSON feed first (``Accept: application/json``).  MFN returns
+        # ``application/json`` for ``?offset=&limit=``.
+        json_url = f"{self.base_url}/{mfn_slug.lstrip('/')}?offset={offset}&limit={limit}"
+        time.sleep(1.0)
+        saw_http_200 = False
+        try:
+            resp = request_with_retry(
+                "GET",
+                json_url,
+                timeout=30,
+                max_retries=MAX_RETRIES,
+                headers={"Accept": "application/json"},
+            )
+        except Exception:
+            resp = None  # type: ignore[assignment]
+        if resp is not None and resp.status_code == 200:
+            saw_http_200 = True
+            ctype = str(
+                (getattr(resp, "headers", {}) or {}).get("Content-Type")
+                or (getattr(resp, "headers", {}) or {}).get("content-type")
+                or ""
+            ).lower()
+            body = getattr(resp, "text", None)
+            if body is None:
+                try:
+                    body = resp.content.decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+                except Exception:
+                    body = ""
+            if "application/json" in ctype or (body and body.lstrip().startswith("{")):
+                try:
+                    payload = (
+                        json.loads(body) if isinstance(body, str) else json.loads(body.decode())
+                    )  # type: ignore[arg-type]
+                    articles = self._parse_json_feed_items(payload, reports_only=reports_only)
+                    # Derive next_offset from feed metadata when available.
+                    next_offset: int | None = None
+                    if isinstance(payload, dict):
+                        nxt = payload.get("next_url")
+                        if isinstance(nxt, str) and nxt:
+                            import re as _re
+
+                            m = _re.search(r"offset=(\d+)", nxt)
+                            if m:
+                                try:
+                                    next_offset = int(m.group(1))
+                                except ValueError:
+                                    next_offset = None
+                        # Fallback: infer from counts when no next_url.
+                        if next_offset is None:
+                            items = (
+                                payload.get("items")
+                                if isinstance(payload.get("items"), list)
+                                else None
+                            )
+                            if isinstance(items, list) and len(items) >= limit:
+                                next_offset = offset + limit
+                    return articles, next_offset
+                except Exception:
+                    pass  # fall through to HTML fragment
+        # HTML fragment fallback (``*.html?offset=&limit=``)
+        html_url = f"{self.base_url}/{mfn_slug.lstrip('/')}?offset={offset}&limit={limit}"
+        # Some deployments serve fragments at ``.html`` suffix.
+        fragment_url = f"{self.base_url}/{mfn_slug.lstrip('/')}.html?offset={offset}&limit={limit}"
+        for url in (html_url, fragment_url):
+            time.sleep(0.5)
+            try:
+                resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+            saw_http_200 = True
+            text = getattr(resp, "text", "") or ""
+            if not text or "<a" not in text.lower():
+                continue
+            parser = _MfnHtmlParser()
+            parser.feed(text)
+            articles: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for href, raw_title in parser.links:
+                title = " ".join(raw_title.split())
+                absolute = urljoin(f"{self.base_url}/", href)
+                if (
+                    not absolute
+                    or not title
+                    or absolute in seen
+                    or not _is_mfn_release_url(absolute, self.base_url)
+                ):
+                    continue
+                if reports_only and not is_report(title):
+                    continue
+                seen.add(absolute)
+                article = {
+                    "url": absolute,
+                    "source_url": absolute,
+                    "title": title,
+                    "published_at": None,
+                }
+                article.update(_report_identity_seed(article))
+                articles.append(article)
+                if len(articles) >= self.max_articles:
+                    break
+            # HTML fragments have no JSON next_url; infer tail via link count.
+            # If fewer raw links than limit, we are at tail.
+            raw_links = len(parser.links)
+            next_off = offset + limit if raw_links >= limit else None
+            return articles, next_off
+        if not saw_http_200:
+            raise MfnAcquisitionError(
+                "mfn_feed_fetch_failed",
+                f"MFN paginated feed request failed for {mfn_slug} offset {offset}",
+            )
+        return [], None
 
     def scrape_details(
         self,

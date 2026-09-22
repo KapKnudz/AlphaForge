@@ -27,6 +27,7 @@ from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
     OneCompanyEvidenceFlow,
+    ReportHistoryWindow,
     _observation_date,
     build_frozen_evidence_packet,
     download_pdf,
@@ -1080,3 +1081,184 @@ def test_re_review_clears_ambiguous_block():
     assert cleared.status == "complete"
     assert cleared.packet_hash and validate_frozen_packet(cleared.packet)
     assert len(cleared.packet["sources"]) == 1
+
+
+class _PaginatedFakeScraper:
+    base_url = "https://mfn.test"
+
+    def __init__(self, pages: dict[int, list[dict[str, str]]]):
+        self.pages = pages
+
+    def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
+        items = list(self.pages.get(offset, []))
+        # Simulate next_offset: next key sorted
+        sorted_offsets = sorted(self.pages.keys())
+        try:
+            idx = sorted_offsets.index(offset)
+            nxt = sorted_offsets[idx + 1] if idx + 1 < len(sorted_offsets) else None
+        except ValueError:
+            nxt = None
+        return items, nxt
+
+    def discover_feed(self, mfn_slug, page=1, reports_only=True):
+        # Fallback shim for legacy path
+        return list(self.pages.get(0, []))
+
+    def scrape_details(self, entries, reports_only=True):
+        # Entries are feed dicts; return them enriched with storage_url already present
+        out: list[dict[str, str]] = []
+        url_map = {a["source_url"]: dict(a) for page in self.pages.values() for a in page}
+        for e in entries:
+            url = e if isinstance(e, str) else e.get("url") or e.get("source_url") or ""
+            if url in url_map:
+                out.append(dict(url_map[url]))
+            else:
+                out.append(dict(e) if isinstance(e, dict) else {"source_url": url, "title": url})
+        return out
+
+
+def test_flow_paginated_history_retrieves_multiple_reports():
+    """Regression: Clas Ohlson-style historical pagination must retain many reports.
+
+    Before the fix, ``discover_feed`` only saw the first HTML page (≈1 logical
+    report after bilingual dedupe).  With offset/limit pagination, a window
+    covering several quarters must yield multiple packet sources.  Bilingual
+    pairs must still collapse to one.
+    """
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    pages = {
+        0: [
+            {
+                "source_url": "https://mfn.test/a/flow/q1-2026",
+                "title": "Flow AB Interim Report Q1 2026",
+                "published_at": "2026-05-01T08:00:00Z",
+                "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
+                "storage_url": "https://storage.mfn.test/q1-2026.pdf",
+                "lang": "en",
+                "report_kind": "quarterly",
+                "document_type": "INTERIM_Q1",
+            },
+            {
+                "source_url": "https://mfn.test/a/flow/q3-2025",
+                "title": "Flow AB Interim Report Q3 2025",
+                "published_at": "2025-03-12T08:00:00Z",
+                "attachment_url": "https://storage.mfn.test/q3-2025.pdf",
+                "storage_url": "https://storage.mfn.test/q3-2025.pdf",
+                "lang": "en",
+                "report_kind": "quarterly",
+            },
+        ],
+        48: [
+            {
+                "source_url": "https://mfn.test/a/flow/annual-2024",
+                "title": "Flow AB Annual Report 2024",
+                "published_at": "2024-07-04T08:00:00Z",
+                "attachment_url": "https://storage.mfn.test/annual-2024.pdf",
+                "storage_url": "https://storage.mfn.test/annual-2024.pdf",
+                "lang": "en",
+                "report_kind": "annual",
+                "document_type": "ANNUAL_REPORT",
+            },
+        ],
+    }
+    scraper = _PaginatedFakeScraper(pages)
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    window = ReportHistoryWindow(
+        interim_lookback_years=10, annual_lookback_years=10, max_offsets=4, max_detail_fetches=10
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=scraper,
+            history_window=window,
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+    assert result.status == "complete"
+    assert result.packet is not None
+    assert len(result.packet["sources"]) == 3
+    titles = {s["title"] for s in result.packet["sources"]}
+    assert "Flow AB Interim Report Q1 2026" in titles
+    assert "Flow AB Interim Report Q3 2025" in titles
+    assert "Flow AB Annual Report 2024" in titles
+
+
+def test_flow_history_window_truncates_old_reports():
+    """Window must bound historical depth — reports older than the window are excluded."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    pages = {
+        0: [
+            {
+                "source_url": "https://mfn.test/a/flow/q1-2026",
+                "title": "Flow AB Interim Report Q1 2026",
+                "published_at": "2026-05-01T08:00:00Z",
+                "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
+                "storage_url": "https://storage.mfn.test/q1-2026.pdf",
+                "lang": "en",
+                "report_kind": "quarterly",
+            },
+        ],
+        48: [
+            {
+                "source_url": "https://mfn.test/a/flow/annual-2018",
+                "title": "Flow AB Annual Report 2018",
+                "published_at": "2018-07-04T08:00:00Z",
+                "attachment_url": "https://storage.mfn.test/annual-2018.pdf",
+                "storage_url": "https://storage.mfn.test/annual-2018.pdf",
+                "lang": "en",
+                "report_kind": "annual",
+            },
+        ],
+    }
+    scraper = _PaginatedFakeScraper(pages)
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    window = ReportHistoryWindow(
+        interim_lookback_years=2, annual_lookback_years=5, max_offsets=4, max_detail_fetches=10
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=scraper,
+            history_window=window,
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+    assert result.status == "complete"
+    assert len(result.packet["sources"]) == 1
+    assert result.packet["sources"][0]["title"] == "Flow AB Interim Report Q1 2026"
+
+
+def test_discover_feed_page_two_uses_offset():
+    """Legacy ``?page=2`` must map to offset/limit so Sunday backstop advances."""
+    from alphaforge.providers.mfn.scraper import MfnScraper
+
+    pages = {
+        0: [{"source_url": "https://mfn.test/a/acme/q1", "title": "Q1 Report"}],
+        24: [{"source_url": "https://mfn.test/a/acme/annual", "title": "Annual Report"}],
+    }
+
+    class _OffsetScraper(MfnScraper):
+        def __init__(self):
+            super().__init__(base_url="https://mfn.test", max_articles=24)
+            self.calls: list[tuple[int, int]] = []
+
+        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):  # type: ignore[override]
+            self.calls.append((offset, limit))
+            items = pages.get(offset, [])
+            nxt = 24 if offset == 0 and 24 in pages else None
+            return items, nxt
+
+    scraper = _OffsetScraper()
+    # page=2 should become offset=24 ( (2-1)*24 )
+    result = scraper.discover_feed("all/a/acme", page=2)
+    assert scraper.calls == [(24, 24)]
+    assert len(result) == 1
+    assert result[0]["title"] == "Annual Report"
