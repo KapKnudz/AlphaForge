@@ -792,25 +792,29 @@ def find_complete_evidence_document(
 ) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT d.* FROM research_documents d
-        WHERE d.company_id=? AND d.source_url=?
-          AND d.duplicate_of IS NULL
+        SELECT root.*
+        FROM research_documents d
+        JOIN research_documents root
+          ON root.id=COALESCE(d.duplicate_of, d.id)
+         AND root.duplicate_of IS NULL
+        WHERE d.company_id=?
+          AND (d.source_url=? OR root.source_url=?)
           AND EXISTS (
               SELECT 1 FROM research_attachments a
-              WHERE a.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE a.document_id=root.id
           )
           AND EXISTS (
               SELECT 1 FROM document_extractions e
-              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE e.document_id=root.id
           )
           AND EXISTS (
               SELECT 1
               FROM document_pages p
               JOIN document_extractions e ON e.id=p.extraction_id
-              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE e.document_id=root.id
           )
         """,
-        (company_id, source_url),
+        (company_id, source_url, source_url),
     ).fetchone()
     return dict(row) if row is not None else None
 

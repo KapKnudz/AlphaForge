@@ -822,7 +822,7 @@ class OneCompanyEvidenceFlow:
                     published_date = str(published_at or "")[:10]
                     if published_date > as_of[:10]:
                         future_dated_complete_release = True
-                    if published_date > today.isoformat():
+                    elif published_date > today.isoformat():
                         not_yet_published_complete_release = True
                     continue
             unseen_feed.append(entry)
@@ -833,7 +833,7 @@ class OneCompanyEvidenceFlow:
             published_date = str(document.get("published_at") or "")[:10]
             if published_date > as_of[:10]:
                 future_dated_complete_release = True
-            if published_date > today.isoformat():
+            elif published_date > today.isoformat():
                 not_yet_published_complete_release = True
         if not dry_run:
             record_mfn_feed_check(

@@ -9,6 +9,11 @@ from pypdf import PdfWriter
 from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
+from alphaforge.db.repositories import (
+    find_complete_evidence_document,
+    persist_evidence_document,
+    persist_evidence_sibling,
+)
 from alphaforge.evidence.ingest import ResearchDocumentIngestionService, bilingual_dedupe
 from alphaforge.providers.mfn.scraper import MfnScraper
 
@@ -191,7 +196,7 @@ def test_bilingual_dedupe_uses_pdf_identity_and_keeps_suppressed_provenance():
     )
 
 
-def test_bilingual_semantic_period_dedupes_distinct_translated_pdf_urls():
+def test_bilingual_semantic_period_without_strong_correspondence_remains_separate():
     docs = [
         {
             "title": "Clas Ohlson delårsrapport Q1 2026/2027",
@@ -213,9 +218,63 @@ def test_bilingual_semantic_period_dedupes_distinct_translated_pdf_urls():
 
     selected = bilingual_dedupe(docs)
 
-    assert len(selected) == 1
-    assert selected[0]["lang"] == "en"
-    assert selected[0]["_suppressed_variants"][0]["lang"] == "sv"
+    assert len(selected) == 2
+    assert {document["lang"] for document in selected} == {"sv", "en"}
+    assert all("_suppressed_variants" not in document for document in selected)
+
+
+def test_duplicate_feed_url_resolves_to_complete_canonical_document():
+    conn = _connection()
+    try:
+        conn.execute("INSERT INTO companies (borsdata_id, name) VALUES (502, 'Canonical AB')")
+        company_id = conn.execute(
+            "SELECT id FROM companies WHERE borsdata_id=502"
+        ).fetchone()[0]
+        persist_evidence_document(
+            conn,
+            company_id=company_id,
+            article={
+                "title": "Canonical Annual Report 2025",
+                "source_url": "https://mfn.test/a/canonical/en",
+                "published_at": "2026-03-01T00:00:00Z",
+                "ingested_lang": "en",
+            },
+            attachment={
+                "source_url": "https://storage.mfn.test/canonical.pdf",
+                "content_type": "application/pdf",
+                "byte_size": 8,
+                "sha256": "canonical-pdf",
+                "magic_valid": True,
+                "http_status": 200,
+            },
+            extraction={
+                "extractor": "pypdf",
+                "text_checksum": "canonical-text",
+                "page_count": 1,
+                "pages_included": "1",
+            },
+            pages=[{"page_number": 1, "text": "Evidence"}],
+        )
+        persist_evidence_sibling(
+            conn,
+            company_id=company_id,
+            canonical_source_url="https://mfn.test/a/canonical/en",
+            sibling={
+                "source_url": "https://mfn.test/a/canonical/sv",
+                "title": "Canonical Årsredovisning 2025",
+                "published_at": "2026-03-01T00:00:00Z",
+                "lang": "sv",
+            },
+        )
+
+        document = find_complete_evidence_document(
+            conn, company_id, "https://mfn.test/a/canonical/sv"
+        )
+
+        assert document is not None
+        assert document["source_url"] == "https://mfn.test/a/canonical/en"
+    finally:
+        conn.close()
 
 
 def test_identical_bilingual_pdf_checksums_are_both_auditable():
