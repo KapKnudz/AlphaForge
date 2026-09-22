@@ -1089,6 +1089,8 @@ class OneCompanyEvidenceFlow:
         # real fiscal periods instead of synthesized calendar quarters, and a
         # later English edition can attach even when published on another day.
         for article in eligible:
+            if not (article.get("attachment_url") or article.get("storage_url")):
+                article["_pdf_language_unresolved"] = True
             if article.get("document_type") is None:
                 article["document_type"] = document_type(str(article.get("title") or ""))
             if article.get("period_start") is None:
@@ -1186,6 +1188,18 @@ class OneCompanyEvidenceFlow:
                 self.conn, str(attachment_url), company_id
             )
             stored_pdf_language = _stored_pdf_language(existing)
+            if stored_pdf_language is not None:
+                language, evidence = stored_pdf_language
+                identity_candidates[index] = {
+                    **candidate,
+                    "pdf_language": language,
+                    "language_evidence": evidence,
+                    "ingested_lang": language,
+                    "lang": language,
+                    "_pdf_language_unresolved": False,
+                }
+                stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
+                continue
             try:
                 candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 candidate_extracted = ingestion.extract_pdf_pages(

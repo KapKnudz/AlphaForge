@@ -560,7 +560,9 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     assert sibling["selected_variant_source_url"] == source["source_url"]
     assert sibling["variant_group_id"] == source["variant_group_id"]
     assert sibling["relationship"] == "TRANSLATION"
-    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")
+    ):
         second = OneCompanyEvidenceFlow(
             conn,
             scraper=_FakeScraper([articles[0]]),
@@ -610,6 +612,44 @@ def test_flow_uses_pdf_language_before_variant_grouping():
     assert source["source_url"].endswith("/en")
     assert source["bilingual_siblings"][0]["language"] == "sv"
     assert source["bilingual_siblings"][0]["relationship"] == "TRANSLATION"
+
+
+def test_flow_keeps_no_pdf_variant_out_of_grouping():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": "https://mfn.test/a/flow/no-pdf/sv",
+            "title": "Flow AB delårsrapport Q1 2026",
+            "published_at": "2026-05-01T08:00:00Z",
+            "lang": "sv",
+            "provider_event_id": "flow-no-pdf-q1",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/no-pdf/en",
+            "title": "Flow AB Interim Report Q1 2026",
+            "published_at": "2026-05-01T08:00:00Z",
+            "attachment_url": "https://storage.mfn.test/q1-en.pdf",
+            "lang": "en",
+            "provider_event_id": "flow-no-pdf-q1",
+        },
+    ]
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper(articles),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "complete"
+    assert len(result.packet["sources"]) == 1
+    assert result.packet["sources"][0]["source_url"].endswith("/en")
+    assert result.packet["sources"][0]["bilingual_siblings"] == []
+
 
 
 @pytest.mark.parametrize(
