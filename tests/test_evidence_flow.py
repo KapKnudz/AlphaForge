@@ -30,7 +30,7 @@ from alphaforge.evidence.flow import (
     download_pdf,
     validate_frozen_packet,
 )
-from alphaforge.providers.mfn.issuer import MfnIssuerResolver
+from alphaforge.providers.mfn.issuer import MfnIssuerResolver, parse_mfn_company_search_candidates
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mfn"
 
@@ -92,7 +92,70 @@ def test_mfn_resolver_queries_borsdata_identity_surface():
 
     with patch("alphaforge.providers.mfn.issuer.request_with_retry", side_effect=request):
         MfnIssuerResolver(base_url="https://mfn.test").discover(company)
-    assert "https://mfn.test/search?q=7001" in requested
+    assert "https://mfn.test/search/companies?limit=10&query=7001" in requested
+
+
+def test_mfn_company_search_json_discovers_exact_slug_and_identity():
+    company = {
+        "id": 101,
+        "borsdata_id": 156,
+        "name": "NIBE Industrier",
+        "ticker": "NIBE B",
+        "isin": "SE0015988019",
+    }
+    payload = {
+        "entity_id": "nibe-entity",
+        "slug": "nibe-industrier",
+        "name": "NIBE Industrier",
+        "isins": ["SE0015988019"],
+        "tickers": ["XSTO:NIBE B", "XLON:0RH0"],
+    }
+    surface = "https://mfn.test/search/companies?limit=10&query=NIBE%20B"
+
+    candidates = parse_mfn_company_search_candidates(
+        [payload], company=company, surface_url=surface, base_url="https://mfn.test"
+    )
+    resolution = MfnIssuerResolver(base_url="https://mfn.test").discover(
+        company, surfaces=[(surface, json.dumps([payload]))]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["mfn_slug"] == "all/a/nibe-industrier"
+    assert candidates[0]["source_url"] == "https://mfn.test/all/a/nibe-industrier"
+    assert candidates[0]["identity_evidence"]["matched_identifiers"] == [
+        "nibe b",
+        "se0015988019",
+    ]
+    assert resolution.status == "mapped"
+    assert resolution.selected == candidates[0]
+
+
+def test_mfn_company_search_multiple_exact_records_remain_ambiguous():
+    company = {"id": 101, "name": "NIBE Industrier", "ticker": "NIBE B", "isin": "SE0015988019"}
+    surface = "https://mfn.test/search/companies?limit=10&query=NIBE%20B"
+    payload = [
+        {
+            "entity_id": "one",
+            "slug": "nibe-industrier",
+            "name": "NIBE Industrier",
+            "isins": ["SE0015988019"],
+            "tickers": ["XSTO:NIBE B"],
+        },
+        {
+            "entity_id": "two",
+            "slug": "nibe-industrier-legacy",
+            "name": "NIBE Industrier legacy",
+            "isins": ["SE0015988019"],
+            "tickers": ["XSTO:NIBE B"],
+        },
+    ]
+
+    resolution = MfnIssuerResolver(base_url="https://mfn.test").discover(
+        company, surfaces=[(surface, json.dumps(payload))]
+    )
+
+    assert resolution.status == "ambiguous"
+    assert len(resolution.candidates) == 2
 
 
 def test_mapped_mfn_mapping_requires_structured_provenance_and_reason():
