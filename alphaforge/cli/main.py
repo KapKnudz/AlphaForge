@@ -223,14 +223,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 )
     except Exception as e:
         sync_failed = True
-        print(f"sync instruments failed: {e}", file=sys.stderr)
+        print(f"sync instruments failed: {_sanitize_provider_error(e)}", file=sys.stderr)
         record_job(
             conn,
             "sync_instruments",
             company_id=None,
             borsdata_id=None,
             status="failed",
-            error={"code": "instruments_fetch_failed", "message": str(e), "retryable": True},
+            error={"code": "instruments_fetch_failed", "message": _sanitize_provider_error(e), "retryable": True},
         )
 
     # Instruments now exist, so relink rows imported before the sync and only
@@ -344,7 +344,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as exc:
             sync_failed = True
-            print(f"translation metadata sync failed: {exc}", file=sys.stderr)
+            print(f"translation metadata sync failed: {_sanitize_provider_error(exc)}", file=sys.stderr)
         # kpi/report metadata caches
         try:
             kpis_meta = adapter.get_kpi_metadata()
@@ -373,10 +373,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as exc:
             sync_failed = True
-            print(f"metadata cache sync failed: {exc}", file=sys.stderr)
+            print(f"metadata cache sync failed: {_sanitize_provider_error(exc)}", file=sys.stderr)
     except Exception as e:
         sync_failed = True
-        print(f"reference dictionaries sync failed: {e}", file=sys.stderr)
+        print(f"reference dictionaries sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
     # Per-company sync with failure isolation — each company wrapped individually
     # Reports (batch 50 inside adapter)
@@ -440,7 +440,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         )
         except Exception as e:
             sync_failed = True
-            print(f"reports sync failed: {e}", file=sys.stderr)
+            print(f"reports sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
             for cid, bid, _ticker in company_rows:
                 record_job(
                     conn,
@@ -448,7 +448,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "reports_contract_failed", "message": str(e), "retryable": True},
+                    error={"code": "reports_contract_failed", "message": _sanitize_provider_error(e), "retryable": True},
                 )
 
         # Per-company prices / dividends / kpi branches etc — isolated
@@ -550,13 +550,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             },
                                         )
                                         continue
-                                    if _upserted == 0 and any(
-                                        isinstance(item, dict)
+                                    if _upserted < sum(
+                                        1
+                                        for item in values
+                                        if isinstance(item, dict)
                                         and (
                                             item.get("v") is not None
                                             or item.get("value") is not None
                                         )
-                                        for item in values
                                     ):
                                         sync_failed = True
                                         _kpi_summary_failed = True
@@ -650,13 +651,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                                 },
                                             )
                                             continue
-                                        if _upserted == 0 and any(
-                                            isinstance(item, dict)
+                                        if _upserted < sum(
+                                            1
+                                            for item in history_rows
+                                            if isinstance(item, dict)
                                             and (
                                                 item.get("v") is not None
                                                 or item.get("value") is not None
                                             )
-                                            for item in history_rows
                                         ):
                                             sync_failed = True
                                             _kpi_summary_failed = True
@@ -725,13 +727,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     },
                                 )
                                 continue
-                            if _upserted == 0 and any(
-                                isinstance(item, dict)
+                            if _upserted < sum(
+                                1
+                                for item in _rows
+                                if isinstance(item, dict)
                                 and (
                                     item.get("v") is not None
                                     or item.get("value") is not None
                                 )
-                                for item in _rows
                             ):
                                 sync_failed = True
                                 record_job(
@@ -852,7 +855,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as e:
             sync_failed = True
-            print(f"dividends sync failed: {e}", file=sys.stderr)
+            print(f"dividends sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Stock splits (rolling 1-year window, MAX 1 year per API) — global fetch
         try:
@@ -862,7 +865,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 upsert_stock_splits(conn, splits, company_map=b2c)
         except Exception as e:
             sync_failed = True
-            print(f"stock_splits sync failed: {e}", file=sys.stderr)
+            print(f"stock_splits sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Report calendar (weekly, but sync opportunistically)
         try:
@@ -872,7 +875,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 upsert_report_calendar(conn, cal, company_map=b2c)
         except Exception as e:
             sync_failed = True
-            print(f"report_calendar sync failed: {e}", file=sys.stderr)
+            print(f"report_calendar sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Holdings snapshots (global) — insider, buyback, shorts (shorts is global snapshot)
         # These are deferred per-company detail but snapshot tables are updated
@@ -914,7 +917,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 conn.commit()
         except Exception as e:
             sync_failed = True
-            print(f"shorts sync failed: {e}", file=sys.stderr)
+            print(f"shorts sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
     conn.commit()
     if sync_failed:
