@@ -1173,7 +1173,10 @@ def test_flow_paginated_history_retrieves_multiple_reports():
     )
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         result = OneCompanyEvidenceFlow(
-            conn, scraper=scraper, history_window=window, now=lambda: datetime(2026, 9, 20, tzinfo=UTC)
+            conn,
+            scraper=scraper,
+            history_window=window,
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         ).run(company_id, as_of="2026-09-20")
     assert result.status == "complete"
     assert result.packet is not None
@@ -1223,7 +1226,10 @@ def test_flow_history_window_truncates_old_reports():
     )
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         result = OneCompanyEvidenceFlow(
-            conn, scraper=scraper, history_window=window, now=lambda: datetime(2026, 9, 20, tzinfo=UTC)
+            conn,
+            scraper=scraper,
+            history_window=window,
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         ).run(company_id, as_of="2026-09-20")
     assert result.status == "complete"
     assert len(result.packet["sources"]) == 1

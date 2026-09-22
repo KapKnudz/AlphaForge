@@ -27,6 +27,19 @@ bytes; hashes the raw bytes; extracts with `pypdf`; and persists logical
 documents, bilingual sibling provenance, attachments, extraction metadata, and
 page anchors through repository helpers.
 
+Historical retrieval is bounded: interim reports keep a 2-year lookback and
+annual reports a 5-year lookback relative to `--as-of` (calendar-year
+arithmetic, Feb 29 maps to Feb 28). Feed cards outside the window are skipped
+before detail fetch, and authoritative detail-page timestamps are re-checked
+against the same cutoffs (`pre_cutoff_release` skip). Discovery pages the MFN
+`offset`/`limit` JSON feed with an HTML-fragment fallback (up to 12 offsets of
+48, at most 60 detail fetches); a paginated-feed transport failure raises
+`mfn_feed_fetch_failed` instead of ending the scan silently. Code-level
+defaults live in `ReportHistoryWindow` (`alphaforge/evidence/flow.py`); the
+legacy single-page plus Sunday page-2 contract applies only when paginated
+discovery is unavailable (on the default paginated path the Sunday page-2
+sweep survives only as a small-page HTML-fallback backstop).
+
 ### Bilingual selection and observation dates
 
 Bilingual deduplication is deliberately fail-open. Only opposite-language
