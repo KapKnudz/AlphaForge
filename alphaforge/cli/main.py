@@ -481,11 +481,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 cur = conn.execute("SELECT branch_id FROM companies WHERE id=?", (cid,))
                 r = cur.fetchone()
                 branch_id = r[0] if r else None
+                _kpi_summary_failed = False
+                _allowlist_ok: set[int] = set()
+                _allowlist_failed: set[int] = set()
                 for rt in ("year", "r12", "quarter"):
                     try:
                         summary = adapter.get_kpi_summary(bid, rt)
                     except Exception as exc:
                         sync_failed = True
+                        _kpi_summary_failed = True
                         record_job(
                             conn,
                             "sync_kpis",
@@ -531,6 +535,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         )
                                     except Exception as exc:
                                         sync_failed = True
+                                        _kpi_summary_failed = True
                                         record_job(
                                             conn,
                                             "sync_kpis",
@@ -550,8 +555,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
                                             (int(branch_id), kpi_id_int),
                                         )
+                                        if kpi_id_int in (37, 42):
+                                            _allowlist_ok.add(kpi_id_int)
                                     except Exception as exc:
                                         sync_failed = True
+                                        if kpi_id_int in (37, 42):
+                                            _allowlist_failed.add(kpi_id_int)
+                                        else:
+                                            _kpi_summary_failed = True
                                         record_job(
                                             conn,
                                             f"sync_kpis_allowlist_{kpi_id_int}"
@@ -573,6 +584,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         )
                                     except Exception as exc:
                                         sync_failed = True
+                                        _kpi_summary_failed = True
                                         record_job(
                                             conn,
                                             "sync_kpis",
@@ -598,6 +610,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             )
                                         except Exception as exc:
                                             sync_failed = True
+                                            _kpi_summary_failed = True
                                             record_job(
                                                 conn,
                                                 "sync_kpis",
@@ -659,13 +672,16 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 },
                             )
                             continue
+                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
                         if branch_id is not None:
                             try:
                                 conn.execute(
                                     "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
                                     (int(branch_id), int(_kpi_id)),
                                 )
+                                _allowlist_ok.add(int(_kpi_id))
                             except Exception as exc:
+                                _allowlist_failed.add(int(_kpi_id))
                                 sync_failed = True
                                 record_job(
                                     conn,
@@ -679,6 +695,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         "retryable": True,
                                     },
                                 )
+                    else:
+                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                if not _kpi_summary_failed:
+                    record_job(conn, "sync_kpis", company_id=cid, borsdata_id=bid, status="success")
+                for _allowlist_kpi in sorted(_allowlist_ok - _allowlist_failed):
+                    record_job(
+                        conn,
+                        f"sync_kpis_allowlist_{_allowlist_kpi}",
+                        company_id=cid,
+                        borsdata_id=bid,
+                        status="success",
+                    )
                 conn.commit()
             except Exception as exc:
                 sync_failed = True

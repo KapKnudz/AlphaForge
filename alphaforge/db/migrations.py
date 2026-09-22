@@ -123,6 +123,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(migration_path.read_text(encoding="utf-8"))
         set_user_version(conn, 6)
         conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON;")
         current = 6
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
