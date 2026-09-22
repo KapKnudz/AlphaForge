@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
-from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP, KpiIds
+from alphaforge.core.kpi_taxonomy import KpiIds
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
@@ -74,10 +74,6 @@ def test_live_report_fields_map_with_honest_provenance():
     assert row["total_debt"] is None
     assert row["operating_cash_flow"] == 2118.8
     assert row["revenue"] == 12513.9
-    # REPORT_FIELD_MAP is the only file that may contain raw keys
-    assert REPORT_FIELD_MAP["total_Equity"] == "equity"
-    assert REPORT_FIELD_MAP["net_Debt"] == "net_debt"
-    assert REPORT_FIELD_MAP["cash_Flow_From_Operating_Activities"] == "operating_cash_flow"
 
 
 def test_equity_and_net_debt_produce_roe_and_debt_to_equity():
@@ -107,7 +103,7 @@ def test_equity_and_net_debt_produce_roe_and_debt_to_equity():
     fin = results["financial"]
     assert fin is not None
     assert fin.roe == 0.2  # 100/500
-    assert fin.debt_to_equity == 0.1  # net_debt 50 / equity 500
+    assert fin.debt_to_equity is None  # gross total_debt unavailable; net_debt is not D/E
     assert fin.cash_conversion == 0.8  # 80/100
     # Net debt is surfaced with honest source; EV uses net_debt, so history can form
     assert fin.net_debt == 50

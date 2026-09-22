@@ -49,9 +49,6 @@ class FinancialCalculator:
         effective_net_debt = (
             current.net_debt if current.net_debt is not None else current.total_debt
         )
-        effective_debt_for_ratio = (
-            current.total_debt if current.total_debt is not None else current.net_debt
-        )
         return FinancialResult(
             operating_margin=self.calculate_ratio(current.operating_profit, current.revenue),
             net_margin=self.calculate_ratio(current.net_income, current.revenue),
@@ -61,7 +58,7 @@ class FinancialCalculator:
             net_income_growth=net_income_growth,
             roe=self.calculate_ratio(current.net_income, current.equity),
             roa=self.calculate_ratio(current.net_income, current.total_assets),
-            debt_to_equity=self.calculate_ratio(effective_debt_for_ratio, current.equity),
+            debt_to_equity=self.calculate_ratio(current.total_debt, current.equity),
             net_debt=effective_net_debt,
             equity=current.equity,
             revenue_growth_years=revenue_years,

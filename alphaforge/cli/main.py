@@ -523,35 +523,58 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     # Börsdata summary omits them (Clas Ohlson live: summary has 42 ids
                     # but not 37/42, while history endpoints return 10 rows each).
                     # Safe for genuinely unavailable KPIs: 400/empty is treated as missing.
-                    try:
-                        from alphaforge.core.kpi_taxonomy import KpiIds as _KpiIds
+                    from alphaforge.core.kpi_taxonomy import KpiIds as _KpiIds
 
-                        for _kpi_id, _rt in (
-                            (_KpiIds.ROIC, "year"),
-                            (_KpiIds.ROIC, "r12"),
-                            (_KpiIds.NET_DEBT_EBITDA, "year"),
-                            (_KpiIds.NET_DEBT_EBITDA, "r12"),
-                        ):
+                    for _kpi_id, _rt in (
+                        (_KpiIds.ROIC, "year"),
+                        (_KpiIds.ROIC, "r12"),
+                        (_KpiIds.NET_DEBT_EBITDA, "year"),
+                        (_KpiIds.NET_DEBT_EBITDA, "r12"),
+                    ):
+                        try:
+                            _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
+                        except Exception as exc:
+                            sync_failed = True
+                            record_job(
+                                conn,
+                                "sync_kpis",
+                                company_id=cid,
+                                borsdata_id=bid,
+                                status="failed",
+                                error={
+                                    "code": "kpi_history_fetch_failed",
+                                    "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                    "retryable": True,
+                                },
+                            )
+                            continue
+                        if _rows:
                             try:
-                                _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
-                            except Exception:
+                                upsert_kpi_observations(
+                                    conn, cid, int(_kpi_id), _rt, "mean", _rows
+                                )
+                            except Exception as exc:
+                                sync_failed = True
+                                record_job(
+                                    conn,
+                                    "sync_kpis",
+                                    company_id=cid,
+                                    borsdata_id=bid,
+                                    status="failed",
+                                    error={
+                                        "code": "kpi_history_upsert_failed",
+                                        "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                        "retryable": True,
+                                    },
+                                )
                                 continue
-                            if _rows:
-                                try:
-                                    upsert_kpi_observations(
-                                        conn, cid, int(_kpi_id), _rt, "mean", _rows
-                                    )
-                                except Exception:
-                                    pass
-                                try:
-                                    conn.execute(
-                                        "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
-                                        (int(branch_id), int(_kpi_id)),
-                                    )
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                            try:
+                                conn.execute(
+                                    "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
+                                    (int(branch_id), int(_kpi_id)),
+                                )
+                            except Exception:
+                                pass
                     conn.commit()
             except Exception as exc:
                 sync_failed = True
@@ -945,8 +968,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
                 dcf_export[company.ticker or str(company.id)] = rd
         dcf_path = exports_dir / "dcf.json"
         dcf_path.write_text(json.dumps(dcf_export, indent=2, ensure_ascii=False, default=str))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"rank: DCF export failed, {dcf_path} not written: {exc}", file=sys.stderr)
 
     # Save ranking run to DB.
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()

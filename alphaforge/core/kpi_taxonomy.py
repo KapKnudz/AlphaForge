@@ -27,7 +27,6 @@ REPORT_FIELD_MAP: dict[str, str] = {
     "cash_Flow_From_Operating_Activities": "operating_cash_flow",
     "cash_Flow_From_Investing_Activities": "investing_cash_flow",
     "cash_Flow_From_Financing_Activities": "financing_cash_flow",
-    "cash_Flow_For_The_Year": "cash_flow_for_year",
     "book_Value": "equity",
     "equity": "equity",
     # Live uses total_Equity (not book_Value) for equity; keep book_Value for

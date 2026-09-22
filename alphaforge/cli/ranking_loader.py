@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,24 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         net_debt_value = _number(row["net_debt"])
     except (KeyError, IndexError, TypeError):
         net_debt_value = None
+    try:
+        investing_value = _number(row["investing_cash_flow"])
+    except (KeyError, IndexError, TypeError):
+        investing_value = None
+    try:
+        raw_value = row["raw_payload"]
+    except (KeyError, IndexError, TypeError):
+        raw_value = None
+    raw_payload: dict | None = None
+    if isinstance(raw_value, dict):
+        raw_payload = raw_value
+    elif isinstance(raw_value, str) and raw_value:
+        try:
+            parsed = json.loads(raw_value)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            raw_payload = parsed
     return Report(
         revenue=_number(row["revenue"]),
         operating_profit=_number(row["operating_profit"]),
@@ -47,6 +66,8 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         ),
         gross_income=_number(row["gross_income"]),
         operating_cash_flow=_number(row["operating_cash_flow"]),
+        investing_cash_flow=investing_value,
+        raw_payload=raw_payload,
         cash=_number(row["cash"]),
         eps=_number(row["eps"]),
         dividend_per_share=_number(row["dividend_per_share"]),
@@ -195,7 +216,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
               (observation_date IS NOT NULL AND substr(observation_date, 1, 10) <= ?)
               OR (observation_date IS NULL AND year < ?)
           )
-        ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC
+        ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC,
+                 CASE WHEN period_type = 'r12' THEN 1 ELSE 0 END ASC
         """,
         (company_id, cutoff.isoformat(), cutoff.year),
     ).fetchall():
@@ -296,10 +318,13 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             roic=roic_for_dcf,
         )
         if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
-            # Net debt for DCF enterprise→equity bridge: prefer dedicated net_debt
-            dcf_net_debt = current_net_debt if current_net_debt is not None else 0.0
+            if current_net_debt is None:
+                reverse_dcf["dcf_error"] = (
+                    "net debt unavailable; DCF enterprise-to-equity bridge not valued"
+                )
+                reverse_dcf["status"] = "unavailable"
             # Current revenue for DCF must be positive; use current_report.revenue
-            if (
+            elif (
                 current_report.revenue
                 and current_report.shares_outstanding
                 and current_report.revenue > 0
@@ -310,7 +335,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                         current_price=latest_price.close,
                         shares_outstanding=current_report.shares_outstanding,
                         current_revenue=current_report.revenue,
-                        net_debt=float(dcf_net_debt),
+                        net_debt=float(current_net_debt),
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
                     )
