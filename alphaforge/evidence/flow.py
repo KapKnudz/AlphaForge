@@ -52,6 +52,28 @@ class EvidenceResourceLimits:
 DEFAULT_RESOURCE_LIMITS = EvidenceResourceLimits()
 
 
+@dataclass(frozen=True)
+class ReportHistoryWindow:
+    """Bounded historical retrieval window for annual/quarterly reports.
+
+    Interim reports (Q1-Q3 + year-end BKS) and official annual reports
+    drive different horizons: the Hedborg credibility ledger needs
+    ~8-12 quarters, while the annual valuation history benefits from
+    a deeper annual tail.  Both windows are applied as *cutoffs*
+    relative to ``as_of`` so a deeper offset scan can stop early
+    without fetching the entire MFN sales-noise tail.
+    """
+
+    interim_lookback_years: int = 2
+    annual_lookback_years: int = 5
+    max_offsets: int = 12
+    max_detail_fetches: int = 60
+    limit_per_offset: int = 48
+
+
+DEFAULT_HISTORY_WINDOW = ReportHistoryWindow()
+
+
 class PdfAcquisitionError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -749,6 +771,113 @@ def _discover_feed_page(scraper: Any, mfn_slug: str, page: int) -> list[dict[str
     return discover_feed(mfn_slug, page=page, reports_only=True)
 
 
+def _resolve_cutoff(as_of: str, window: ReportHistoryWindow, report_kind: str | None) -> str:
+    """Return the oldest publish date to keep for ``report_kind``."""
+    as_year = int(as_of[:4])
+    as_month = int(as_of[5:7])
+    as_day = int(as_of[8:10])
+    years = (
+        window.annual_lookback_years if report_kind == "annual" else window.interim_lookback_years
+    )
+    # Year arithmetic is calendar-year based; keep month/day stable so the
+    # window is deterministic and matches frozen-packet PIT semantics.
+    cutoff_year = as_year - years
+    try:
+        return datetime(cutoff_year, as_month, as_day, tzinfo=UTC).date().isoformat()
+    except ValueError:
+        # Feb 29 → Feb 28 in non-leap cutoff year.
+        return datetime(cutoff_year, as_month, 28, tzinfo=UTC).date().isoformat()
+
+
+def _discover_historical_feed(
+    scraper: Any,
+    mfn_slug: str,
+    *,
+    as_of: str,
+    window: ReportHistoryWindow,
+    today_iso: str,
+) -> list[dict[str, Any]]:
+    """Collect paginated report feed within ``window``.
+
+    Prefers ``discover_feed_paginated(offset, limit)`` (JSON feed) when
+    available; falls back to repeated ``discover_feed(page=)`` for
+    backward-compatible fakes.  Filtering mirrors ``_report_identity_seed``
+    (report-only) and applies PIT/window cutoffs before detail fetch.
+    """
+    paginated = getattr(scraper, "discover_feed_paginated", None)
+    # New path: offset/limit JSON pagination.
+    if callable(paginated):
+        out: list[dict[str, Any]] = []
+        offset = 0
+        limit = window.limit_per_offset
+        for _ in range(window.max_offsets):
+            try:
+                articles, next_offset = paginated(
+                    mfn_slug, offset=offset, limit=limit, reports_only=True
+                )
+            except TypeError:
+                # Older fake scraper signature without reports_only.
+                articles, next_offset = paginated(mfn_slug, offset=offset, limit=limit)
+            if not articles and next_offset is None:
+                break
+            # Window filter: keep anything that *could* be in the future
+            # window; rely on the later PIT gate for final published_at check.
+            for art in articles:
+                pub = str(art.get("published_at") or "")[:10]
+                # When published_at is None (feed-card without timestamp),
+                # keep it — detail page is authoritative.
+                if pub:
+                    kind = art.get("report_kind")
+                    cutoff = _resolve_cutoff(
+                        as_of, window, kind if kind in {"annual", "quarterly"} else None
+                    )
+                    deepest_cutoff = _resolve_cutoff(as_of, window, "annual")
+                    if pub < cutoff or pub > as_of[:10] or pub > today_iso:
+                        # Outside historical window or after cutoff — skip
+                        # before detail fetch.  Still allow advancing offset
+                        # because deeper offsets are strictly older.
+                        if pub < deepest_cutoff:
+                            # Deeper offsets will be even older → stop.
+                            return out
+                        continue
+                out.append(art)
+                if len(out) >= window.max_detail_fetches:
+                    return out
+            if next_offset is None:
+                break
+            offset = next_offset
+        return out
+    # Fallback: legacy page-based HTML discovery.  Preserve the Sunday
+    # page-2 backstop for fakes that implement ``page=`` pagination (the
+    # weekly sweep that catches FY reports pushed off page 1).
+    try:
+        feed = scraper.discover_feed(mfn_slug, reports_only=True)
+        # Sunday page-2: extend with page=2 when the fake supports it.
+        try:
+            # Weekday derived from today_iso (YYYY-MM-DD) avoids needing now.
+            y, m, d = (int(part) for part in today_iso.split("-"))
+            wd = datetime(y, m, d, tzinfo=UTC).weekday()
+            if wd == 6:
+                feed = list(feed) + _discover_feed_page(scraper, mfn_slug, 2)
+        except Exception:
+            pass
+    except Exception:
+        return []
+    # Window-filter the legacy feed as well.
+    filtered: list[dict[str, Any]] = []
+    for art in feed:
+        pub = str(art.get("published_at") or "")[:10]
+        if pub:
+            deepest = _resolve_cutoff(as_of, window, "annual")
+            if pub < deepest or pub > as_of[:10] or pub > today_iso:
+                if pub and pub < deepest:
+                    continue
+                # page-based feed is single-page, so no early break needed
+                continue
+        filtered.append(art)
+    return filtered
+
+
 class OneCompanyEvidenceFlow:
     """Compose deterministic mapping, release, PDF, extraction and packet steps."""
 
@@ -759,6 +888,7 @@ class OneCompanyEvidenceFlow:
         scraper: MfnScraper | None = None,
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
+        history_window: ReportHistoryWindow | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.conn = conn
@@ -769,6 +899,7 @@ class OneCompanyEvidenceFlow:
         self.scraper = scraper
         self.resolver = resolver or MfnIssuerResolver(base_url=self.scraper.base_url)
         self.limits = limits
+        self.history_window: ReportHistoryWindow | None = history_window
         self.now = now or (lambda: datetime.now(UTC))
 
     def run(
@@ -967,10 +1098,50 @@ class OneCompanyEvidenceFlow:
                 EvidenceFlowResult("mapping_unavailable", company_id, mapping_status="unmapped")
             )
         now = self.now()
+        today = now.date()
+        # Bounded historical retrieval: paginated offset/limit feed when a
+        # history window is active.  Without a window we keep the single-page
+        # delta + Sunday page-2 contract so existing tests and incremental
+        # daily runs stay byte-identical.
+        window = self.history_window or DEFAULT_HISTORY_WINDOW
         try:
-            feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
-            if now.weekday() == 6:
-                feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
+            if self.history_window is not None:
+                feed = _discover_historical_feed(
+                    self.scraper,
+                    mapping["mfn_slug"],
+                    as_of=as_of,
+                    window=window,
+                    today_iso=today.isoformat(),
+                )
+            elif hasattr(self.scraper, "discover_feed_paginated"):
+                # Default historical path: bounded window with default limits.
+                feed = _discover_historical_feed(
+                    self.scraper,
+                    mapping["mfn_slug"],
+                    as_of=as_of,
+                    window=window,
+                    today_iso=today.isoformat(),
+                )
+                # Preserve Sunday page-2 as an additional sweep only when
+                # the paginated path returned a small page (HTML fallback).
+                if now.weekday() == 6 and len(feed) < window.limit_per_offset:
+                    try:
+                        extra = _discover_feed_page(self.scraper, mapping["mfn_slug"], 2)
+                        # Dedupe extra into feed preserving order.
+                        seen_extra = {
+                            e if isinstance(e, str) else e.get("url") or e.get("source_url")
+                            for e in feed
+                        }
+                        for e in extra:
+                            u = e if isinstance(e, str) else e.get("url") or e.get("source_url")
+                            if u not in seen_extra:
+                                feed.append(e)
+                    except Exception:
+                        pass
+            else:
+                feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
+                if now.weekday() == 6:
+                    feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
         except MfnAcquisitionError as exc:
             return finish(
                 EvidenceFlowResult(
@@ -991,7 +1162,6 @@ class OneCompanyEvidenceFlow:
                 seen_feed_urls.add(url)
             unique_feed.append(entry)
         unseen_feed = []
-        today = now.date()
         future_dated_complete_release = False
         not_yet_published_complete_release = False
         for entry in unique_feed:
