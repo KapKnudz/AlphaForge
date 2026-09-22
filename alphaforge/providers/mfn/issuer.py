@@ -164,6 +164,93 @@ def _json_links(payload: Any) -> Iterable[tuple[str, str, dict[str, str]]]:
             yield from _json_links(value)
 
 
+def _company_search_identifier_values(record: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("ticker", "isin", "borsdata_id", "insId", "instrumentId"):
+        value = record.get(key)
+        if value not in (None, ""):
+            values.add(_normalise(value))
+    for key in ("tickers", "isins"):
+        raw_values = record.get(key) or []
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, list):
+            continue
+        for value in raw_values:
+            normalized = _normalise(value)
+            if normalized:
+                values.add(normalized)
+                if ":" in str(value):
+                    values.add(_normalise(str(value).rsplit(":", 1)[-1]))
+    return values
+
+
+def _company_search_records(payload: str | dict[str, Any] | list[Any]) -> list[dict[str, Any]]:
+    if isinstance(payload, str):
+        try:
+            loaded = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    else:
+        loaded = payload
+    if isinstance(loaded, dict):
+        records = loaded.get("companies") or loaded.get("items") or []
+    else:
+        records = loaded
+    return (
+        [record for record in records if isinstance(record, dict)]
+        if isinstance(records, list)
+        else []
+    )
+
+
+def parse_mfn_company_search_candidates(
+    payload: str | dict[str, Any] | list[Any],
+    *,
+    company: dict[str, Any],
+    surface_url: str,
+    base_url: str = BASE_URL,
+    discovery_source: str = "mfn_company_search",
+) -> list[dict[str, Any]]:
+    """Parse MFN's JSON company-search records without deriving identity."""
+    identifiers = _exact_identifier_values(company)
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in _company_search_records(payload):
+        observed_slug = str(record.get("slug") or "").strip()
+        if not observed_slug:
+            continue
+        href = record.get("url") or record.get("profile_url") or f"/all/a/{observed_slug}"
+        absolute = urljoin(surface_url, str(href))
+        slug = _candidate_slug(absolute, base_url)
+        if not slug:
+            continue
+        matched_identifiers = sorted(
+            identifiers.intersection(_company_search_identifier_values(record))
+        )
+        if not matched_identifiers:
+            continue
+        canonical_url = _canonical_issuer_url(absolute)
+        candidates[(slug.lower(), canonical_url)] = {
+            "mfn_slug": slug,
+            "source_url": canonical_url,
+            "discovery_source": discovery_source,
+            "match_basis": "exact_identifier",
+            "identity_evidence": {
+                "provenance": surface_url,
+                "reason": "matched explicit external identifier(s): "
+                + ", ".join(matched_identifiers),
+                "surface_url": surface_url,
+                "entity_id": record.get("entity_id"),
+                "label": record.get("name") or record.get("title") or "",
+                "observed_slug": observed_slug,
+                "matched_identifiers": matched_identifiers,
+            },
+        }
+    return sorted(
+        candidates.values(), key=lambda item: (item["mfn_slug"].lower(), item["source_url"])
+    )
+
+
 def parse_mfn_issuer_candidates(
     payload: str | dict[str, Any] | list[Any],
     *,
@@ -254,7 +341,9 @@ class MfnIssuerResolver:
             urls = [self.base_url]
             for value in query_values:
                 if value not in (None, ""):
-                    urls.append(f"{self.base_url}/search?q={quote(str(value))}")
+                    urls.append(
+                        f"{self.base_url}/search/companies?limit=10&query={quote(str(value))}"
+                    )
             fetched: list[tuple[str, str]] = []
             for url in urls[: self.max_surfaces]:
                 try:
@@ -273,15 +362,25 @@ class MfnIssuerResolver:
             surfaces = fetched
         candidates: list[dict[str, Any]] = []
         for surface_url, payload in surfaces:
-            candidates.extend(
-                parse_mfn_issuer_candidates(
-                    payload,
-                    company=company,
-                    surface_url=surface_url,
-                    base_url=self.base_url,
-                    discovery_source="mfn_search_or_index",
+            if "/search/companies" in surface_url:
+                candidates.extend(
+                    parse_mfn_company_search_candidates(
+                        payload,
+                        company=company,
+                        surface_url=surface_url,
+                        base_url=self.base_url,
+                    )
                 )
-            )
+            else:
+                candidates.extend(
+                    parse_mfn_issuer_candidates(
+                        payload,
+                        company=company,
+                        surface_url=surface_url,
+                        base_url=self.base_url,
+                        discovery_source="mfn_search_or_index",
+                    )
+                )
         unique = {
             (
                 candidate["mfn_slug"].lower(),
