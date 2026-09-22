@@ -319,3 +319,43 @@ def test_historical_ev_ebit_uses_net_debt_so_guardrails_form():
     assert val.ev_ebit is not None
     assert val.ev_ebit_history_count >= 5
     assert val.ev_ebit_guardrail_low is not None
+
+
+def test_kpi_observation_date_is_persisted_and_pit_filtered():
+    conn = _mem_conn()
+    cid = upsert_company(conn, {"insId": 9008, "name": "PIT AB", "ticker": "PIT"})
+    upsert_kpi_observations(
+        conn,
+        cid,
+        KpiIds.ROIC,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 22.0, "observationDate": "2026-02-01T00:00:00"}],
+    )
+    row = conn.execute(
+        "SELECT observation_date FROM kpi_observations WHERE company_id=? AND kpi_id=?",
+        (cid, int(KpiIds.ROIC)),
+    ).fetchone()
+    assert row["observation_date"] == "2026-02-01"
+    upsert_financial_periods(
+        conn,
+        cid,
+        [
+            {
+                "period_type": "year",
+                "period_end": "2025-12-31",
+                "report_Date": "2026-01-05T00:00:00",
+                "revenues": 1000,
+                "operating_Income": 100,
+                "profit_To_Equity_Holders": 50,
+                "total_Equity": 300,
+                "number_Of_Shares": 10,
+                "currency": "SEK",
+            }
+        ],
+    )
+    upsert_prices(conn, cid, [{"d": "2026-01-10T00:00:00", "c": 20, "v": 100}], currency="SEK")
+    early = load_results_for_company(conn, cid, "2026-01-15")
+    assert KpiIds.ROIC not in early["fundamental_kpis"]
+    late = load_results_for_company(conn, cid, "2026-02-02")
+    assert late["fundamental_kpis"][KpiIds.ROIC] == 22.0

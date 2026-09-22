@@ -222,7 +222,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ]
 
         def get_branches(self):
-            return []
+            return [{"id": 1, "name": "Branch 1", "nameEn": "Branch 1", "sectorId": None}]
 
         def get_sectors(self):
             return []
@@ -234,7 +234,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             return []
 
         def get_kpi_metadata(self):
-            return []
+            return [{"kpiId": 2, "nameSv": "KPI 2", "nameEn": "KPI 2", "format": None, "isString": False}]
 
         def get_report_metadata(self):
             return []

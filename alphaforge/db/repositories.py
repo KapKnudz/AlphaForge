@@ -385,6 +385,8 @@ def upsert_kpi_observations(
                 continue
             year_int = int(year)
             report_period_int = int(report_period) if report_period is not None else None
+            if isinstance(observation_date, str) and len(observation_date) > 10:
+                observation_date = observation_date[:10]
             if report_period_int is None:
                 existing = conn.execute(
                     """
@@ -397,17 +399,17 @@ def upsert_kpi_observations(
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE kpi_observations SET value=? WHERE id=?",
-                        (val_f, int(existing[0])),
+                        "UPDATE kpi_observations SET value=?, observation_date=COALESCE(?, observation_date) WHERE id=?",
+                        (val_f, observation_date, int(existing[0])),
                     )
                     count += 1
                     continue
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, value)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, observation_date, value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, year, report_period)
-                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value
+                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=COALESCE(excluded.observation_date, kpi_observations.observation_date)
                 """,
                 (
                     company_id,
@@ -416,6 +418,7 @@ def upsert_kpi_observations(
                     price_type,
                     year_int,
                     report_period_int,
+                    observation_date,
                     val_f,
                 ),
             )
