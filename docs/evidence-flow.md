@@ -5,7 +5,11 @@ stores observed candidates in `mfn_issuer_candidates`; only a `mapped` row in
 `mfn_issuer_mappings` with a source URL, verification timestamp, and identity
 evidence can drive ingestion. Use `alphaforge mfn-map-seed` for a reviewed JSON
 seed or `alphaforge mfn-map` for an explicit operator decision. Ambiguous
-discovery is stored for review and is never promoted automatically.
+discovery is stored for review and is never promoted automatically. Live discovery
+uses MFN's issuer/index surfaces and its `/search/companies` JSON surface. Search
+records are accepted only when an explicit ticker, ISIN, or Börsdata identifier
+matches the stored company identity; observed slugs are retained as evidence and
+are never derived from company names. Multiple exact matches remain ambiguous.
 
 The one-company lane is explicit:
 
