@@ -408,10 +408,6 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     strong_corroborator |= shared_checksum
     body_left = left.get("content_text") or left.get("body")
     body_right = right.get("content_text") or right.get("body")
-    if body_left and body_right:
-        normalized_left = " ".join(str(body_left).split()).casefold()
-        normalized_right = " ".join(str(body_right).split()).casefold()
-        strong_corroborator |= normalized_left == normalized_right
     numeric_left = _numeric_key_figure_fingerprint(body_left)
     numeric_right = _numeric_key_figure_fingerprint(body_right)
     numeric_corroborator = bool(numeric_left and numeric_right and numeric_left == numeric_right)
@@ -420,9 +416,6 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     strong_corroborator |= numeric_corroborator
     if not shared_event and not shared_checksum and not numeric_corroborator:
         return False
-    url_left = canonical_release_url(str(left.get("source_url") or left.get("url") or ""))
-    url_right = canonical_release_url(str(right.get("source_url") or right.get("url") or ""))
-    strong_corroborator |= bool(url_left and url_left == url_right)
     period_left = _fiscal_period(left)
     period_right = _fiscal_period(right)
     derived_corroborator |= bool(period_left and period_left == period_right)
