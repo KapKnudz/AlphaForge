@@ -119,9 +119,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         ]
         migration_path = next((path for path in candidates if path.exists()), None)
         if migration_path is None:
-            raise FileNotFoundError(
-                f"jobs/net-debt migration not found (tried {candidates})"
-            )
+            raise FileNotFoundError(f"jobs/net-debt migration not found (tried {candidates})")
         conn.executescript(migration_path.read_text(encoding="utf-8"))
         set_user_version(conn, 6)
         conn.commit()

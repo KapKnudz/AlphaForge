@@ -269,10 +269,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     if dcf_current_report.net_debt is not None:
         current_net_debt = dcf_current_report.net_debt
         net_debt_source = "net_debt"
-    elif (
-        dcf_current_report.total_debt is not None
-        and dcf_current_report.cash is not None
-    ):
+    elif dcf_current_report.total_debt is not None and dcf_current_report.cash is not None:
         current_net_debt = dcf_current_report.total_debt - dcf_current_report.cash
         net_debt_source = "total_debt_minus_cash"
     else:
@@ -443,9 +440,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
                         else [],
-                        "missing_information": list(
-                            dcf_policy_decision.missing_information
-                        ),
+                        "missing_information": list(dcf_policy_decision.missing_information),
                     }
                     # Reverse DCF: solve implied assumption that equates model to market price
                     for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
