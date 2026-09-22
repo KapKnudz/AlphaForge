@@ -317,6 +317,15 @@ def test_fiscal_observation_date_uses_reported_period_end_not_calendar_quarter()
         )
         == "2026-07-31"
     )
+    assert (
+        _observation_date(
+            {
+                "title": "Clas Ohlson Interim Report Q1 2026/2027",
+                "body": "The first quarter covered May 1 - July 31.",
+            }
+        )
+        == "2026-07-31"
+    )
 
 
 def test_flow_filters_missing_and_future_dates_and_is_idempotent():

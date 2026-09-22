@@ -260,10 +260,6 @@ def _date_value(day: str, month: str, year: str | None) -> str | None:
         return None
 
 
-def _has_fiscal_year_span(title: str) -> bool:
-    return bool(re.search(r"\b20\d{2}\s*[/\-]\s*(?:20)?\d{2}\b", title))
-
-
 def _range_start(
     start_day: str, start_month: str, start_year: str | None, end_iso: str
 ) -> str | None:
@@ -293,12 +289,19 @@ def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]
         return None, None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
     title = str(article.get("title") or "")
+    fiscal_span_match = re.search(
+        r"\b(20\d{2})\s*[/\-]\s*(?:20)?\d{2}\b", title, re.IGNORECASE
+    )
     year_match = (
         None
-        if _has_fiscal_year_span(title)
+        if fiscal_span_match
         else re.search(r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", title, re.IGNORECASE)
     )
-    fiscal_year = year_match.group(1) if year_match else None
+    fiscal_year = (
+        fiscal_span_match.group(1)
+        if fiscal_span_match
+        else year_match.group(1) if year_match else None
+    )
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
     # ``1 May – 31 July 2026`` are emitted by MFN pages.
     range_pattern = re.compile(
@@ -374,8 +377,8 @@ def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]
                 return None, None
         return candidates[0][1], candidates[0][2]
     month_first = re.compile(
-        rf"\b({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\s*"
-        rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
+        rf"\b({months})\s+(\d{{1,2}}),?(?:\s+(20\d{{2}}))?\s*"
+        rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?(?:\s+(20\d{{2}}))?\b"
     )
     month_candidates: list[tuple[int, str | None, str]] = []
     for match in month_first.finditer(body):
