@@ -552,6 +552,47 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     assert second.packet_hash == result.packet_hash
 
 
+def test_flow_uses_pdf_language_before_variant_grouping():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": "https://mfn.test/a/flow/pdf-authority/sv",
+            "title": "Flow AB delårsrapport Q1 2026",
+            "published_at": "2026-05-01T08:00:00Z",
+            "attachment_url": "https://storage.mfn.test/q1-sv.pdf",
+            "lang": "en",
+            "provider_event_id": "flow-pdf-authority-q1",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/pdf-authority/en",
+            "title": "Flow AB Interim Report Q1 2026",
+            "published_at": "2026-05-01T08:00:00Z",
+            "attachment_url": "https://storage.mfn.test/q1-english.pdf",
+            "lang": "sv",
+            "provider_event_id": "flow-pdf-authority-q1",
+        },
+    ]
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper(articles),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "complete"
+    assert len(result.packet["sources"]) == 1
+    source = result.packet["sources"][0]
+    assert source["language"] == "en"
+    assert source["source_url"].endswith("/en")
+    assert source["bilingual_siblings"][0]["language"] == "sv"
+    assert source["bilingual_siblings"][0]["relationship"] == "TRANSLATION"
+
+
 @pytest.mark.parametrize(
     ("content_type", "content", "code"),
     [

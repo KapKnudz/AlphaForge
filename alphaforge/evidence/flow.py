@@ -1089,27 +1089,64 @@ class OneCompanyEvidenceFlow:
                 }
             )
         identity_candidates = persisted_identity + eligible
+        if dry_run:
+            deduped = bilingual_dedupe(identity_candidates)
+            result.eligible = sum(
+                1 for article in deduped if not article.get("_persisted_evidence")
+            )
+            result.status = "dry_run"
+            return result
+
+        ingestion = ResearchDocumentIngestionService(self.conn)
+        resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
+        attempted_existing_pdf_resolution: set[str] = set()
+        for index, candidate in enumerate(identity_candidates):
+            attachment_url = candidate.get("attachment_url") or candidate.get("storage_url")
+            if not attachment_url:
+                continue
+            existing = find_complete_evidence_attachment(
+                self.conn, str(attachment_url), company_id
+            )
+            if existing is not None and existing.get("canonical_source_url"):
+                attempted_existing_pdf_resolution.add(str(attachment_url))
+            try:
+                candidate_download = download_pdf(str(attachment_url), limits=self.limits)
+                candidate_extracted = ingestion.extract_pdf_pages(
+                    candidate_download.content, max_pages=self.limits.max_pages
+                )
+            except Exception:
+                continue
+            if not candidate_extracted.pages:
+                continue
+            pdf_first_pages = "\n".join(
+                str(page.get("text") or "") for page in candidate_extracted.pages[:3]
+            )
+            release_lang = candidate.get("lang") or candidate.get("ingested_lang") or ""
+            pdf_language, language_evidence = resolve_document_language(
+                filename=candidate_download.source_url,
+                pdf_text=pdf_first_pages,
+                release_title=str(candidate.get("title") or ""),
+                release_body=str(candidate.get("content_text") or candidate.get("body") or ""),
+                release_lang=str(release_lang),
+            )
+            resolved = {
+                **candidate,
+                "pdf_language": pdf_language,
+                "language_evidence": language_evidence,
+                "ingested_lang": pdf_language or release_lang or "en",
+            }
+            identity_candidates[index] = resolved
+            resolved_pdf_cache[str(attachment_url)] = (
+                candidate_download,
+                candidate_extracted,
+                pdf_language,
+                language_evidence,
+            )
+
         shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
-        if dry_run:
-            result.status = "dry_run"
-            return result
-        ingestion = ResearchDocumentIngestionService(self.conn)
         for article in deduped:
-            if article.get("_persisted_evidence"):
-                for sibling in article.get("_suppressed_variants", []):
-                    # Reconcile already-persisted bilingual rows as well as
-                    # newly discovered siblings.  This repairs databases from
-                    # the pre-semantic-identity flow where both translations
-                    # were accidentally canonical.
-                    persist_evidence_sibling(
-                        self.conn,
-                        company_id=company_id,
-                        canonical_source_url=str(article["source_url"]),
-                        sibling=sibling,
-                    )
-                continue
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
             downloaded = None
@@ -1131,7 +1168,28 @@ class OneCompanyEvidenceFlow:
                 existing = find_complete_evidence_attachment(
                     self.conn, str(attachment_url), company_id
                 )
-                if existing is not None and existing.get("canonical_source_url"):
+                resolved_pdf = resolved_pdf_cache.get(str(attachment_url))
+                if resolved_pdf is not None:
+                    candidate_download, candidate_extracted, pdf_language, language_evidence = (
+                        resolved_pdf
+                    )
+                    release_lang = variant.get("lang") or variant.get("ingested_lang") or ""
+                    prepared = {
+                        **variant,
+                        "pdf_language": pdf_language,
+                        "language_evidence": language_evidence,
+                        "ingested_lang": pdf_language or release_lang or "en",
+                    }
+                    prepared_variants.append(prepared)
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, existing)
+                    )
+                    continue
+                if (
+                    existing is not None
+                    and existing.get("canonical_source_url")
+                    and str(attachment_url) in attempted_existing_pdf_resolution
+                ):
                     metadata = {}
                     try:
                         loaded = json.loads(existing.get("canonical_raw_metadata") or "")
@@ -1235,6 +1293,17 @@ class OneCompanyEvidenceFlow:
                 )[0]
                 if selected_existing is not None:
                     existing_canonical_source_url = str(selected_existing["canonical_source_url"])
+                    if (
+                        selected.get("_persisted_evidence")
+                        and downloaded is not None
+                        and extracted is not None
+                    ):
+                        persist_option(
+                            _prepare_selected_article(selected, downloaded, extracted),
+                            downloaded,
+                            extracted,
+                            [],
+                        )
                     successful_variants = {id(option[0]) for option in candidate_options}
                     for option in candidate_options:
                         if option[0] is selected:
