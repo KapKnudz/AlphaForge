@@ -245,19 +245,23 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         current.dividend_yield = sum(float(row[0]) for row in dividends) / latest_price.close * 100
     valuation = ValuationCalculator().calculate(current, historical, current_raw)
 
-    kpis: dict[int, float] = {}
+    kpi_r12: dict[int, float] = {}
+    kpi_annual: dict[int, float] = {}
     for row in conn.execute(
         """
-        SELECT kpi_id, value FROM kpi_observations
+        SELECT kpi_id, value, period_type FROM kpi_observations
         WHERE company_id=? AND value IS NOT NULL
           AND year <= ?
           AND (observation_date IS NULL OR substr(observation_date, 1, 10) <= ?)
-        ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC,
-                 CASE WHEN period_type = 'r12' THEN 1 ELSE 0 END ASC
+        ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC
         """,
         (company_id, cutoff.year, cutoff.isoformat()),
     ).fetchall():
-        kpis[int(row[0])] = float(row[1])
+        if row[2] == "r12":
+            kpi_r12[int(row[0])] = float(row[1])
+        else:
+            kpi_annual[int(row[0])] = float(row[1])
+    kpis: dict[int, float] = {**kpi_annual, **kpi_r12}
 
     docs = [
         dict(row)
