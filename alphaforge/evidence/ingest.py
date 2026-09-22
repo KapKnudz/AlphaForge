@@ -227,8 +227,11 @@ def _quarter_period(text: str) -> str | None:
 def _fiscal_period(doc: dict[str, Any]) -> str:
     text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body"))
     explicit = next(
-        (str(doc[key]).casefold().strip() for key in ("fiscal_period", "report_period", "period")
-         if doc.get(key) not in (None, "")),
+        (
+            str(doc[key]).casefold().strip()
+            for key in ("fiscal_period", "report_period", "period")
+            if doc.get(key) not in (None, "")
+        ),
         None,
     )
     if explicit:
@@ -330,9 +333,7 @@ def _numeric_key_figure_fingerprint(value: Any) -> tuple[str, ...]:
         return ()
     text = str(value)
     figures: list[str] = []
-    token_pattern = re.compile(
-        r"(?<![\w/])(?:\d{1,3}(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)(?![\w/])"
-    )
+    token_pattern = re.compile(r"(?<![\w/])(?:\d{1,3}(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)(?![\w/])")
     unit_aliases = {
         "%": "%",
         "sek": "currency",
@@ -362,11 +363,7 @@ def _numeric_key_figure_fingerprint(value: Any) -> tuple[str, ...]:
         elif "," in compact or "." in compact:
             separator = "," if "," in compact else "."
             before, after = compact.rsplit(separator, 1)
-            compact = (
-                before + after
-                if len(after) == 3
-                else before + "." + after
-            )
+            compact = before + after if len(after) == 3 else before + "." + after
         try:
             number = f"{float(compact):g}"
         except ValueError:
@@ -446,8 +443,7 @@ def bilingual_dedupe(
         matches = [
             index
             for index, variants in enumerate(groups)
-            if len(variants) == 1
-            and _cross_language_correspondence(doc, variants[0])
+            if len(variants) == 1 and _cross_language_correspondence(doc, variants[0])
         ]
         if len(matches) == 1:
             groups[matches[0]].append(doc)
@@ -466,15 +462,9 @@ def bilingual_dedupe(
             out.append(variants[0])
             continue
         group_keys = sorted(
-            {
-                key
-                for variant in variants
-                for key in _bilingual_identity_keys(variant)
-            }
+            {key for variant in variants for key in _bilingual_identity_keys(variant)}
         )
-        group_id = hashlib.sha256(
-            "|".join(group_keys).encode()
-        ).hexdigest()[:24]
+        group_id = hashlib.sha256("|".join(group_keys).encode()).hexdigest()[:24]
         for variant in variants:
             variant["_bilingual_group_id"] = group_id
         variants_sorted = sorted(

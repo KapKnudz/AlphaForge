@@ -227,9 +227,7 @@ def test_duplicate_feed_url_resolves_to_complete_canonical_document():
     conn = _connection()
     try:
         conn.execute("INSERT INTO companies (borsdata_id, name) VALUES (502, 'Canonical AB')")
-        company_id = conn.execute(
-            "SELECT id FROM companies WHERE borsdata_id=502"
-        ).fetchone()[0]
+        company_id = conn.execute("SELECT id FROM companies WHERE borsdata_id=502").fetchone()[0]
         persist_evidence_document(
             conn,
             company_id=company_id,

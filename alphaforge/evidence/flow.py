@@ -184,8 +184,10 @@ def _body_period_end(article: dict[str, Any]) -> str | None:
         return None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
     title = str(article.get("title") or "")
-    year_match = None if _has_fiscal_year_span(title) else re.search(
-        r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", title, re.IGNORECASE
+    year_match = (
+        None
+        if _has_fiscal_year_span(title)
+        else re.search(r"\bq\s*[1-4]\s*(?:fy\s*)?(20\d{2})", title, re.IGNORECASE)
     )
     fiscal_year = year_match.group(1) if year_match else None
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
@@ -662,9 +664,7 @@ class OneCompanyEvidenceFlow:
                             "evidence",
                             company_id=company_id,
                             borsdata_id=(
-                                int(row["borsdata_id"])
-                                if row["borsdata_id"] is not None
-                                else None
+                                int(row["borsdata_id"]) if row["borsdata_id"] is not None else None
                             ),
                             status="failed",
                             error={"code": "unhandled_error", "message": str(exc)},
@@ -826,9 +826,7 @@ class OneCompanyEvidenceFlow:
                         not_yet_published_complete_release = True
                     continue
             unseen_feed.append(entry)
-        complete_documents = complete_evidence_identity_documents(
-            self.conn, company_id, as_of=None
-        )
+        complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
         for document in complete_documents:
             published_date = str(document.get("published_at") or "")[:10]
             if published_date > as_of[:10]:
@@ -989,14 +987,10 @@ class OneCompanyEvidenceFlow:
                         candidate_download.content, max_pages=self.limits.max_pages
                     )
                 except Exception:
-                    failures["pdf_extraction_failed"] = (
-                        failures.get("pdf_extraction_failed", 0) + 1
-                    )
+                    failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
                 if not candidate_extracted.pages:
-                    failures["pdf_extraction_failed"] = (
-                        failures.get("pdf_extraction_failed", 0) + 1
-                    )
+                    failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
                 selected = variant
                 downloaded = candidate_download
@@ -1057,7 +1051,8 @@ class OneCompanyEvidenceFlow:
         packet_limitations = [
             f"evidence_flow_{code}:{count}"
             for code, count in sorted(result.skipped.items())
-            if code not in {
+            if code
+            not in {
                 "non_report_release",
                 "future_dated_release",
                 "not_yet_published_release",
