@@ -484,6 +484,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 _kpi_summary_failed = False
                 _allowlist_ok: set[int] = set()
                 _allowlist_failed: set[int] = set()
+                _kpi_history_ok: set[tuple[int, str]] = set()
                 for rt in ("year", "r12", "quarter"):
                     try:
                         summary = adapter.get_kpi_summary(bid, rt)
@@ -557,6 +558,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         )
                                         if kpi_id_int in (37, 42):
                                             _allowlist_ok.add(kpi_id_int)
+                                            _allowlist_failed.discard(kpi_id_int)
                                     except Exception as exc:
                                         sync_failed = True
                                         if kpi_id_int in (37, 42):
@@ -598,6 +600,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             },
                                         )
                                         continue
+                                    _kpi_history_ok.add((kpi_id_int, rt))
                                     if history_rows:
                                         try:
                                             upsert_kpi_observations(
@@ -611,6 +614,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         except Exception as exc:
                                             sync_failed = True
                                             _kpi_summary_failed = True
+                                            _kpi_history_ok.discard((kpi_id_int, rt))
                                             record_job(
                                                 conn,
                                                 "sync_kpis",
@@ -637,26 +641,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     (_KpiIds.NET_DEBT_EBITDA, "r12"),
                 ):
                     _job = f"sync_kpis_{int(_kpi_id)}_{_rt}"
-                    try:
-                        _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
-                    except Exception as exc:
-                        sync_failed = True
-                        record_job(
-                            conn,
-                            _job,
-                            company_id=cid,
-                            borsdata_id=bid,
-                            status="failed",
-                            error={
-                                "code": "kpi_history_fetch_failed",
-                                "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
-                                "retryable": True,
-                            },
-                        )
-                        continue
-                    if _rows:
+                    if (int(_kpi_id), _rt) in _kpi_history_ok:
+                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                    else:
                         try:
-                            upsert_kpi_observations(conn, cid, int(_kpi_id), _rt, "mean", _rows)
+                            _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
                         except Exception as exc:
                             sync_failed = True
                             record_job(
@@ -666,37 +655,57 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 borsdata_id=bid,
                                 status="failed",
                                 error={
-                                    "code": "kpi_history_upsert_failed",
+                                    "code": "kpi_history_fetch_failed",
                                     "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
                                     "retryable": True,
                                 },
                             )
                             continue
-                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
-                        if branch_id is not None:
+                        if _rows:
                             try:
-                                conn.execute(
-                                    "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
-                                    (int(branch_id), int(_kpi_id)),
-                                )
-                                _allowlist_ok.add(int(_kpi_id))
+                                upsert_kpi_observations(conn, cid, int(_kpi_id), _rt, "mean", _rows)
                             except Exception as exc:
-                                _allowlist_failed.add(int(_kpi_id))
                                 sync_failed = True
                                 record_job(
                                     conn,
-                                    f"sync_kpis_allowlist_{int(_kpi_id)}",
+                                    _job,
                                     company_id=cid,
                                     borsdata_id=bid,
                                     status="failed",
                                     error={
-                                        "code": "kpi_allowlist_failed",
+                                        "code": "kpi_history_upsert_failed",
                                         "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
                                         "retryable": True,
                                     },
                                 )
-                    else:
-                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                                continue
+                            record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                        else:
+                            record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                            continue
+                    if branch_id is not None:
+                        try:
+                            conn.execute(
+                                "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
+                                (int(branch_id), int(_kpi_id)),
+                            )
+                            _allowlist_ok.add(int(_kpi_id))
+                            _allowlist_failed.discard(int(_kpi_id))
+                        except Exception as exc:
+                            _allowlist_failed.add(int(_kpi_id))
+                            sync_failed = True
+                            record_job(
+                                conn,
+                                f"sync_kpis_allowlist_{int(_kpi_id)}",
+                                company_id=cid,
+                                borsdata_id=bid,
+                                status="failed",
+                                error={
+                                    "code": "kpi_allowlist_failed",
+                                    "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
+                                    "retryable": True,
+                                },
+                            )
                 if not _kpi_summary_failed:
                     record_job(conn, "sync_kpis", company_id=cid, borsdata_id=bid, status="success")
                 for _allowlist_kpi in sorted(_allowlist_ok - _allowlist_failed):
