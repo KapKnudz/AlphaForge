@@ -869,7 +869,7 @@ def persist_evidence_sibling(
     metadata["bilingual_selection_rule"] = sibling.get(
         "bilingual_selection_rule", "deterministic_en_fallback"
     )
-    metadata["relationship"] = sibling.get("relationship") or "TRANSLATION"
+    metadata["relationship"] = sibling.get("relationship") or "UNRESOLVED"
     for key in ("document_type", "period_start", "period_end", "pdf_language", "language_evidence"):
         if sibling.get(key) is not None:
             metadata[key] = sibling[key]
@@ -895,7 +895,10 @@ def persist_evidence_sibling(
             sibling.get("published_at"),
             sibling.get("content_text") or sibling.get("body"),
             int(canonical[0]),
-            sibling.get("lang") or sibling.get("ingested_lang") or "en",
+            sibling.get("pdf_language")
+            or sibling.get("ingested_lang")
+            or sibling.get("lang")
+            or "en",
             sibling.get("pdf_checksum") or sibling.get("attachment_checksum"),
             json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         ),
@@ -1150,7 +1153,7 @@ def persist_evidence_document(
             if sibling.get("_bilingual_group_id") is not None:
                 sibling_meta["bilingual_group_id"] = sibling["_bilingual_group_id"]
             sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
-            sibling_meta["relationship"] = sibling.get("relationship") or "TRANSLATION"
+            sibling_meta["relationship"] = sibling.get("relationship") or "UNRESOLVED"
             for key in (
                 "document_type",
                 "period_start",
@@ -1180,7 +1183,10 @@ def persist_evidence_document(
                     sibling.get("published_at") or published_at,
                     sibling.get("content_text") or sibling.get("body"),
                     document_id,
-                    sibling.get("lang") or sibling.get("ingested_lang") or "sv",
+                    sibling.get("pdf_language")
+                    or sibling.get("ingested_lang")
+                    or sibling.get("lang")
+                    or "sv",
                     sibling_checksum,
                     json.dumps(sibling_meta, ensure_ascii=False, sort_keys=True),
                 ),

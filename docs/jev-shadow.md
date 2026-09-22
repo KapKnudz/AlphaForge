@@ -15,6 +15,7 @@ export TYPESAFE_API_KEY='server-side-secret'
 export ALPHAFORGE_JEV_SHADOW_ENABLED=1
 export ALPHAFORGE_JEV_CITATION_RELATIONS=1
 export ALPHAFORGE_JEV_MISSING_INFORMATION=1
+export ALPHAFORGE_JEV_VARIANT_RELATIONS=1
 ```
 
 The default model is the pinned `jev-1.13.0`. Override it only as an explicit
@@ -35,8 +36,10 @@ relation = sidecar.classify_citation_relation(packet, citation, claim)
 impact = sidecar.classify_missing_information(packet, missing_item, specialist_requirement)
 ```
 
-The evidence flow invokes these sidecars only when the corresponding optional
-inputs are supplied. The CLI accepts the same inputs, for example:
+The evidence flow also sends genuinely ambiguous deterministic variant pairs
+through the optional relation sidecar when variant relations are enabled. The
+answer is recorded as shadow-only and never changes the keep-separate decision.
+The CLI accepts the citation and missing-information inputs, for example:
 
 ```sh
 alphaforge evidence --ticker ABC --as-of 2026-05-31 \

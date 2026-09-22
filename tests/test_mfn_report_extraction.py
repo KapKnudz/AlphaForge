@@ -287,7 +287,7 @@ def test_duplicate_feed_url_resolves_to_complete_canonical_document():
         conn.close()
 
 
-def test_numeric_corroboration_requires_multiple_derived_signals():
+def test_revision_marker_groups_pair_and_preserves_revision_relationship():
     docs = [
         {
             "title": "Acme Interim Report Q1 2025",
@@ -311,8 +311,8 @@ def test_numeric_corroboration_requires_multiple_derived_signals():
 
     selected = bilingual_dedupe(docs)
 
-    assert len(selected) == 2
-    assert all("_suppressed_variants" not in document for document in selected)
+    assert len(selected) == 1
+    assert selected[0]["_suppressed_variants"][0]["relationship"] == "REVISION"
 
 
 def test_shared_pdf_checksum_overrides_numeric_translation_mismatch():

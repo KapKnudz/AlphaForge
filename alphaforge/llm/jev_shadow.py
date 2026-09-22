@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from time import perf_counter
@@ -391,16 +391,22 @@ def _variant_candidate_summary(candidate: Any) -> tuple[dict[str, Any] | None, s
     if not isinstance(candidate, Mapping):
         return None, "variant_candidate_not_object"
     summary = {
-        key: candidate.get(key)
-        for key in (
-            "company",
-            "language",
-            "type_guess",
-            "period_start",
-            "period_end",
-            "published_at",
-            "title",
-        )
+        "company": candidate.get("company") or candidate.get("mfn_slug"),
+        "language": (
+            candidate.get("language")
+            or candidate.get("pdf_language")
+            or candidate.get("ingested_lang")
+            or candidate.get("lang")
+        ),
+        "type_guess": (
+            candidate.get("type_guess")
+            or candidate.get("document_type")
+            or candidate.get("report_kind")
+        ),
+        "period_start": candidate.get("period_start") or candidate.get("report_period_start"),
+        "period_end": candidate.get("period_end") or candidate.get("report_period_end"),
+        "published_at": candidate.get("published_at"),
+        "title": candidate.get("title"),
     }
     if not summary["language"] or not summary["title"]:
         return None, "variant_candidate_missing_language_or_title"
@@ -748,11 +754,7 @@ class JevShadowSidecar:
                 feature,
                 packet_hash=packet_hash if isinstance(packet_hash, str) else None,
                 identity=identity,
-                question_version=(
-                    CITATION_QUESTION_VERSION
-                    if feature == "citation_relation"
-                    else MISSING_INFORMATION_QUESTION_VERSION
-                ),
+                question_version=_question_version_for(feature),
                 error_code=packet_error,
                 status="invalid_input",
             )
@@ -1053,6 +1055,7 @@ def run_shadow_signals(
     claim: str | None = None,
     missing_item: str | Mapping[str, Any] | None = None,
     specialist_requirement: str | None = None,
+    variant_pairs: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]] | None = None,
     config: JevShadowConfig | None = None,
     client: Any | None = None,
     conn: Any | None = None,
@@ -1069,6 +1072,13 @@ def run_shadow_signals(
     if missing_item is not None and specialist_requirement is not None:
         results["missing_information"] = sidecar.classify_missing_information(
             packet, missing_item, specialist_requirement, budget=budget
+        )
+    for index, pair in enumerate(variant_pairs or ()):
+        if len(pair) != 2:
+            continue
+        key = "variant_relation" if index == 0 else f"variant_relation:{index}"
+        results[key] = sidecar.classify_variant_relation(
+            packet, pair[0], pair[1], budget=budget
         )
     return results
 

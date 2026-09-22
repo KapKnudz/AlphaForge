@@ -28,6 +28,7 @@ from alphaforge.db.repositories import (
 )
 from alphaforge.evidence.ingest import (
     ResearchDocumentIngestionService,
+    ambiguous_variant_pairs,
     bilingual_dedupe,
     resolve_document_language,
 )
@@ -130,6 +131,7 @@ def _sibling_entry(sibling: Any, document_id: int) -> dict[str, Any]:
     except (TypeError, ValueError, KeyError, IndexError):
         metadata = {}
     language = sibling["ingested_lang"] or metadata.get("language") or "en"
+    relationship = metadata.get("relationship") or "UNRESOLVED"
     return {
         "source_url": sibling["source_url"],
         "title": sibling["title"] or "",
@@ -138,9 +140,9 @@ def _sibling_entry(sibling: Any, document_id: int) -> dict[str, Any]:
         "duplicate_of": f"document:{document_id}",
         "selected_variant_source_url": metadata.get("duplicate_of_source_url"),
         "variant_group_id": metadata.get("bilingual_group_id"),
-        "selection_state": "suppressed_by_translation",
+        "selection_state": f"suppressed_by_{str(relationship).casefold()}",
         "selection_reason": "PREFERRED_LANGUAGE" if language == "en" else "FALLBACK_LANGUAGE",
-        "relationship": metadata.get("relationship") or "TRANSLATION",
+        "relationship": relationship,
     }
 
 
@@ -1052,7 +1054,9 @@ class OneCompanyEvidenceFlow:
                     "_persisted_evidence": True,
                 }
             )
-        deduped = bilingual_dedupe(persisted_identity + eligible)
+        identity_candidates = persisted_identity + eligible
+        shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
+        deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
         if dry_run:
             result.status = "dry_run"
@@ -1078,9 +1082,12 @@ class OneCompanyEvidenceFlow:
             extracted = None
             existing_canonical_source_url = None
             failures: dict[str, int] = {}
-            for variant in variants:
+            prepared_variants: list[dict[str, Any]] = []
+            candidate_options: list[tuple[dict[str, Any], PdfDownload, Any]] = []
+            for index, variant in enumerate(variants):
                 attachment_url = variant.get("attachment_url") or variant.get("storage_url")
                 if not attachment_url:
+                    prepared_variants.append(variant)
                     failures["missing_pdf_attachment"] = (
                         failures.get("missing_pdf_attachment", 0) + 1
                     )
@@ -1089,14 +1096,17 @@ class OneCompanyEvidenceFlow:
                     self.conn, str(attachment_url), company_id
                 )
                 if existing is not None:
+                    prepared_variants.append(variant)
                     if existing.get("canonical_source_url"):
                         selected = variant
                         existing_canonical_source_url = str(existing["canonical_source_url"])
+                        prepared_variants.extend(variants[index + 1 :])
                         break
                     continue
                 try:
                     candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 except PdfAcquisitionError as exc:
+                    prepared_variants.append(variant)
                     failures[exc.code] = failures.get(exc.code, 0) + 1
                     continue
                 try:
@@ -1104,15 +1114,33 @@ class OneCompanyEvidenceFlow:
                         candidate_download.content, max_pages=self.limits.max_pages
                     )
                 except Exception:
+                    prepared_variants.append(variant)
                     failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
                 if not candidate_extracted.pages:
+                    prepared_variants.append(variant)
                     failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
                     continue
-                selected = variant
-                downloaded = candidate_download
-                extracted = candidate_extracted
-                break
+                pdf_first_pages = "\n".join(
+                    str(page.get("text") or "") for page in candidate_extracted.pages[:3]
+                )
+                release_lang = variant.get("lang") or variant.get("ingested_lang") or ""
+                pdf_language, language_evidence = resolve_document_language(
+                    filename=candidate_download.source_url,
+                    pdf_text=pdf_first_pages,
+                    release_title=str(variant.get("title") or ""),
+                    release_body=str(variant.get("content_text") or variant.get("body") or ""),
+                    release_lang=str(release_lang),
+                )
+                prepared = {
+                    **variant,
+                    "pdf_language": pdf_language,
+                    "language_evidence": language_evidence,
+                    "ingested_lang": pdf_language or release_lang or "en",
+                }
+                prepared_variants.append(prepared)
+                candidate_options.append((prepared, candidate_download, candidate_extracted))
+            variants = prepared_variants
             if existing_canonical_source_url is not None:
                 for variant in variants:
                     sibling_url = str(variant.get("source_url") or variant.get("url") or "")
@@ -1124,6 +1152,14 @@ class OneCompanyEvidenceFlow:
                             sibling=variant,
                         )
                 continue
+            if candidate_options:
+                selected, downloaded, extracted = sorted(
+                    candidate_options,
+                    key=lambda option: (
+                        0 if option[0].get("pdf_language") == "en" else 1,
+                        str(option[0].get("source_url") or option[0].get("url") or ""),
+                    ),
+                )[0]
             if selected is None or downloaded is None or extracted is None:
                 for code, count in failures.items():
                     result.skipped[code] = result.skipped.get(code, 0) + count
@@ -1252,7 +1288,11 @@ class OneCompanyEvidenceFlow:
                     message="canonical packet failed its self-hash or contains an invalid complete source",
                 )
             )
-        if shadow_citation is not None or shadow_missing_item is not None:
+        if (
+            shadow_citation is not None
+            or shadow_missing_item is not None
+            or shadow_variant_pairs
+        ):
             try:
                 from alphaforge.llm import run_shadow_signals
 
@@ -1262,6 +1302,7 @@ class OneCompanyEvidenceFlow:
                     claim=shadow_claim,
                     missing_item=shadow_missing_item,
                     specialist_requirement=shadow_specialist_requirement,
+                    variant_pairs=shadow_variant_pairs,
                     conn=self.conn,
                 )
             except Exception:

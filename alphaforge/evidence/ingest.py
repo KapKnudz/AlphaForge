@@ -620,6 +620,30 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     return strong_corroborator and derived_corroborators >= 2
 
 
+def ambiguous_variant_pairs(docs: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Return opposite-language pairs deterministic identity cannot resolve."""
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for index, left in enumerate(docs):
+        for right in docs[index + 1 :]:
+            if _variant_relationship(left, right) != "DIFFERENT_REPORT":
+                continue
+            if _language(left) == _language(right):
+                continue
+            issuer = _issuer_identity(left)
+            if not issuer or issuer != _issuer_identity(right):
+                continue
+            kind = _report_kind_for_identity(left)
+            if not kind or kind != _report_kind_for_identity(right):
+                continue
+            period = _fiscal_period(left)
+            if not period or period != _fiscal_period(right):
+                continue
+            if _has_revision_markers(left) or _has_revision_markers(right):
+                continue
+            pairs.append((left, right))
+    return pairs
+
+
 def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Select one report edition while retaining suppressed provenance.
 
@@ -632,7 +656,8 @@ def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         matches = [
             index
             for index, variants in enumerate(groups)
-            if len(variants) == 1 and _cross_language_correspondence(doc, variants[0])
+            if len(variants) == 1
+            and _variant_relationship(doc, variants[0]) in {"TRANSLATION", "REVISION"}
         ]
         if len(matches) == 1:
             groups[matches[0]].append(doc)
@@ -664,11 +689,12 @@ def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         preferred["bilingual_selection_rule"] = selection_rule
         out.append(preferred)
         for suppressed in variants_sorted[1:]:
+            relationship = _variant_relationship(preferred, suppressed)
             suppressed["duplicate_of"] = preferred.get("source_url") or preferred.get("url")
-            suppressed["ingest_status"] = "superseded_by_translation"
+            suppressed["ingest_status"] = f"superseded_by_{relationship.casefold()}"
             suppressed["_bilingual_group_id"] = group_id
             suppressed["bilingual_selection_rule"] = selection_rule
-            suppressed["relationship"] = "TRANSLATION"
+            suppressed["relationship"] = relationship
             preferred.setdefault("_suppressed_variants", []).append(suppressed)
     return out
 

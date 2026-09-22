@@ -39,11 +39,13 @@ PDF/attachment checksum, or ≥ 0.5 Jaccard similarity over normalized numeric
 key-figure tokens — similarity below threshold is neutral, never a veto) plus
 at least two compatible derived signals (fiscal period, resolved observation
 date, publication date, or translation-neutral title). Either side carrying a
-revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) vetoes
-translation grouping; grouped cross-language pairs are labelled `TRANSLATION`.
-Same-language documents never merge; ambiguous or semantic-only pairs remain
-separate. The preferred variant is unconditionally English when available,
-otherwise Swedish, so a later English edition supersedes a previously selected
+revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) produces
+a `REVISION` relation rather than a translation; other grouped cross-language
+pairs are labelled `TRANSLATION`. Same-language documents merge only when a
+revision marker identifies the relation; ambiguous or semantic-only pairs
+remain separate and may receive an optional shadow-only review. The preferred
+variant is unconditionally English when available, otherwise Swedish, so a
+later English edition supersedes a previously selected
 Swedish one on re-run; suppressed siblings retain a `duplicate_of`, language,
 group, selection-rule, and relationship audit record, surfaced in the packet as
 `selection_state` / `selection_reason` (`PREFERRED_LANGUAGE` /
