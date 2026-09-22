@@ -44,11 +44,12 @@ class FinancialCalculator:
             growth_current, historical, latest_quarter, prior_year_quarter, revenue_growth
         )
 
-        # Prefer dedicated net_debt (live Börsdata) when total_debt is absent;
-        # preserves backward compatibility while keeping gross debt honest.
-        effective_net_debt = (
-            current.net_debt if current.net_debt is not None else current.total_debt
-        )
+        if current.net_debt is not None:
+            effective_net_debt = current.net_debt
+        elif current.total_debt is not None and current.cash is not None:
+            effective_net_debt = current.total_debt - current.cash
+        else:
+            effective_net_debt = None
         return FinancialResult(
             operating_margin=self.calculate_ratio(current.operating_profit, current.revenue),
             net_margin=self.calculate_ratio(current.net_income, current.revenue),

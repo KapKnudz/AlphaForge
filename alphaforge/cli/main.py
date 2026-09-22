@@ -504,8 +504,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
                                             (int(branch_id), kpi_id_int),
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        sync_failed = True
+                                        record_job(
+                                            conn,
+                                            f"sync_kpis_allowlist_{kpi_id_int}",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_allowlist_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt}: {exc}",
+                                                "retryable": True,
+                                            },
+                                        )
                                     if rt in ("year", "r12"):
                                         history_rows = adapter.get_kpi_history(
                                             bid, kpi_id_int, rt, "mean"
@@ -531,13 +543,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         (_KpiIds.NET_DEBT_EBITDA, "year"),
                         (_KpiIds.NET_DEBT_EBITDA, "r12"),
                     ):
+                        _job = f"sync_kpis_{int(_kpi_id)}_{_rt}"
                         try:
                             _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
                         except Exception as exc:
                             sync_failed = True
                             record_job(
                                 conn,
-                                "sync_kpis",
+                                _job,
                                 company_id=cid,
                                 borsdata_id=bid,
                                 status="failed",
@@ -557,7 +570,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 sync_failed = True
                                 record_job(
                                     conn,
-                                    "sync_kpis",
+                                    _job,
                                     company_id=cid,
                                     borsdata_id=bid,
                                     status="failed",
@@ -573,8 +586,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
                                     (int(branch_id), int(_kpi_id)),
                                 )
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                sync_failed = True
+                                record_job(
+                                    conn,
+                                    _job,
+                                    company_id=cid,
+                                    borsdata_id=bid,
+                                    status="failed",
+                                    error={
+                                        "code": "kpi_allowlist_failed",
+                                        "message": f"kpi {_kpi_id}/{_rt}: {exc}",
+                                        "retryable": True,
+                                    },
+                                )
                     conn.commit()
             except Exception as exc:
                 sync_failed = True

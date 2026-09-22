@@ -148,6 +148,22 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         reports.append(_report(row, shares_override=adjusted))
     current_report = reports[-1]
     historical_reports = reports[:-1]
+    dcf_r12_reports = [
+        report
+        for prow, report in zip(period_rows, reports, strict=False)
+        if prow["period_type"] == "r12"
+    ]
+    dcf_annual_reports = [
+        report
+        for prow, report in zip(period_rows, reports, strict=False)
+        if prow["period_type"] == "year"
+    ]
+    if dcf_r12_reports:
+        dcf_current_report = dcf_r12_reports[-1]
+    elif dcf_annual_reports:
+        dcf_current_report = dcf_annual_reports[-1]
+    else:
+        dcf_current_report = current_report
     financial_mapper = FinancialMapper()
     financial = FinancialCalculator().calculate(
         financial_mapper.to_current(current_report),
@@ -230,29 +246,27 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             (company_id, cutoff.isoformat()),
         ).fetchall()
     ]
-    # Prefer dedicated net_debt (live Börsdata) when available; otherwise fall back
-    # to gross total_debt minus cash for older fixtures. Keeps EV honest.
-    if current_report.net_debt is not None:
-        current_net_debt = current_report.net_debt
+    if dcf_current_report.net_debt is not None:
+        current_net_debt = dcf_current_report.net_debt
         net_debt_source = "net_debt"
-    elif current_report.total_debt is not None and current_report.cash is not None:
-        current_net_debt = current_report.total_debt - current_report.cash
+    elif (
+        dcf_current_report.total_debt is not None
+        and dcf_current_report.cash is not None
+    ):
+        current_net_debt = dcf_current_report.total_debt - dcf_current_report.cash
         net_debt_source = "total_debt_minus_cash"
-    elif current_report.total_debt is not None:
-        current_net_debt = current_report.total_debt
-        net_debt_source = "total_debt"
     else:
         current_net_debt = None
         net_debt_source = None
     reverse_dcf = {
         "status": "available" if current_raw.market_cap is not None else "unavailable",
         "current_price": latest_price.close,
-        "current_revenue": current_report.revenue,
-        "current_shares": current_report.shares_outstanding,
+        "current_revenue": dcf_current_report.revenue,
+        "current_shares": dcf_current_report.shares_outstanding,
         "current_net_debt": current_net_debt,
         "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency,
-        "financial_currency": current_report.currency or stock_currency,
+        "financial_currency": dcf_current_report.currency or stock_currency,
         "market_cap": current_raw.market_cap,
         "enterprise_value": current_raw.enterprise_value,
     }
@@ -309,11 +323,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             # Convert to SEK for bucket selection.
             market_cap_for_hurdle = float(current_raw.market_cap) * 1_000_000
         dcf_policy_decision = policy.build(
-            current_report,
+            dcf_current_report,
             latest_annual,
             historical_annuals,
             as_of=cutoff,
-            currency=current_report.currency or stock_currency or "SEK",
+            currency=dcf_current_report.currency or stock_currency or "SEK",
             market_cap=market_cap_for_hurdle,
             roic=roic_for_dcf,
         )
@@ -322,19 +336,26 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 reverse_dcf["dcf_error"] = (
                     "net debt unavailable; DCF enterprise-to-equity bridge not valued"
                 )
+                reverse_dcf["dcf"] = {
+                    "available": False,
+                    "policy_version": dcf_policy_decision.policy_version,
+                    "missing_information": ["net_debt"],
+                    "warnings": list(dcf_policy_decision.warnings)
+                    if dcf_policy_decision.warnings
+                    else [],
+                }
                 reverse_dcf["status"] = "unavailable"
-            # Current revenue for DCF must be positive; use current_report.revenue
             elif (
-                current_report.revenue
-                and current_report.shares_outstanding
-                and current_report.revenue > 0
-                and current_report.shares_outstanding > 0
+                dcf_current_report.revenue
+                and dcf_current_report.shares_outstanding
+                and dcf_current_report.revenue > 0
+                and dcf_current_report.shares_outstanding > 0
             ):
                 try:
                     dcf_inputs = ReverseDcfInputs(
                         current_price=latest_price.close,
-                        shares_outstanding=current_report.shares_outstanding,
-                        current_revenue=current_report.revenue,
+                        shares_outstanding=dcf_current_report.shares_outstanding,
+                        current_revenue=dcf_current_report.revenue,
                         net_debt=float(current_net_debt),
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
@@ -402,6 +423,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
                         else [],
+                        "missing_information": list(
+                            dcf_policy_decision.missing_information
+                        ),
                     }
                     # Reverse DCF: solve implied assumption that equates model to market price
                     for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
@@ -428,9 +452,26 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                     reverse_dcf["status"] = "available"
                 except Exception as exc:
                     reverse_dcf["dcf_error"] = str(exc)
+                    reverse_dcf["dcf"] = {
+                        "available": False,
+                        "policy_version": dcf_policy_decision.policy_version,
+                        "missing_information": ["dcf_engine_failed"],
+                        "warnings": list(dcf_policy_decision.warnings)
+                        if dcf_policy_decision.warnings
+                        else [],
+                    }
                     reverse_dcf["status"] = "unavailable"
             else:
                 reverse_dcf["dcf_error"] = "current revenue or shares unavailable/zero"
+                reverse_dcf["dcf"] = {
+                    "available": False,
+                    "policy_version": dcf_policy_decision.policy_version,
+                    "missing_information": ["current_revenue_or_shares"],
+                    "warnings": list(dcf_policy_decision.warnings)
+                    if dcf_policy_decision.warnings
+                    else [],
+                }
+                reverse_dcf["status"] = "unavailable"
         else:
             # Policy unavailable — surface why so callers can distinguish from heuristic score
             if dcf_policy_decision is not None:
@@ -449,6 +490,18 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reverse_dcf["dcf_error"] = f"dcf wiring failed: {exc}"
         except Exception:
             pass
+        if "dcf" not in reverse_dcf:
+            decision = dcf_policy_decision
+            reverse_dcf["dcf"] = {
+                "available": False,
+                "policy_version": decision.policy_version if decision is not None else None,
+                "missing_information": list(decision.missing_information)
+                if decision is not None and decision.missing_information
+                else ["dcf_wiring_failed"],
+                "warnings": list(decision.warnings)
+                if decision is not None and decision.warnings
+                else [],
+            }
         reverse_dcf["status"] = (
             "unavailable"
             if current_raw.market_cap is None
