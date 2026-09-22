@@ -1117,7 +1117,9 @@ class OneCompanyEvidenceFlow:
             existing_canonical_source_url = None
             failures: dict[str, int] = {}
             prepared_variants: list[dict[str, Any]] = []
-            candidate_options: list[tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]] = []
+            candidate_options: list[
+                tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]
+            ] = []
             for variant in variants:
                 attachment_url = variant.get("attachment_url") or variant.get("storage_url")
                 if not attachment_url:
@@ -1232,9 +1234,7 @@ class OneCompanyEvidenceFlow:
                     ),
                 )[0]
                 if selected_existing is not None:
-                    existing_canonical_source_url = str(
-                        selected_existing["canonical_source_url"]
-                    )
+                    existing_canonical_source_url = str(selected_existing["canonical_source_url"])
                     successful_variants = {id(option[0]) for option in candidate_options}
                     for option in candidate_options:
                         if option[0] is selected:
@@ -1247,11 +1247,7 @@ class OneCompanyEvidenceFlow:
                                 canonical_source_url=existing_canonical_source_url,
                                 sibling={**option[0], "relationship": relation},
                             )
-                        elif (
-                            option[3] is None
-                            and option[1] is not None
-                            and option[2] is not None
-                        ):
+                        elif option[3] is None and option[1] is not None and option[2] is not None:
                             independent_article = _prepare_selected_article(
                                 option[0], option[1], option[2]
                             )
@@ -1289,7 +1285,9 @@ class OneCompanyEvidenceFlow:
             selected_variant = selected
             successful_variants = {id(option[0]) for option in candidate_options}
             related_variants: list[dict[str, Any]] = []
-            independent_options: list[tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]] = []
+            independent_options: list[
+                tuple[dict[str, Any], PdfDownload | None, Any, dict[str, Any] | None]
+            ] = []
             for option in candidate_options:
                 if option[0] is selected_variant:
                     continue
@@ -1309,7 +1307,11 @@ class OneCompanyEvidenceFlow:
             persist_option(selected_article, downloaded, extracted, related_variants)
             result.downloaded += 1
             for variant, candidate_download, candidate_extracted, existing in independent_options:
-                if existing is not None or candidate_download is None or candidate_extracted is None:
+                if (
+                    existing is not None
+                    or candidate_download is None
+                    or candidate_extracted is None
+                ):
                     continue
                 independent_article = _prepare_selected_article(
                     variant, candidate_download, candidate_extracted
@@ -1396,11 +1398,7 @@ class OneCompanyEvidenceFlow:
                     message="canonical packet failed its self-hash or contains an invalid complete source",
                 )
             )
-        if (
-            shadow_citation is not None
-            or shadow_missing_item is not None
-            or shadow_variant_pairs
-        ):
+        if shadow_citation is not None or shadow_missing_item is not None or shadow_variant_pairs:
             try:
                 from alphaforge.llm import run_shadow_signals
 

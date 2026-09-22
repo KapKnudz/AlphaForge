@@ -1077,9 +1077,7 @@ def run_shadow_signals(
         if len(pair) != 2:
             continue
         key = "variant_relation" if index == 0 else f"variant_relation:{index}"
-        results[key] = sidecar.classify_variant_relation(
-            packet, pair[0], pair[1], budget=budget
-        )
+        results[key] = sidecar.classify_variant_relation(packet, pair[0], pair[1], budget=budget)
     return results
 
 

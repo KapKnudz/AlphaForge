@@ -620,7 +620,9 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     return strong_corroborator and derived_corroborators >= 2
 
 
-def ambiguous_variant_pairs(docs: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+def ambiguous_variant_pairs(
+    docs: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Return opposite-language pairs deterministic identity cannot resolve."""
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for index, left in enumerate(docs):

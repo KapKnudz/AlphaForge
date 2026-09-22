@@ -26,9 +26,7 @@ HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date",)
 
 def _stable_source_id(source: dict[str, Any]) -> str:
     attachment = source.get("attachment")
-    attachment_checksum = (
-        attachment.get("sha256") if isinstance(attachment, dict) else None
-    )
+    attachment_checksum = attachment.get("sha256") if isinstance(attachment, dict) else None
     identity = {
         "source_url": source.get("source_url"),
         "publication_date": source.get("publication_date"),
@@ -44,7 +42,7 @@ def _replace_source_reference(value: Any, references: dict[str, str]) -> Any:
         if value == old:
             return new
         if value.startswith(f"{old}#"):
-            return f"{new}{value[len(old):]}"
+            return f"{new}{value[len(old) :]}"
     return value
 
 
@@ -129,7 +127,9 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
                 else sibling
                 for sibling in source["bilingual_siblings"]
             ]
-    projected_sources.sort(key=lambda source: source.get("source_id", "") if isinstance(source, dict) else "")
+    projected_sources.sort(
+        key=lambda source: source.get("source_id", "") if isinstance(source, dict) else ""
+    )
     body["sources"] = projected_sources
     for key in ("evidence_catalog", "coverage_facts"):
         value = body.get(key)

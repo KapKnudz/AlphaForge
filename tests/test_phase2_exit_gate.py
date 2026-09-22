@@ -311,9 +311,7 @@ class TestGoldenPacketRoundTrip:
                     "ingestion_date": "2026-09-20T01:00:00Z",
                     "attachment": {"source_url": "https://storage/q1.pdf", "sha256": "a" * 64},
                     "body": {
-                        "paragraphs": [
-                            {"anchor": "document:7#paragraph:1", "text": "Evidence"}
-                        ]
+                        "paragraphs": [{"anchor": "document:7#paragraph:1", "text": "Evidence"}]
                     },
                     "pages": [{"anchor": "document:7#page:1", "text": "Evidence"}],
                 }
