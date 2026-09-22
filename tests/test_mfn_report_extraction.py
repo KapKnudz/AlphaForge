@@ -11,6 +11,7 @@ from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
+    find_complete_evidence_attachment,
     find_complete_evidence_document,
     persist_evidence_document,
     persist_evidence_sibling,
@@ -777,3 +778,140 @@ def test_pdf_language_falls_back_to_release_hint_outside_authoritative_flow():
     assert PDF_LANGUAGE_MIN_HITS == 2
     assert _language({"title": "Acme Interim Report", "pdf_language": "sv"}) == "sv"
     assert _language({"title": "Acme Interim Report", "lang": "en"}) == "en"
+
+
+def _persist_complete_edition(conn, company_id, source_url, attachment_url, lang, **kwargs):
+    return persist_evidence_document(
+        conn,
+        company_id=company_id,
+        article={
+            "title": f"Demotion Report {lang}",
+            "source_url": source_url,
+            "published_at": "2026-09-09T07:30:00Z",
+            "ingested_lang": lang,
+        },
+        attachment={
+            "source_url": attachment_url,
+            "content_type": "application/pdf",
+            "byte_size": 8,
+            "sha256": f"{lang}-pdf-bytes",
+            "magic_valid": True,
+            "http_status": 200,
+        },
+        extraction={
+            "extractor": "pypdf",
+            "text_checksum": f"{lang}-text",
+            "page_count": 1,
+            "pages_included": "1",
+        },
+        pages=[{"page_number": 1, "text": "Evidence"}],
+        **kwargs,
+    )
+
+
+def _evidence_child_counts(conn, document_id):
+    attachments = conn.execute(
+        "SELECT COUNT(*) FROM research_attachments WHERE document_id=?", (document_id,)
+    ).fetchone()[0]
+    extractions = conn.execute(
+        "SELECT COUNT(*) FROM document_extractions WHERE document_id=?", (document_id,)
+    ).fetchone()[0]
+    pages = conn.execute(
+        "SELECT COUNT(*) FROM document_pages p "
+        "JOIN document_extractions e ON e.id=p.extraction_id WHERE e.document_id=?",
+        (document_id,),
+    ).fetchone()[0]
+    return (attachments, extractions, pages)
+
+
+def test_superseded_edition_retains_metadata_only():
+    conn = _connection()
+    try:
+        conn.execute("INSERT INTO companies (borsdata_id, name) VALUES (503, 'Demotion AB')")
+        company_id = conn.execute("SELECT id FROM companies WHERE borsdata_id=503").fetchone()[0]
+        sv_url = "https://mfn.test/a/demotion/sv"
+        sv_attachment = "https://storage.mfn.test/demotion-sv.pdf"
+        en_url = "https://mfn.test/a/demotion/en"
+        en_attachment = "https://storage.mfn.test/demotion-en.pdf"
+        _persist_complete_edition(conn, company_id, sv_url, sv_attachment, "sv")
+        sv_id = conn.execute(
+            "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+            (company_id, sv_url),
+        ).fetchone()[0]
+        assert _evidence_child_counts(conn, sv_id) == (1, 1, 1)
+        _persist_complete_edition(
+            conn,
+            company_id,
+            en_url,
+            en_attachment,
+            "en",
+            suppressed_variants=[
+                {
+                    "source_url": sv_url,
+                    "title": "Demotion Report sv",
+                    "published_at": "2026-09-09T07:30:00Z",
+                    "pdf_language": "sv",
+                    "relationship": "TRANSLATION",
+                }
+            ],
+        )
+        sv_row = conn.execute(
+            "SELECT id, duplicate_of, title, raw_metadata FROM research_documents "
+            "WHERE company_id=? AND source_url=?",
+            (company_id, sv_url),
+        ).fetchone()
+        en_id = conn.execute(
+            "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+            (company_id, en_url),
+        ).fetchone()[0]
+        assert sv_row["duplicate_of"] == en_id
+        assert sv_row["title"] == "Demotion Report sv"
+        assert json.loads(sv_row["raw_metadata"])["relationship"] == "TRANSLATION"
+        assert _evidence_child_counts(conn, sv_row["id"]) == (0, 0, 0)
+        assert _evidence_child_counts(conn, en_id) == (1, 1, 1)
+        assert find_complete_evidence_attachment(conn, sv_attachment, company_id) is None
+        assert find_complete_evidence_attachment(conn, en_attachment, company_id) is not None
+    finally:
+        conn.close()
+
+
+def test_sibling_persistence_strips_demoted_edition_children():
+    conn = _connection()
+    try:
+        conn.execute("INSERT INTO companies (borsdata_id, name) VALUES (504, 'Sibling AB')")
+        company_id = conn.execute("SELECT id FROM companies WHERE borsdata_id=504").fetchone()[0]
+        sv_url = "https://mfn.test/a/sibling/sv"
+        sv_attachment = "https://storage.mfn.test/sibling-sv.pdf"
+        en_url = "https://mfn.test/a/sibling/en"
+        _persist_complete_edition(conn, company_id, sv_url, sv_attachment, "sv")
+        _persist_complete_edition(
+            conn, company_id, en_url, "https://storage.mfn.test/sibling-en.pdf", "en"
+        )
+        persist_evidence_sibling(
+            conn,
+            company_id=company_id,
+            canonical_source_url=en_url,
+            sibling={
+                "source_url": sv_url,
+                "title": "Sibling Report sv",
+                "published_at": "2026-09-09T07:30:00Z",
+                "pdf_language": "sv",
+                "relationship": "TRANSLATION",
+            },
+        )
+        sv_row = conn.execute(
+            "SELECT id, duplicate_of, title FROM research_documents "
+            "WHERE company_id=? AND source_url=?",
+            (company_id, sv_url),
+        ).fetchone()
+        en_id = conn.execute(
+            "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+            (company_id, en_url),
+        ).fetchone()[0]
+        assert sv_row["duplicate_of"] == en_id
+        assert sv_row["title"] == "Sibling Report sv"
+        assert _evidence_child_counts(conn, sv_row["id"]) == (0, 0, 0)
+        assert _evidence_child_counts(conn, en_id) == (1, 1, 1)
+        assert find_complete_evidence_attachment(conn, sv_attachment, company_id) is None
+    finally:
+        conn.close()

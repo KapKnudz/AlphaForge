@@ -855,6 +855,15 @@ def complete_evidence_identity_documents(
     return [dict(row) for row in rows]
 
 
+def _delete_demoted_evidence_children(conn: Any, document_id: int) -> None:
+    for (extraction_id,) in conn.execute(
+        "SELECT id FROM document_extractions WHERE document_id=?", (document_id,)
+    ).fetchall():
+        conn.execute("DELETE FROM document_pages WHERE extraction_id=?", (extraction_id,))
+    conn.execute("DELETE FROM document_extractions WHERE document_id=?", (document_id,))
+    conn.execute("DELETE FROM research_attachments WHERE document_id=?", (document_id,))
+
+
 def persist_evidence_sibling(
     conn: Any,
     *,
@@ -924,6 +933,12 @@ def persist_evidence_sibling(
             json.dumps(metadata, ensure_ascii=False, sort_keys=True),
         ),
     )
+    sibling_row = conn.execute(
+        "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, sibling_url),
+    ).fetchone()
+    if sibling_row is not None:
+        _delete_demoted_evidence_children(conn, int(sibling_row[0]))
     conn.commit()
 
 
@@ -1222,6 +1237,12 @@ def persist_evidence_document(
                     json.dumps(sibling_meta, ensure_ascii=False, sort_keys=True),
                 ),
             )
+            sibling_row = conn.execute(
+                "SELECT id FROM research_documents WHERE company_id=? AND source_url=?",
+                (company_id, sibling_url),
+            ).fetchone()
+            if sibling_row is not None:
+                _delete_demoted_evidence_children(conn, int(sibling_row[0]))
         conn.execute("RELEASE SAVEPOINT evidence_document")
         conn.commit()
     except Exception:
