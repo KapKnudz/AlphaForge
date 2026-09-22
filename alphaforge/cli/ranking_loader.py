@@ -26,6 +26,11 @@ def _number(value: Any) -> float | None:
 
 
 def _report(row, *, shares_override: float | None = None) -> Report:
+    # Prefer dedicated net_debt column when present; keep total_debt for compat.
+    try:
+        net_debt_value = _number(row["net_debt"])
+    except (KeyError, IndexError, TypeError):
+        net_debt_value = None
     return Report(
         revenue=_number(row["revenue"]),
         operating_profit=_number(row["operating_profit"]),
@@ -36,6 +41,7 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         equity=_number(row["equity"]),
         total_assets=_number(row["total_assets"]),
         total_debt=_number(row["total_debt"]),
+        net_debt=net_debt_value,
         shares_outstanding=(
             shares_override if shares_override is not None else _number(row["shares_outstanding"])
         ),
@@ -202,18 +208,235 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             (company_id, cutoff.isoformat()),
         ).fetchall()
     ]
+    # Prefer dedicated net_debt (live Börsdata) when available; otherwise fall back
+    # to gross total_debt minus cash for older fixtures. Keeps EV honest.
+    if current_report.net_debt is not None:
+        current_net_debt = current_report.net_debt
+        net_debt_source = "net_debt"
+    elif current_report.total_debt is not None and current_report.cash is not None:
+        current_net_debt = current_report.total_debt - current_report.cash
+        net_debt_source = "total_debt_minus_cash"
+    elif current_report.total_debt is not None:
+        current_net_debt = current_report.total_debt
+        net_debt_source = "total_debt"
+    else:
+        current_net_debt = None
+        net_debt_source = None
     reverse_dcf = {
         "status": "available" if current_raw.market_cap is not None else "unavailable",
         "current_price": latest_price.close,
         "current_revenue": current_report.revenue,
         "current_shares": current_report.shares_outstanding,
-        "current_net_debt": (
-            current_report.total_debt - current_report.cash
-            if current_report.total_debt is not None and current_report.cash is not None
-            else None
-        ),
+        "current_net_debt": current_net_debt,
+        "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency,
         "financial_currency": current_report.currency or stock_currency,
+        "market_cap": current_raw.market_cap,
+        "enterprise_value": current_raw.enterprise_value,
+    }
+    # ------------------------------------------------------------------
+    # Auditable DCF: wire existing pure policy + engine so the ranking
+    # path produces projected FCFF, discount rate, terminal assumptions,
+    # enterprise/equity value, value per share, and reverse-DCF implied
+    # assumptions — clearly distinguished from the heuristic valuation_score.
+    # ------------------------------------------------------------------
+    dcf_policy_decision = None
+    dcf_value = None
+    reverse_dcf_results: dict[str, Any] = {}
+    # Build annual report history for DCF policy (needs year property)
+    try:
+        annual_period_rows = [r for r in period_rows if r["period_type"] == "year"]
+        # Map annual rows to Reports in the same PIT-filtered, share-adjusted way
+        # as the full ranking input, but only for annuals.
+        annual_reports: list[Report] = []
+        for row in annual_period_rows:
+            raw_shares = _number(row["shares_outstanding"])
+            adjusted = raw_shares
+            if raw_shares is not None and split_events:
+                adjusted = adjust_historical_shares(
+                    raw_shares,
+                    str(row["period_end"])[:10],
+                    comparison_date,
+                    split_events,
+                )
+            annual_reports.append(_report(row, shares_override=adjusted))
+        if annual_reports:
+            latest_annual = annual_reports[-1]
+            historical_annuals = annual_reports[:-1]
+        else:
+            latest_annual = None
+            historical_annuals = []
+        # Branch for sector guard
+        branch_row = conn.execute(
+            "SELECT branch_id FROM companies WHERE id=?", (company_id,)
+        ).fetchone()
+        branch_id = int(branch_row[0]) if branch_row and branch_row[0] is not None else None
+        roic_for_dcf = kpis.get(37)  # KPI 37 = ROIC (now reliably persisted)
+        # Börsdata ROIC is percent (e.g. 22.9 means 22.9%); DcfAssumptionPolicy
+        # expects percent and divides by 100 internally, so pass raw percent.
+        from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
+        from alphaforge.core.valuation.reverse_dcf import ReverseDcfEngine, ReverseDcfInputs
+
+        policy = DcfAssumptionPolicy()
+        # market_cap from raw valuation is in report-currency millions (SEK MSEK)
+        # because Börsdata reports and shares are in millions; required-return
+        # buckets are in absolute SEK, so scale to SEK for the hurdle.
+        market_cap_for_hurdle = None
+        if current_raw.market_cap is not None:
+            # Heuristic: shares are in millions (63.45 = 63M), so market cap in MSEK.
+            # Convert to SEK for bucket selection.
+            market_cap_for_hurdle = float(current_raw.market_cap) * 1_000_000
+        dcf_policy_decision = policy.build(
+            current_report,
+            latest_annual,
+            historical_annuals,
+            as_of=cutoff,
+            currency=current_report.currency or stock_currency or "SEK",
+            market_cap=market_cap_for_hurdle,
+            roic=roic_for_dcf,
+        )
+        if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
+            # Net debt for DCF enterprise→equity bridge: prefer dedicated net_debt
+            dcf_net_debt = current_net_debt if current_net_debt is not None else 0.0
+            # Current revenue for DCF must be positive; use current_report.revenue
+            if (
+                current_report.revenue
+                and current_report.shares_outstanding
+                and current_report.revenue > 0
+                and current_report.shares_outstanding > 0
+            ):
+                try:
+                    dcf_inputs = ReverseDcfInputs(
+                        current_price=latest_price.close,
+                        shares_outstanding=current_report.shares_outstanding,
+                        current_revenue=current_report.revenue,
+                        net_debt=float(dcf_net_debt),
+                        assumptions=dcf_policy_decision.assumptions,
+                        branch_id=branch_id,
+                    )
+                    engine = ReverseDcfEngine()
+                    dcf_value = engine.value(dcf_inputs)
+                    reverse_dcf["dcf"] = {
+                        "available": True,
+                        "policy_version": dcf_policy_decision.policy_version,
+                        "assumptions": {
+                            "projection_years": dcf_policy_decision.assumptions.projection_years,
+                            "revenue_growth": dcf_policy_decision.assumptions.revenue_growth,
+                            "ebit_margin": dcf_policy_decision.assumptions.ebit_margin,
+                            "tax_rate": dcf_policy_decision.assumptions.tax_rate,
+                            "discount_rate": dcf_policy_decision.assumptions.discount_rate,
+                            "terminal_growth": dcf_policy_decision.assumptions.terminal_growth,
+                            "net_reinvestment_rate": dcf_policy_decision.assumptions.net_reinvestment_rate,
+                            "reinvestment_return": dcf_policy_decision.assumptions.reinvestment_return,
+                            "ebit_margin_start": dcf_policy_decision.assumptions.ebit_margin_start,
+                        },
+                        "assumption_sources": dcf_policy_decision.assumption_sources,
+                        "required_return": {
+                            "size_bucket": dcf_policy_decision.required_return.size_bucket
+                            if dcf_policy_decision.required_return
+                            else None,
+                            "required_return": dcf_policy_decision.required_return.required_return
+                            if dcf_policy_decision.required_return
+                            else None,
+                        }
+                        if dcf_policy_decision.required_return
+                        else None,
+                        "enterprise_value": dcf_value.enterprise_value,
+                        "equity_value": dcf_value.equity_value,
+                        "value_per_share": dcf_value.value_per_share,
+                        "terminal_value": dcf_value.terminal_value,
+                        "discounted_terminal_value": dcf_value.discounted_terminal_value,
+                        "projected_cash_flows": [
+                            {
+                                "year": p.year,
+                                "revenue": p.revenue,
+                                "revenue_growth": p.revenue_growth,
+                                "ebit_margin": p.ebit_margin,
+                                "ebit": p.ebit,
+                                "nopat": p.nopat,
+                                "fcff": p.fcff,
+                                "discounted_fcff": p.discounted_fcff,
+                            }
+                            for p in dcf_value.projected_cash_flows
+                        ],
+                        "normalization": (
+                            {
+                                "confidence": dcf_policy_decision.normalization.confidence
+                                if dcf_policy_decision.normalization
+                                else None,
+                                "selected_window_years": dcf_policy_decision.normalization.selected_window_years
+                                if dcf_policy_decision.normalization
+                                else None,
+                                "reasons": list(dcf_policy_decision.normalization.reasons)
+                                if dcf_policy_decision.normalization
+                                else None,
+                            }
+                            if dcf_policy_decision.normalization
+                            else None
+                        ),
+                        "warnings": list(dcf_policy_decision.warnings)
+                        if dcf_policy_decision.warnings
+                        else [],
+                    }
+                    # Reverse DCF: solve implied assumption that equates model to market price
+                    for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
+                        _bounds = dcf_policy_decision.solve_bounds.get(_assump)
+                        if _bounds is None:
+                            continue
+                        try:
+                            _res = engine.solve(dcf_inputs, _assump, _bounds[0], _bounds[1])
+                            reverse_dcf_results[_assump] = {
+                                "implied_assumption": _res.implied_assumption,
+                                "lower_bound": _res.lower_bound,
+                                "upper_bound": _res.upper_bound,
+                                "target_price": _res.target_price,
+                                "modeled_price": _res.modeled_price,
+                                "price_difference": _res.price_difference,
+                                "iterations": _res.iterations,
+                                "value_per_share": _res.valuation.value_per_share,
+                                "enterprise_value": _res.valuation.enterprise_value,
+                                "equity_value": _res.valuation.equity_value,
+                            }
+                        except Exception as exc:
+                            reverse_dcf_results[_assump] = {"error": str(exc)}
+                    reverse_dcf["implied"] = reverse_dcf_results
+                    reverse_dcf["status"] = "available"
+                except Exception as exc:
+                    reverse_dcf["dcf_error"] = str(exc)
+                    reverse_dcf["status"] = "unavailable"
+            else:
+                reverse_dcf["dcf_error"] = "current revenue or shares unavailable/zero"
+        else:
+            # Policy unavailable — surface why so callers can distinguish from heuristic score
+            if dcf_policy_decision is not None:
+                reverse_dcf["dcf"] = {
+                    "available": False,
+                    "policy_version": dcf_policy_decision.policy_version,
+                    "missing_information": list(dcf_policy_decision.missing_information),
+                    "warnings": list(dcf_policy_decision.warnings)
+                    if dcf_policy_decision.warnings
+                    else [],
+                }
+                reverse_dcf["status"] = "unavailable"
+    except Exception as exc:
+        # Never break ranking on DCF failure — keep heuristic score available
+        try:
+            reverse_dcf["dcf_error"] = f"dcf wiring failed: {exc}"
+        except Exception:
+            pass
+        reverse_dcf["status"] = (
+            "unavailable"
+            if current_raw.market_cap is None
+            else reverse_dcf.get("status", "unavailable")
+        )
+    # Provide DCF artefacts at top level so callers can export them without
+    # reaching into candidate.full_results, and keep provenance separate from
+    # the heuristic valuation_score.
+    dcf_payload = {
+        "policy": dcf_policy_decision,
+        "value": dcf_value,
+        "implied": reverse_dcf_results,
+        "reverse_dcf": reverse_dcf,
     }
     candidate = SimpleNamespace(
         company_id=company_id,
@@ -224,7 +447,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             "evidence_packet": evidence_packet,
             "evidence_lane": bool(evidence_packet),
         },
-        full_results={"valuation": valuation, "reverse_dcf": reverse_dcf},
+        full_results={
+            "valuation": valuation,
+            "reverse_dcf": reverse_dcf,
+            "dcf": dcf_payload,
+        },
     )
     return {
         "financial": financial,
@@ -235,4 +462,6 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         # RankingEngine.rank reads results["research_evidence"], not candidate.
         "research_evidence": candidate.research_evidence,
         "candidate": candidate,
+        "dcf": dcf_payload,
+        "reverse_dcf": reverse_dcf,
     }

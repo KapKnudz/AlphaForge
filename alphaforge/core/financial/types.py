@@ -12,6 +12,7 @@ class CurrentFinancials:
     equity: float | None
     total_assets: float | None
     total_debt: float | None
+    net_debt: float | None = None
     shares_outstanding: float | None = None
     gross_income: float | None = None
     operating_cash_flow: float | None = None

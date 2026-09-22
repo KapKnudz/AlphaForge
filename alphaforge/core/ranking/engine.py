@@ -151,7 +151,10 @@ def _compute_candidate_reason(quality: dict, growth: dict, val: dict, balance: d
 
 
 class RankingEngine:
-    RANKING_MODEL_VERSION = "2026-08-12-reverse-dcf-v10"
+    # v11 wires the auditable DCF (policy + engine) into the loader and
+    # exports, so valuation_score remains a heuristic while DCF fair-value
+    # is presented separately with provenance.
+    RANKING_MODEL_VERSION = "2026-08-12-reverse-dcf-v11"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository

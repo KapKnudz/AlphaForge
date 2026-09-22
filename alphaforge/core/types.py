@@ -25,6 +25,9 @@ class Report:
     operating_cash_flow: float | None = None
     investing_cash_flow: float | None = None
     financing_cash_flow: float | None = None
+    # Dedicated net_debt (live Börsdata returns net_Debt, not gross total_Debt);
+    # kept separate so gross debt is not mislabelled — see kpi_taxonomy map.
+    net_debt: float | None = None
     cash: float | None = None
     eps: float | None = None
     dividend_per_share: float | None = None

@@ -519,6 +519,39 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                                 "mean",
                                                 history_rows,
                                             )
+                    # Dedicated fetch for ROIC (37) and net-debt/EBITDA (42) even when
+                    # Börsdata summary omits them (Clas Ohlson live: summary has 42 ids
+                    # but not 37/42, while history endpoints return 10 rows each).
+                    # Safe for genuinely unavailable KPIs: 400/empty is treated as missing.
+                    try:
+                        from alphaforge.core.kpi_taxonomy import KpiIds as _KpiIds
+
+                        for _kpi_id, _rt in (
+                            (_KpiIds.ROIC, "year"),
+                            (_KpiIds.ROIC, "r12"),
+                            (_KpiIds.NET_DEBT_EBITDA, "year"),
+                            (_KpiIds.NET_DEBT_EBITDA, "r12"),
+                        ):
+                            try:
+                                _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
+                            except Exception:
+                                continue
+                            if _rows:
+                                try:
+                                    upsert_kpi_observations(
+                                        conn, cid, int(_kpi_id), _rt, "mean", _rows
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    conn.execute(
+                                        "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
+                                        (int(branch_id), int(_kpi_id)),
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                     conn.commit()
             except Exception as exc:
                 sync_failed = True
@@ -900,6 +933,20 @@ def cmd_rank(args: argparse.Namespace) -> int:
         evidence_packet_hash=evidence_packet_hash,
         evidence_packet_hashes=evidence_packet_hashes,
     )
+    # Export auditable DCF artefacts alongside the heuristic ranking —
+    # keeps valuation_score and DCF fair-value clearly separate.
+    try:
+        dcf_export: dict[str, dict] = {}
+        for company in companies:
+            loaded = results_by_company.get(company.id, {})
+            rd = loaded.get("reverse_dcf") or {}
+            if rd:
+                # Keep only serializable, auditable fields
+                dcf_export[company.ticker or str(company.id)] = rd
+        dcf_path = exports_dir / "dcf.json"
+        dcf_path.write_text(json.dumps(dcf_export, indent=2, ensure_ascii=False, default=str))
+    except Exception:
+        pass
 
     # Save ranking run to DB.
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()

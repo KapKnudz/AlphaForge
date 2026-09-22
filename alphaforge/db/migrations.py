@@ -85,6 +85,30 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 4)
         conn.commit()
         current = 4
+    if current < 5:
+        # Idempotent add: if the column already exists (e.g. DB created from
+        # the updated sqlite.sql which already includes net_debt), skip the ALTER.
+        try:
+            cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(financial_periods);").fetchall()
+            }
+        except Exception:
+            cols = set()
+        if "net_debt" not in cols:
+            candidates = [
+                Path("db/migrations/005_add_net_debt_column.sql"),
+                Path(__file__).resolve().parents[2]
+                / "db"
+                / "migrations"
+                / "005_add_net_debt_column.sql",
+            ]
+            migration_path = next((path for path in candidates if path.exists()), None)
+            if migration_path is None:
+                raise FileNotFoundError(f"net_debt column migration not found (tried {candidates})")
+            conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 5)
+        conn.commit()
+        current = 5
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)

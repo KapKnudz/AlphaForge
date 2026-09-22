@@ -61,7 +61,9 @@ def compute_raw_valuation(
         return RawValuation()
 
     market_cap = price * shares
-    net_debt = report.total_debt
+    # Prefer dedicated net_debt (live Börsdata) when available; fall back to
+    # gross total_debt for older fixtures. Keeps EV honest without guessing.
+    net_debt = report.net_debt if report.net_debt is not None else report.total_debt
     enterprise_value = market_cap + net_debt if net_debt is not None else None
 
     return RawValuation(
