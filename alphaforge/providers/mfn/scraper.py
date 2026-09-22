@@ -458,6 +458,7 @@ class MfnScraper:
         # ``application/json`` for ``?offset=&limit=``.
         json_url = f"{self.base_url}/{mfn_slug.lstrip('/')}?offset={offset}&limit={limit}"
         time.sleep(1.0)
+        saw_http_200 = False
         try:
             resp = request_with_retry(
                 "GET",
@@ -469,6 +470,7 @@ class MfnScraper:
         except Exception:
             resp = None  # type: ignore[assignment]
         if resp is not None and resp.status_code == 200:
+            saw_http_200 = True
             ctype = str(
                 (getattr(resp, "headers", {}) or {}).get("Content-Type")
                 or (getattr(resp, "headers", {}) or {}).get("content-type")
@@ -523,6 +525,7 @@ class MfnScraper:
                 continue
             if resp.status_code != 200:
                 continue
+            saw_http_200 = True
             text = getattr(resp, "text", "") or ""
             if not text or "<a" not in text.lower():
                 continue
@@ -558,6 +561,11 @@ class MfnScraper:
             raw_links = len(parser.links)
             next_off = offset + limit if raw_links >= limit else None
             return articles, next_off
+        if not saw_http_200:
+            raise MfnAcquisitionError(
+                "mfn_feed_fetch_failed",
+                f"MFN paginated feed request failed for {mfn_slug} offset {offset}",
+            )
         return [], None
 
     def scrape_details(

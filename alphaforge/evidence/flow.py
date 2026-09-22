@@ -822,27 +822,26 @@ def _discover_historical_feed(
                 break
             # Window filter: keep anything that *could* be in the future
             # window; rely on the later PIT gate for final published_at check.
+            deepest_cutoff = _resolve_cutoff(as_of, window, "annual")
+            page_max: str | None = None
             for art in articles:
                 pub = str(art.get("published_at") or "")[:10]
                 # When published_at is None (feed-card without timestamp),
                 # keep it — detail page is authoritative.
                 if pub:
+                    if page_max is None or pub > page_max:
+                        page_max = pub
                     kind = art.get("report_kind")
                     cutoff = _resolve_cutoff(
                         as_of, window, kind if kind in {"annual", "quarterly"} else None
                     )
-                    deepest_cutoff = _resolve_cutoff(as_of, window, "annual")
                     if pub < cutoff or pub > as_of[:10] or pub > today_iso:
-                        # Outside historical window or after cutoff — skip
-                        # before detail fetch.  Still allow advancing offset
-                        # because deeper offsets are strictly older.
-                        if pub < deepest_cutoff:
-                            # Deeper offsets will be even older → stop.
-                            return out
                         continue
                 out.append(art)
                 if len(out) >= window.max_detail_fetches:
                     return out
+            if page_max is not None and page_max < deepest_cutoff:
+                return out
             if next_offset is None:
                 break
             offset = next_offset
@@ -1242,6 +1241,15 @@ class OneCompanyEvidenceFlow:
             if published_date > today.isoformat():
                 result.skipped["not_yet_published_release"] = (
                     result.skipped.get("not_yet_published_release", 0) + 1
+                )
+                continue
+            kind = article.get("report_kind")
+            cutoff = _resolve_cutoff(
+                as_of, window, kind if kind in {"annual", "quarterly"} else None
+            )
+            if published_date < cutoff:
+                result.skipped["pre_cutoff_release"] = (
+                    result.skipped.get("pre_cutoff_release", 0) + 1
                 )
                 continue
             pre_cutoff_report = True
