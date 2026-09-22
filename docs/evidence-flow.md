@@ -58,3 +58,12 @@ publication/ingestion dates, source/page anchors, limitations, and a SHA-256
 hash over the packet without its own `packet_hash`. Readiness for the evidence
 lane requires that frozen packet hash to validate; a stray document row is not
 sufficient.
+
+### Live verification
+
+Opt-in live checks are `pytest -m integration` (fixture-only by default, and
+in CI). No manual key step is needed: when integration tests are selected,
+`tests/conftest.py` automatically resolves the repository-root `.env`
+(worktree-safe via `tests/env_resolver.py`, which follows `git
+--git-common-dir` to the primary checkout) and loads it. With no key in the
+environment or that `.env`, the run fails fast and points at the resolver.
