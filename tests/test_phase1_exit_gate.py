@@ -153,6 +153,7 @@ def test_bilingual_dedupe_suppresses_one_per_pair():
             "published_at": "2025-04-15",
             "content_text": "Svensk text",
             "ingested_lang": "sv",
+            "provider_event_id": "cision-123-q1-2025",
         },
         {
             "title": "Interim Report Q1 2025",
@@ -160,6 +161,7 @@ def test_bilingual_dedupe_suppresses_one_per_pair():
             "published_at": "2025-04-15",
             "content_text": "English text",
             "ingested_lang": "en",
+            "provider_event_id": "cision-123-q1-2025",
         },
     ]
     deduped = bilingual_dedupe(docs)
@@ -182,12 +184,16 @@ def test_bilingual_dedupe_persist_with_duplicate_of(mem_conn):
             "source_url": "https://mfn.se/a/1/sv",
             "published_at": "2025-02-10",
             "content_text": "sv body",
+            "ingested_lang": "sv",
+            "provider_event_id": "a-1-year-end-2024",
         },
         {
             "title": "Year-End Report 2024",
             "source_url": "https://mfn.se/a/1/en",
             "published_at": "2025-02-10",
             "content_text": "en body",
+            "ingested_lang": "en",
+            "provider_event_id": "a-1-year-end-2024",
         },
     ]
     _result = svc.persist_articles(cid, docs)

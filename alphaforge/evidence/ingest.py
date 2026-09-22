@@ -397,7 +397,7 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
     if left_fiscal_config and right_fiscal_config and left_fiscal_config != right_fiscal_config:
         return False
     strong_corroborator = False
-    derived_corroborator = False
+    derived_corroborators = 0
     event_left = left.get("provider_event_id") or left.get("mfn_event_id")
     event_right = right.get("provider_event_id") or right.get("mfn_event_id")
     shared_event = _same_value(event_left, event_right)
@@ -418,17 +418,17 @@ def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) 
         return False
     period_left = _fiscal_period(left)
     period_right = _fiscal_period(right)
-    derived_corroborator |= bool(period_left and period_left == period_right)
+    derived_corroborators += int(bool(period_left and period_left == period_right))
     date_left = _resolved_date_identity(left)
     date_right = _resolved_date_identity(right)
-    derived_corroborator |= bool(date_left and date_left == date_right)
+    derived_corroborators += int(bool(date_left and date_left == date_right))
     published_left = str(left.get("published_at") or "")[:10]
     published_right = str(right.get("published_at") or "")[:10]
-    derived_corroborator |= bool(published_left and published_left == published_right)
+    derived_corroborators += int(bool(published_left and published_left == published_right))
     title_left = _translation_neutral_title(left, issuer)
     title_right = _translation_neutral_title(right, issuer)
-    derived_corroborator |= bool(title_left and title_left == title_right)
-    return strong_corroborator and derived_corroborator
+    derived_corroborators += int(bool(title_left and title_left == title_right))
+    return strong_corroborator and derived_corroborators >= 2
 
 
 def bilingual_dedupe(

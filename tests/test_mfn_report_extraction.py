@@ -277,6 +277,34 @@ def test_duplicate_feed_url_resolves_to_complete_canonical_document():
         conn.close()
 
 
+def test_numeric_corroboration_requires_multiple_derived_signals():
+    docs = [
+        {
+            "title": "Acme Interim Report Q1 2025",
+            "source_url": "https://mfn.test/a/acme/en",
+            "content_text": "Revenue 100 MSEK; EBIT 10 MSEK.",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "lang": "en",
+        },
+        {
+            "title": "Acme Delårsrapport Q1 2025 correction",
+            "source_url": "https://mfn.test/a/acme/sv",
+            "content_text": "Revenue 100 MSEK; EBIT 10 MSEK.",
+            "mfn_slug": "acme",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q1 2025",
+            "lang": "sv",
+        },
+    ]
+
+    selected = bilingual_dedupe(docs)
+
+    assert len(selected) == 2
+    assert all("_suppressed_variants" not in document for document in selected)
+
+
 def test_identical_bilingual_pdf_checksums_are_both_auditable():
     conn = _connection()
     try:
