@@ -46,16 +46,221 @@ def _attachment_filename(doc: dict[str, Any]) -> str:
     return ""
 
 
-def _fiscal_period(doc: dict[str, Any]) -> str:
-    for key in ("fiscal_period", "report_period", "period"):
-        if doc.get(key) not in (None, ""):
-            return str(doc[key]).lower()
-    title = str(doc.get("title") or "").lower()
-    match = re.search(r"\b(20\d{2})\s*[-/]?\s*(q[1-4]|h[12])\b", title)
+def _issuer_token(value: Any) -> str:
+    text = str(value).casefold().strip("/")
+    segments = [segment for segment in text.split("/") if segment]
+    for marker in ("a", "cision"):
+        if marker in segments:
+            index = segments.index(marker)
+            if index + 1 < len(segments):
+                return segments[index + 1]
+    return text
+
+
+def _issuer_identity(doc: dict[str, Any]) -> str:
+    """Return the stable issuer token used by report identity fallbacks."""
+    explicit = doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id")
+    if explicit not in (None, ""):
+        return _issuer_token(explicit)
+    source_url = str(doc.get("source_url") or doc.get("url") or "")
+    parsed = urlparse(source_url)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    for marker in ("a", "cision"):
+        if marker in segments:
+            index = segments.index(marker)
+            if index + 1 < len(segments):
+                return segments[index + 1].casefold()
+    return ""
+
+
+def _report_kind_for_identity(doc: dict[str, Any]) -> str:
+    kind = str(doc.get("report_kind") or "").casefold().strip()
+    if kind:
+        return kind
+    title = str(doc.get("title") or "").casefold()
+    if any(term in title for term in ("annual", "year-end", "year end", "årsredovis", "bokslut")):
+        return "annual"
+    if any(
+        term in title
+        for term in ("quarter", "interim", "delårs", "kvartals", "q1", "q2", "q3", "q4")
+    ):
+        return "quarterly"
+    return ""
+
+
+def _translation_neutral_title(doc: dict[str, Any], issuer: str) -> str:
+    title = str(doc.get("title") or "").casefold()
+    for token in re.split(r"[^\w]+", issuer):
+        if token:
+            title = re.sub(rf"\b{re.escape(token)}\b", " ", title)
+    for quarter, month_start, month_end in (
+        ("q1", "january|januari", "march|mars"),
+        ("q1", "may|maj", "july|juli"),
+        ("q2", "april", "june|juni"),
+        ("q2", "august|augusti", "october|oktober"),
+        ("q3", "july|juli", "september"),
+        ("q4", "october|oktober", "december"),
+    ):
+        title = re.sub(
+            rf"\b(?:\d{{1,2}}\s+)?(?:{month_start})\s*[-–]\s*"
+            rf"(?:\d{{1,2}}\s+)?(?:{month_end})\b",
+            f" {quarter} ",
+            title,
+        )
+    for month, number in {
+        "january": 1,
+        "januari": 1,
+        "february": 2,
+        "februari": 2,
+        "march": 3,
+        "mars": 3,
+        "april": 4,
+        "may": 5,
+        "maj": 5,
+        "june": 6,
+        "juni": 6,
+        "july": 7,
+        "juli": 7,
+        "august": 8,
+        "augusti": 8,
+        "september": 9,
+        "october": 10,
+        "oktober": 10,
+        "november": 11,
+        "december": 12,
+    }.items():
+        title = re.sub(rf"\b{re.escape(month)}\b", f"m{number}", title)
+    for ordinal, quarter in (
+        ("första|first", "q1"),
+        ("andra|second", "q2"),
+        ("tredje|third", "q3"),
+        ("fjärde|fourth", "q4"),
+    ):
+        title = re.sub(
+            rf"\b(?:{ordinal})\s+(?:kvartalet|quarter)\b",
+            f" {quarter} ",
+            title,
+        )
+    for word in (
+        "interim",
+        "quarterly",
+        "quarter",
+        "report",
+        "delårsrapport",
+        "delarsrapport",
+        "kvartalsrapport",
+        "rapport",
+        "annual",
+        "årsredovisning",
+        "arsredovisning",
+        "year",
+        "end",
+        "bokslutskommuniké",
+        "bokslutskommunike",
+        "publicerar",
+        "offentliggör",
+        "offentliggor",
+        "has",
+        "published",
+        "its",
+        "the",
+        "för",
+        "for",
+        "ab",
+        "aktiebolag",
+        "ag",
+        "corp",
+        "corporation",
+        "inc",
+        "limited",
+        "ltd",
+        "nv",
+        "plc",
+        "sa",
+    ):
+        title = re.sub(rf"\b{re.escape(word)}\b", " ", title)
+    return re.sub(r"[^a-z0-9]+", "-", title).strip("-")
+
+
+def _quarter_period(text: str) -> str | None:
+    text = text.casefold()
+    for ordinal, quarter in (
+        ("första|first", "q1"),
+        ("andra|second", "q2"),
+        ("tredje|third", "q3"),
+        ("fjärde|fourth", "q4"),
+    ):
+        text = re.sub(
+            rf"\b(?:{ordinal})\s+(?:kvartal(?:et)?|quarter)\b",
+            f" {quarter} ",
+            text,
+        )
+    fiscal_range = re.search(
+        r"\b(?:\d{1,2}\s+)?(?:may|maj)\s*[-–]\s*"
+        r"(?:\d{1,2}\s+)?(?:july|juli)\s+(20\d{2})\b",
+        text,
+    )
+    if fiscal_range:
+        year = int(fiscal_range.group(1))
+        return f"{year}/{year + 1}-q1"
+    text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b", "q1", text)
+    text = re.sub(r"\bapril\s*[-–]\s*(?:june|juni)\b", "q2", text)
+    text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
+    text = re.sub(r"\b(?:october|oktober)\s*[-–]\s*december\b", "q4", text)
+    match = re.search(
+        r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b",
+        text,
+    )
     if match:
-        return f"{match.group(1)}-{match.group(2)}"
-    years = re.findall(r"\b20\d{2}\b", title)
-    return years[-1] if years else ""
+        end_year = match.group(3) or match.group(2)
+        return f"{match.group(2)}/{end_year}-q{match.group(1)}"
+    match = re.search(
+        r"\b(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
+        text,
+    )
+    if match:
+        end_year = match.group(2) or match.group(1)
+        return f"{match.group(1)}/{end_year}-q{match.group(3)}"
+    return None
+
+
+def _fiscal_period(doc: dict[str, Any]) -> str:
+    text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body"))
+    explicit = next(
+        (
+            str(doc[key]).casefold().strip()
+            for key in ("fiscal_period", "report_period", "period")
+            if doc.get(key) not in (None, "")
+        ),
+        None,
+    )
+    if explicit:
+        normalized = _quarter_period(explicit)
+        if normalized:
+            return normalized
+        title_period = _quarter_period(str(doc.get("title") or ""))
+        if title_period:
+            quarter = re.search(r"-q([1-4])$", title_period)
+            years = re.fullmatch(r"(20\d{2})(?:[/\-](20\d{2}))?", explicit)
+            if quarter and years:
+                end_year = years.group(2) or years.group(1)
+                return f"{years.group(1)}/{end_year}-q{quarter.group(1)}"
+            return title_period
+        return explicit
+    title_period = _quarter_period(str(doc.get("title") or ""))
+    if title_period:
+        return title_period
+    quarter_period = _quarter_period(text)
+    if quarter_period:
+        return quarter_period
+    text = text.casefold()
+    match = re.search(r"\b(?:h\s*([12])\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b", text)
+    if match:
+        end_year = match.group(3) or match.group(2)
+        if match.group(1):
+            return f"{match.group(2)}/{end_year}-h{match.group(1)}"
+        return match.group(2)
+    return ""
 
 
 def canonical_release_url(url: str) -> str:
@@ -69,10 +274,9 @@ def canonical_release_url(url: str) -> str:
 
 
 def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
-    issuer = str(doc.get("mfn_slug") or doc.get("slug") or doc.get("company_id") or "").lower()
-    kind = str(doc.get("report_kind") or "").lower()
+    issuer = _issuer_identity(doc)
+    kind = _report_kind_for_identity(doc)
     period = _fiscal_period(doc)
-    published = str(doc.get("published_at") or "")[:10]
     keys: set[str] = set()
     event_id = doc.get("provider_event_id") or doc.get("mfn_event_id")
     if event_id:
@@ -81,41 +285,153 @@ def _bilingual_identity_keys(doc: dict[str, Any]) -> set[str]:
         doc.get("pdf_checksum") or doc.get("attachment_checksum") or doc.get("document_checksum")
     )
     if attachment_checksum:
-        keys.add(f"pdf:{issuer}|{kind}|{period}|{attachment_checksum}")
+        keys.add(f"pdf:{attachment_checksum}")
     body = doc.get("content_text") or doc.get("body")
-    body_checksum = ""
     if body:
         normalized_body = " ".join(str(body).split()).casefold()
-        body_checksum = hashlib.sha256(normalized_body.encode()).hexdigest()
-        keys.add(f"body:{issuer}|{kind}|{period}|{body_checksum}")
-    filename = _attachment_filename(doc)
-    if filename and (issuer or period):
-        keys.add(f"attachment:{issuer}|{kind}|{period}|{filename}")
+        keys.add(f"body:{hashlib.sha256(normalized_body.encode()).hexdigest()}")
     canonical = canonical_release_url(str(doc.get("source_url") or doc.get("url") or ""))
     if canonical:
-        keys.add(f"url:{issuer}|{canonical}|{published}")
-    title = str(doc.get("title") or "").lower()
-    if "årsredovisning" in title or "annual report" in title:
-        title_kind = "annual_report"
-    elif "bokslutskommuniké" in title or "year-end report" in title or "year end report" in title:
-        title_kind = "year_end_report"
-    elif kind:
-        title_kind = kind
-    else:
-        title_kind = ""
-    identity_token = str(event_id or attachment_checksum or body_checksum)
-    if (issuer or period) and title_kind and period and identity_token:
-        keys.add(f"report:{issuer}|{title_kind}|{period}|{identity_token}")
-    if not keys:
-        title = re.sub(
-            r"\b(inbjudan|invitation to|publicerar|has published)\b",
-            "",
-            str(doc.get("title") or ""),
-            flags=re.IGNORECASE,
-        )
-        title_key = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
-        keys.add(f"title:{issuer}|{kind}|{period}|{title_key}")
+        keys.add(f"url:{canonical}")
+    if issuer and kind and period:
+        keys.add(f"period:{issuer}|{kind}|{period}")
+    published = str(doc.get("published_at") or "")[:10]
+    if published:
+        keys.add(f"published:{published}")
+    title = _translation_neutral_title(doc, issuer) if issuer else ""
+    if title:
+        keys.add(f"title:{title}")
     return keys
+
+
+def _resolved_date_identity(doc: dict[str, Any]) -> str:
+    for key in ("observation_date", "period_end", "report_period_end"):
+        value = doc.get(key)
+        if value not in (None, ""):
+            return str(value)[:10]
+    return ""
+
+
+def _fiscal_year_config(doc: dict[str, Any]) -> str:
+    value = doc.get("fiscal_year_start_month") or doc.get("fiscal_year_end_month")
+    if value not in (None, ""):
+        return str(value).casefold().strip()
+    raw = doc.get("raw_metadata")
+    if isinstance(raw, dict):
+        value = raw.get("fiscal_year_start_month") or raw.get("fiscal_year_end_month")
+        if value not in (None, ""):
+            return str(value).casefold().strip()
+    return ""
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    return left not in (None, "") and left == right
+
+
+def _numeric_key_figure_fingerprint(value: Any) -> tuple[str, ...]:
+    if not value:
+        return ()
+    text = str(value)
+    figures: list[str] = []
+    token_pattern = re.compile(r"(?<![\w/])(?:\d{1,3}(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)(?![\w/])")
+    unit_aliases = {
+        "%": "%",
+        "sek": "currency",
+        "msek": "currency",
+        "eur": "currency",
+        "meur": "currency",
+        "usd": "currency",
+        "miljon": "million",
+        "miljoner": "million",
+        "million": "million",
+        "millions": "million",
+        "mn": "million",
+        "m": "million",
+        "miljard": "billion",
+        "miljarder": "billion",
+        "billion": "billion",
+        "billions": "billion",
+        "bn": "billion",
+    }
+    for match in token_pattern.finditer(text):
+        raw = match.group(0)
+        compact = raw.replace(" ", "")
+        if "," in compact and "." in compact:
+            separator = "." if compact.rfind(".") > compact.rfind(",") else ","
+            decimal = compact.rsplit(separator, 1)
+            compact = decimal[0].replace(",", "").replace(".", "") + "." + decimal[1]
+        elif "," in compact or "." in compact:
+            separator = "," if "," in compact else "."
+            before, after = compact.rsplit(separator, 1)
+            compact = before + after if len(after) == 3 else before + "." + after
+        try:
+            number = f"{float(compact):g}"
+        except ValueError:
+            continue
+        if number.isdigit() and len(number) == 4 and 1900 <= int(number) <= 2100:
+            continue
+        window = text[max(0, match.start() - 16) : min(len(text), match.end() + 16)].casefold()
+        unit = ""
+        for alias, normalized in unit_aliases.items():
+            if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", window):
+                unit = normalized
+                break
+        figures.append(f"{number}|{unit}")
+    return tuple(sorted(figures)) if len(figures) >= 2 else ()
+
+
+def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if _language(left) == _language(right):
+        return False
+    issuer = _issuer_identity(left)
+    if not issuer or issuer != _issuer_identity(right):
+        return False
+    kind = _report_kind_for_identity(left)
+    if not kind or kind != _report_kind_for_identity(right):
+        return False
+    left_fiscal_config = _fiscal_year_config(left)
+    right_fiscal_config = _fiscal_year_config(right)
+    if left_fiscal_config and right_fiscal_config and left_fiscal_config != right_fiscal_config:
+        return False
+    strong_corroborator = False
+    derived_corroborators = 0
+    event_left = left.get("provider_event_id") or left.get("mfn_event_id")
+    event_right = right.get("provider_event_id") or right.get("mfn_event_id")
+    shared_event = _same_value(event_left, event_right)
+    strong_corroborator |= shared_event
+    checksum_left = left.get("pdf_checksum") or left.get("attachment_checksum")
+    checksum_right = right.get("pdf_checksum") or right.get("attachment_checksum")
+    shared_checksum = _same_value(checksum_left, checksum_right)
+    strong_corroborator |= shared_checksum
+    body_left = left.get("content_text") or left.get("body")
+    body_right = right.get("content_text") or right.get("body")
+    numeric_left = _numeric_key_figure_fingerprint(body_left)
+    numeric_right = _numeric_key_figure_fingerprint(body_right)
+    numeric_corroborator = bool(numeric_left and numeric_right and numeric_left == numeric_right)
+    if (
+        numeric_left
+        and numeric_right
+        and numeric_left != numeric_right
+        and not shared_event
+        and not shared_checksum
+    ):
+        return False
+    strong_corroborator |= numeric_corroborator
+    if not shared_event and not shared_checksum and not numeric_corroborator:
+        return False
+    period_left = _fiscal_period(left)
+    period_right = _fiscal_period(right)
+    derived_corroborators += int(bool(period_left and period_left == period_right))
+    date_left = _resolved_date_identity(left)
+    date_right = _resolved_date_identity(right)
+    derived_corroborators += int(bool(date_left and date_left == date_right))
+    published_left = str(left.get("published_at") or "")[:10]
+    published_right = str(right.get("published_at") or "")[:10]
+    derived_corroborators += int(bool(published_left and published_left == published_right))
+    title_left = _translation_neutral_title(left, issuer)
+    title_right = _translation_neutral_title(right, issuer)
+    derived_corroborators += int(bool(title_left and title_left == title_right))
+    return strong_corroborator and derived_corroborators >= 2
 
 
 def bilingual_dedupe(
@@ -123,52 +439,16 @@ def bilingual_dedupe(
 ) -> list[dict[str, Any]]:
     """Select one report edition while retaining suppressed provenance."""
     groups: list[list[dict[str, Any]]] = []
-    key_groups: dict[str, int] = {}
-    parents: list[int] = []
-
-    def find(group_index: int) -> int:
-        while parents[group_index] != group_index:
-            parents[group_index] = parents[parents[group_index]]
-            group_index = parents[group_index]
-        return group_index
-
-    def strong_keys(keys: set[str]) -> set[str]:
-        return {
-            key
-            for key in keys
-            if not key.startswith("attachment:") and not key.startswith("title:")
-        }
-
     for doc in docs:
-        keys = _bilingual_identity_keys(doc)
-        strong = strong_keys(keys)
-        owners = {find(key_groups[key]) for key in strong if key in key_groups}
-        if not owners and not strong:
-            weak_owners = {find(key_groups[key]) for key in keys if key in key_groups}
-            owners = {
-                owner
-                for owner in weak_owners
-                if not any(
-                    strong_keys(_bilingual_identity_keys(variant)) for variant in groups[owner]
-                )
-            }
-        if not owners:
-            group_index = len(groups)
-            groups.append([])
-            parents.append(group_index)
+        matches = [
+            index
+            for index, variants in enumerate(groups)
+            if len(variants) == 1 and _cross_language_correspondence(doc, variants[0])
+        ]
+        if len(matches) == 1:
+            groups[matches[0]].append(doc)
         else:
-            group_index = min(owners)
-            for owner in owners:
-                owner = find(owner)
-                if owner == group_index:
-                    continue
-                parents[owner] = group_index
-                groups[group_index].extend(groups[owner])
-                groups[owner] = []
-            group_index = find(group_index)
-        groups[group_index].append(doc)
-        for key in keys:
-            key_groups[key] = group_index
+            groups.append([doc])
 
     preferred_language = packet_majority if packet_majority in {"sv", "en"} else "en"
     selection_rule = (
@@ -178,12 +458,13 @@ def bilingual_dedupe(
     )
     out: list[dict[str, Any]] = []
     for variants in groups:
-        if not variants:
+        if len(variants) == 1:
+            out.append(variants[0])
             continue
         group_keys = sorted(
             {key for variant in variants for key in _bilingual_identity_keys(variant)}
         )
-        group_id = hashlib.sha256(group_keys[0].encode()).hexdigest()[:24]
+        group_id = hashlib.sha256("|".join(group_keys).encode()).hexdigest()[:24]
         for variant in variants:
             variant["_bilingual_group_id"] = group_id
         variants_sorted = sorted(
@@ -200,7 +481,7 @@ def bilingual_dedupe(
         for suppressed in variants_sorted[1:]:
             suppressed["duplicate_of"] = preferred.get("source_url") or preferred.get("url")
             suppressed["ingest_status"] = "superseded_by_translation"
-            suppressed["_bilingual_group_id"] = preferred["_bilingual_group_id"]
+            suppressed["_bilingual_group_id"] = group_id
             suppressed["bilingual_selection_rule"] = selection_rule
             preferred.setdefault("_suppressed_variants", []).append(suppressed)
     return out

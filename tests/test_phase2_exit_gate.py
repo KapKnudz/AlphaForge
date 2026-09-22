@@ -145,6 +145,23 @@ class TestGoldenPacketRoundTrip:
             assert s1.total_score == s2.total_score
             assert s1.ranking_model == s2.ranking_model
 
+    def test_ranking_carries_frozen_evidence_packet_hash(self, tmp_path):
+        company = MockCompany(id=1, name="Company A", ticker="A", branch_id=None)
+        packet_hash = "a" * 64
+
+        ranking = RankingEngine().rank(
+            [company],
+            {company.id: {"research_evidence": {"evidence_packet": {"packet_hash": packet_hash}}}},
+        )
+
+        assert ranking.scores[0].evidence_packet_hash == packet_hash
+        from alphaforge.cli.main import export_ranking_files
+
+        ranking_json_path, _ = export_ranking_files(
+            ranking, "2026-01-01", RankingEngine.RANKING_MODEL_VERSION, tmp_path
+        )
+        assert json.loads(ranking_json_path.read_text())["evidence_packet_hash"] == packet_hash
+
     def test_packet_hash_reproducibility(self):
         """Packet hash is reproducible from same inputs."""
         companies = [

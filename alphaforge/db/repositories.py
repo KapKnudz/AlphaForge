@@ -546,22 +546,39 @@ def record_job(
     borsdata_id: int | None,
     status: str,
     error: dict[str, Any] | None = None,
+    begin_attempt: bool = True,
 ) -> None:
     import json
 
     err_json = json.dumps(error) if error else None
     conn.execute(
         """
-        INSERT INTO jobs (job_type, company_id, borsdata_id, status, attempt, error)
-        VALUES (?, ?, ?, ?, 1, ?)
+        INSERT INTO jobs
+            (job_type, company_id, borsdata_id, status, attempt, error, started_at, finished_at)
+        VALUES (
+            ?, ?, ?, ?, 1, ?,
+            strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+            CASE WHEN ? IN ('running', 'pending') THEN NULL
+                 ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+        )
         ON CONFLICT(job_type, company_id) DO UPDATE SET
             status=excluded.status,
             borsdata_id=excluded.borsdata_id,
-            attempt=jobs.attempt + 1,
+            attempt=CASE WHEN ? THEN jobs.attempt + 1 ELSE jobs.attempt END,
             error=excluded.error,
-            finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            started_at=CASE WHEN ? THEN excluded.started_at ELSE jobs.started_at END,
+            finished_at=excluded.finished_at
         """,
-        (job_type, company_id, borsdata_id, status, err_json),
+        (
+            job_type,
+            company_id,
+            borsdata_id,
+            status,
+            err_json,
+            status,
+            int(begin_attempt),
+            int(begin_attempt),
+        ),
     )
     conn.commit()
 
@@ -775,24 +792,29 @@ def find_complete_evidence_document(
 ) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT d.* FROM research_documents d
-        WHERE d.company_id=? AND d.source_url=?
+        SELECT root.*
+        FROM research_documents d
+        JOIN research_documents root
+          ON root.id=COALESCE(d.duplicate_of, d.id)
+         AND root.duplicate_of IS NULL
+        WHERE d.company_id=?
+          AND (d.source_url=? OR root.source_url=?)
           AND EXISTS (
               SELECT 1 FROM research_attachments a
-              WHERE a.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE a.document_id=root.id
           )
           AND EXISTS (
               SELECT 1 FROM document_extractions e
-              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE e.document_id=root.id
           )
           AND EXISTS (
               SELECT 1
               FROM document_pages p
               JOIN document_extractions e ON e.id=p.extraction_id
-              WHERE e.document_id=COALESCE(d.duplicate_of, d.id)
+              WHERE e.document_id=root.id
           )
         """,
-        (company_id, source_url),
+        (company_id, source_url, source_url),
     ).fetchone()
     return dict(row) if row is not None else None
 
@@ -917,8 +939,13 @@ def find_complete_evidence_attachment(
     )
     row = conn.execute(
         f"""
-        SELECT a.* FROM research_attachments a
+        SELECT a.*, root.id AS canonical_document_id,
+               root.source_url AS canonical_source_url
+        FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
+        JOIN research_documents root
+          ON root.id=COALESCE(d.duplicate_of, d.id)
+         AND root.duplicate_of IS NULL
         JOIN document_extractions e ON e.document_id=d.id
         JOIN document_pages p ON p.extraction_id=e.id
         WHERE a.source_url=?{company_clause} ORDER BY a.id LIMIT 1
@@ -961,12 +988,19 @@ def persist_evidence_document(
         "report_kind",
         "report_period",
         "fiscal_period",
-        "observation_date",
+        "period_end",
+        "report_period_end",
         "lang_confidence",
         "_bilingual_group_id",
     ):
         if article.get(key) is not None:
             metadata[key] = article[key]
+    observation_date_authoritative = article.get("observation_date_authoritative")
+    if observation_date_authoritative is None:
+        observation_date_authoritative = article.get("observation_date") is not None
+    if observation_date_authoritative and article.get("observation_date") is not None:
+        metadata["observation_date"] = article["observation_date"]
+        metadata["observation_date_authoritative"] = True
     if article.get("_bilingual_group_id") is not None:
         metadata["bilingual_group_id"] = article["_bilingual_group_id"]
     metadata["authoritative_publication_timestamp"] = True

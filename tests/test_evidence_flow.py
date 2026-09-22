@@ -18,12 +18,15 @@ from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
+    persist_evidence_document,
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
+    NoEvidenceReason,
     OneCompanyEvidenceFlow,
+    _observation_date,
     download_pdf,
     validate_frozen_packet,
 )
@@ -166,9 +169,14 @@ class _FakeScraper:
         self.scrape_calls = []
 
     def discover_feed(self, mfn_slug, *, reports_only=True):
-        return [
-            {"url": article["source_url"], "title": article["title"]} for article in self.articles
-        ]
+        feed = []
+        for article in self.articles:
+            entry = {"url": article["source_url"], "title": article["title"]}
+            for key in ("provider_event_id", "pdf_checksum", "attachment_checksum"):
+                if article.get(key) is not None:
+                    entry[key] = article[key]
+            feed.append(entry)
+        return feed
 
     def scrape_details(self, entries, *, reports_only=True):
         self.scrape_calls.append(list(entries))
@@ -222,6 +230,18 @@ def test_flow_runs_weekly_page_two_backstop():
     assert result.eligible == 2
 
 
+def test_fiscal_observation_date_uses_reported_period_end_not_calendar_quarter():
+    assert (
+        _observation_date(
+            {
+                "title": "Clas Ohlson Interim Report Q1 2026/2027",
+                "body": "The first quarter covered 1 May–31 July 2026.",
+            }
+        )
+        == "2026-07-31"
+    )
+
+
 def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     conn = _connection()
     company_id = _mapped_company(conn)
@@ -264,6 +284,15 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
+    evidence_job = conn.execute(
+        "SELECT status, error, attempt, started_at, finished_at FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert evidence_job[0] == "success"
+    assert evidence_job[1] is None
+    assert evidence_job[2] == 1
+    assert evidence_job[3] is not None
+    assert evidence_job[4] is not None
     with patch(
         "alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")
     ):
@@ -278,6 +307,81 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         "https://mfn.test/a/flow/missing",
     }
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+
+
+def test_all_future_cutoff_is_typed_no_evidence_and_audited():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/future-only",
+        "title": "Flow AB Interim Report Q1 2027",
+        "published_at": "2027-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/future-only.pdf",
+        "lang": "en",
+    }
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([article]),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "no_evidence"
+    assert result.no_evidence_reason == NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
+    assert result.packet is None
+    job = conn.execute(
+        "SELECT status, error FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert job[0] == "partial"
+    assert json.loads(job[1])["code"] == "no_evidence"
+    assert json.loads(job[1])["no_evidence_reason"] == "all_releases_after_cutoff"
+
+
+def test_persisted_release_after_future_cutoff_is_all_releases_after_cutoff():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    persist_evidence_document(
+        conn,
+        company_id=company_id,
+        article={
+            "source_url": "https://mfn.test/a/flow/persisted-future",
+            "title": "Flow AB Interim Report Q1 2027",
+            "published_at": "2027-05-01T08:00:00Z",
+            "ingested_lang": "en",
+        },
+        attachment={
+            "source_url": "https://storage.mfn.test/persisted-future.pdf",
+            "content_type": "application/pdf",
+            "byte_size": 8,
+            "sha256": "persisted-future-pdf",
+            "magic_valid": True,
+            "http_status": 200,
+        },
+        extraction={
+            "extractor": "pypdf",
+            "text_checksum": "persisted-future-text",
+            "page_count": 1,
+            "pages_included": "1",
+        },
+        pages=[{"page_number": 1, "text": "Evidence"}],
+    )
+
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper(
+            [
+                {
+                    "source_url": "https://mfn.test/a/flow/persisted-future",
+                    "title": "Flow AB Interim Report Q1 2027",
+                    "published_at": "2027-05-01T08:00:00Z",
+                }
+            ]
+        ),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2027-01-01")
+
+    assert result.status == "no_evidence"
+    assert result.no_evidence_reason == NoEvidenceReason.ALL_RELEASES_AFTER_CUTOFF
 
 
 def test_flow_rechecks_document_without_complete_evidence_artifacts():
@@ -324,6 +428,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-sv.pdf",
             "lang": "sv",
+            "provider_event_id": "flow-q1-2026",
         },
         {
             "source_url": "https://mfn.test/a/flow/report/en",
@@ -332,6 +437,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "attachment_url": "https://storage.mfn.test/q1-en.pdf",
             "body": "Material disclosure from the release body.",
             "lang": "en",
+            "provider_event_id": "flow-q1-2026",
         },
     ]
     response = SimpleNamespace(

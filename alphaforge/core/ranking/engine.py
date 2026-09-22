@@ -161,6 +161,13 @@ class RankingEngine:
 
         for company in companies:
             results = results_by_company.get(company.id, {})
+            research_evidence = results.get("research_evidence") or {}
+            evidence_packet = research_evidence.get("evidence_packet")
+            evidence_packet_hash = (
+                str(evidence_packet.get("packet_hash"))
+                if isinstance(evidence_packet, dict) and evidence_packet.get("packet_hash")
+                else None
+            )
             financial = results.get("financial")
             valuation = results.get("valuation")
             sector_kpis = results.get("sector_kpis") or {}
@@ -273,6 +280,7 @@ class RankingEngine:
                     )
                 ),
                 eligibility_reasons=eligibility_reasons,
+                evidence_packet_hash=evidence_packet_hash,
                 scoring_audit=scoring_audit,
             )
             scores.append(cs)
