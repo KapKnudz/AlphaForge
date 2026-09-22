@@ -308,6 +308,15 @@ def test_fiscal_observation_date_uses_reported_period_end_not_calendar_quarter()
         )
         == "2026-07-31"
     )
+    assert (
+        _observation_date(
+            {
+                "title": "Clas Ohlson Interim Report Q1 2026/2027",
+                "body": "The first quarter covered May 1 - July 31, 2026.",
+            }
+        )
+        == "2026-07-31"
+    )
 
 
 def test_flow_filters_missing_and_future_dates_and_is_idempotent():
@@ -361,9 +370,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert evidence_job[2] == 1
     assert evidence_job[3] is not None
     assert evidence_job[4] is not None
-    with patch(
-        "alphaforge.evidence.flow.request_with_retry", side_effect=AssertionError("redownload")
-    ):
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         second = flow.run(company_id, as_of="2026-09-20")
     assert second.status == "complete"
     assert second.downloaded == 0
@@ -542,12 +549,13 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
     assert sibling["selected_variant_source_url"] == source["source_url"]
     assert sibling["variant_group_id"] == source["variant_group_id"]
     assert sibling["relationship"] == "TRANSLATION"
-    second = OneCompanyEvidenceFlow(
-        conn,
-        scraper=_FakeScraper([articles[0]]),
-        limits=EvidenceResourceLimits(max_pages=3),
-        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
-    ).run(company_id, as_of="2026-09-20")
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        second = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper([articles[0]]),
+            limits=EvidenceResourceLimits(max_pages=3),
+            now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
     assert second.status == "complete"
     assert second.packet_hash == result.packet_hash
 
@@ -784,8 +792,10 @@ def test_packet_hash_stable_across_database_document_ids():
         "document_type": "INTERIM_Q1",
     }
 
-    def build_packet(*, add_unrelated_row: bool) -> dict:
+    def build_packet(*, add_unrelated_row: bool, add_unrelated_company: bool = False) -> dict:
         conn = _connection()
+        if add_unrelated_company:
+            upsert_company(conn, {"insId": 9009, "name": "Unrelated AB", "ticker": "UNREL"})
         company_id = upsert_company(conn, {"insId": 9010, "name": "Clas Ohlson", "ticker": "CLA B"})
         if add_unrelated_row:
             conn.execute(
@@ -819,7 +829,7 @@ def test_packet_hash_stable_across_database_document_ids():
         )
 
     first = build_packet(add_unrelated_row=False)
-    second = build_packet(add_unrelated_row=True)
+    second = build_packet(add_unrelated_row=True, add_unrelated_company=True)
 
     assert first["sources"][0]["source_id"] != second["sources"][0]["source_id"]
     assert first["packet_hash"] == second["packet_hash"]

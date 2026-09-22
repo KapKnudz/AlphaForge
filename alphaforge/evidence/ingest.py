@@ -27,6 +27,8 @@ def _detect_lang(text: str) -> tuple[str, float]:
 def _language(doc: dict[str, Any], pdf_language: str | None = None) -> str:
     # The PDF itself outranks MFN release-language metadata: an explicit PDF
     # decision (filename marker or first-pages word scoring) always wins.
+    if doc.get("_pdf_language_unresolved"):
+        return ""
     pdf = (pdf_language or doc.get("pdf_language") or "").lower()
     if pdf in {"sv", "en"}:
         return pdf
@@ -570,7 +572,9 @@ def _variant_relationship(left: dict[str, Any], right: dict[str, Any]) -> str:
 
 
 def _cross_language_correspondence(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    if _language(left) == _language(right):
+    left_language = _language(left)
+    right_language = _language(right)
+    if not left_language or not right_language or left_language == right_language:
         return False
     issuer = _issuer_identity(left)
     if not issuer or issuer != _issuer_identity(right):
@@ -629,7 +633,9 @@ def ambiguous_variant_pairs(
         for right in docs[index + 1 :]:
             if _variant_relationship(left, right) != "DIFFERENT_REPORT":
                 continue
-            if _language(left) == _language(right):
+            left_language = _language(left)
+            right_language = _language(right)
+            if not left_language or not right_language or left_language == right_language:
                 continue
             issuer = _issuer_identity(left)
             if not issuer or issuer != _issuer_identity(right):
@@ -666,7 +672,6 @@ def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             groups.append([doc])
 
-    preferred_language = "en"
     selection_rule = "deterministic_en_fallback"
     out: list[dict[str, Any]] = []
     for variants in groups:
@@ -682,8 +687,7 @@ def bilingual_dedupe(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         variants_sorted = sorted(
             variants,
             key=lambda value: (
-                0 if _language(value) == preferred_language else 1,
-                0 if _language(value) == "en" else 1,
+                0 if _language(value) == "en" else 1 if _language(value) == "sv" else 2,
                 str(value.get("source_url") or value.get("url") or ""),
             ),
         )

@@ -870,7 +870,17 @@ def persist_evidence_sibling(
         "bilingual_selection_rule", "deterministic_en_fallback"
     )
     metadata["relationship"] = sibling.get("relationship") or "UNRESOLVED"
-    for key in ("document_type", "period_start", "period_end", "pdf_language", "language_evidence"):
+    for key in (
+        "provider_event_id",
+        "mfn_event_id",
+        "document_type",
+        "period_start",
+        "period_end",
+        "pdf_checksum",
+        "attachment_checksum",
+        "pdf_language",
+        "language_evidence",
+    ):
         if sibling.get(key) is not None:
             metadata[key] = sibling[key]
     conn.execute(
@@ -993,6 +1003,8 @@ def persist_evidence_document(
     if not isinstance(metadata, dict):
         metadata = {}
     for key in (
+        "provider_event_id",
+        "mfn_event_id",
         "mfn_slug",
         "report_kind",
         "document_type",
@@ -1002,6 +1014,8 @@ def persist_evidence_document(
         "period_end",
         "report_period_end",
         "lang_confidence",
+        "pdf_checksum",
+        "attachment_checksum",
         "pdf_language",
         "language_evidence",
         "_bilingual_group_id",
@@ -1157,9 +1171,13 @@ def persist_evidence_document(
             sibling_meta["bilingual_selection_rule"] = metadata["bilingual_selection_rule"]
             sibling_meta["relationship"] = sibling.get("relationship") or "UNRESOLVED"
             for key in (
+                "provider_event_id",
+                "mfn_event_id",
                 "document_type",
                 "period_start",
                 "period_end",
+                "pdf_checksum",
+                "attachment_checksum",
                 "pdf_language",
                 "language_evidence",
             ):

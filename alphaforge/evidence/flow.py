@@ -142,9 +142,18 @@ def _sibling_entry(sibling: Any, document_id: int) -> dict[str, Any]:
         "selected_variant_source_url": metadata.get("duplicate_of_source_url"),
         "variant_group_id": metadata.get("bilingual_group_id"),
         "selection_state": f"suppressed_by_{str(relationship).casefold()}",
-        "selection_reason": "PREFERRED_LANGUAGE" if language == "en" else "FALLBACK_LANGUAGE",
+        "selection_reason": (
+            "REVISION"
+            if relationship == "REVISION"
+            else ("PREFERRED_LANGUAGE" if language == "en" else "FALLBACK_LANGUAGE")
+        ),
         "relationship": relationship,
     }
+
+
+def _is_pdf_backed_language_evidence(value: Any) -> bool:
+    evidence = str(value or "")
+    return evidence == "filename" or evidence.startswith("pdf_text:")
 
 
 def _prepare_selected_article(
@@ -162,6 +171,7 @@ def _prepare_selected_article(
     return {
         **variant,
         "pdf_language": pdf_language,
+        "pdf_checksum": downloaded.sha256,
         "language_evidence": language_evidence,
         "ingested_lang": pdf_language or release_lang or "en",
         "document_type": variant.get("document_type")
@@ -342,7 +352,7 @@ def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]
                 return None, None
         return candidates[0][1], candidates[0][2]
     month_first = re.compile(
-        rf"\b({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})\s*"
+        rf"\b({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\s*"
         rf"(?:-|–|—|to|through)\s*({months})\s+(\d{{1,2}}),?\s+(20\d{{2}})?\b"
     )
     month_candidates: list[tuple[int, str | None, str]] = []
@@ -488,6 +498,7 @@ def build_frozen_evidence_packet(
     mapping: dict[str, Any] | None = None,
     additional_limitations: list[str] | None = None,
     publication_cutoff: str | None = None,
+    excluded_source_urls: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
@@ -516,7 +527,10 @@ def build_frozen_evidence_packet(
     ).fetchall()
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
+    excluded_source_urls = excluded_source_urls or set()
     for row in rows:
+        if str(row["source_url"]) in excluded_source_urls:
+            continue
         document_id = int(row["document_id"])
         page_rows = conn.execute(
             """
@@ -1062,6 +1076,11 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
+            pdf_language = (
+                metadata.get("pdf_language")
+                if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))
+                else ""
+            )
             persisted_identity.append(
                 {
                     "source_url": persisted["source_url"],
@@ -1079,11 +1098,15 @@ class OneCompanyEvidenceFlow:
                         if metadata.get("observation_date_authoritative")
                         else None
                     ),
-                    "pdf_language": metadata.get("pdf_language"),
+                    "provider_event_id": metadata.get("provider_event_id"),
+                    "mfn_event_id": metadata.get("mfn_event_id"),
+                    "pdf_language": pdf_language,
                     "attachment_url": persisted["attachment_url"],
                     "attachment_checksum": persisted["attachment_checksum"],
-                    "ingested_lang": persisted["ingested_lang"],
-                    "lang": persisted["ingested_lang"],
+                    "pdf_checksum": persisted["attachment_checksum"],
+                    "ingested_lang": persisted["ingested_lang"] if pdf_language else "",
+                    "lang": persisted["ingested_lang"] if pdf_language else "",
+                    "_pdf_language_unresolved": not bool(pdf_language),
                     "_bilingual_group_id": metadata.get("bilingual_group_id"),
                     "_persisted_evidence": True,
                 }
@@ -1099,7 +1122,22 @@ class OneCompanyEvidenceFlow:
 
         ingestion = ResearchDocumentIngestionService(self.conn)
         resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
-        attempted_existing_pdf_resolution: set[str] = set()
+        unresolved_existing_source_urls: set[str] = set()
+
+        def mark_pdf_language_unresolved(
+            index: int, candidate: dict[str, Any], existing: dict[str, Any] | None
+        ) -> None:
+            identity_candidates[index] = {
+                **candidate,
+                "pdf_language": "",
+                "language_evidence": "unresolved",
+                "ingested_lang": "",
+                "lang": "",
+                "_pdf_language_unresolved": True,
+            }
+            if existing is not None and existing.get("canonical_source_url"):
+                unresolved_existing_source_urls.add(str(existing["canonical_source_url"]))
+
         for index, candidate in enumerate(identity_candidates):
             attachment_url = candidate.get("attachment_url") or candidate.get("storage_url")
             if not attachment_url:
@@ -1107,16 +1145,16 @@ class OneCompanyEvidenceFlow:
             existing = find_complete_evidence_attachment(
                 self.conn, str(attachment_url), company_id
             )
-            if existing is not None and existing.get("canonical_source_url"):
-                attempted_existing_pdf_resolution.add(str(attachment_url))
             try:
                 candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 candidate_extracted = ingestion.extract_pdf_pages(
                     candidate_download.content, max_pages=self.limits.max_pages
                 )
             except Exception:
+                mark_pdf_language_unresolved(index, candidate, existing)
                 continue
             if not candidate_extracted.pages:
+                mark_pdf_language_unresolved(index, candidate, existing)
                 continue
             pdf_first_pages = "\n".join(
                 str(page.get("text") or "") for page in candidate_extracted.pages[:3]
@@ -1132,10 +1170,14 @@ class OneCompanyEvidenceFlow:
             resolved = {
                 **candidate,
                 "pdf_language": pdf_language,
+                "pdf_checksum": candidate_download.sha256,
                 "language_evidence": language_evidence,
                 "ingested_lang": pdf_language or release_lang or "en",
+                "_pdf_language_unresolved": False,
             }
             identity_candidates[index] = resolved
+            if existing is not None and existing.get("canonical_source_url"):
+                unresolved_existing_source_urls.discard(str(existing["canonical_source_url"]))
             resolved_pdf_cache[str(attachment_url)] = (
                 candidate_download,
                 candidate_extracted,
@@ -1177,39 +1219,20 @@ class OneCompanyEvidenceFlow:
                     prepared = {
                         **variant,
                         "pdf_language": pdf_language,
+                        "pdf_checksum": candidate_download.sha256,
                         "language_evidence": language_evidence,
                         "ingested_lang": pdf_language or release_lang or "en",
+                        "_pdf_language_unresolved": False,
                     }
+                    if existing is not None and existing.get("canonical_source_url"):
+                        unresolved_existing_source_urls.discard(
+                            str(existing["canonical_source_url"])
+                        )
                     prepared_variants.append(prepared)
                     candidate_options.append(
                         (prepared, candidate_download, candidate_extracted, existing)
                     )
                     continue
-                if (
-                    existing is not None
-                    and existing.get("canonical_source_url")
-                    and str(attachment_url) in attempted_existing_pdf_resolution
-                ):
-                    metadata = {}
-                    try:
-                        loaded = json.loads(existing.get("canonical_raw_metadata") or "")
-                        if isinstance(loaded, dict):
-                            metadata = loaded
-                    except (TypeError, ValueError):
-                        metadata = {}
-                    stored_pdf_language = metadata.get("pdf_language")
-                    if stored_pdf_language in {"en", "sv"}:
-                        prepared = {
-                            **variant,
-                            "pdf_language": stored_pdf_language,
-                            "language_evidence": metadata.get(
-                                "language_evidence", "stored_pdf_metadata"
-                            ),
-                            "ingested_lang": stored_pdf_language,
-                        }
-                        prepared_variants.append(prepared)
-                        candidate_options.append((prepared, None, None, existing))
-                        continue
                 try:
                     candidate_download = download_pdf(str(attachment_url), limits=self.limits)
                 except PdfAcquisitionError as exc:
@@ -1242,9 +1265,15 @@ class OneCompanyEvidenceFlow:
                 prepared = {
                     **variant,
                     "pdf_language": pdf_language,
+                    "pdf_checksum": candidate_download.sha256,
                     "language_evidence": language_evidence,
                     "ingested_lang": pdf_language or release_lang or "en",
+                    "_pdf_language_unresolved": False,
                 }
+                if existing is not None and existing.get("canonical_source_url"):
+                    unresolved_existing_source_urls.discard(
+                        str(existing["canonical_source_url"])
+                    )
                 prepared_variants.append(prepared)
                 candidate_options.append((prepared, candidate_download, candidate_extracted, None))
             variants = prepared_variants
@@ -1417,6 +1446,7 @@ class OneCompanyEvidenceFlow:
             mapping=mapping,
             additional_limitations=packet_limitations,
             publication_cutoff=today.isoformat(),
+            excluded_source_urls=unresolved_existing_source_urls,
         )
         if not packet.get("sources"):
             if (

@@ -67,6 +67,7 @@ def _legacy_packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, A
 def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
     """Project stable provider identity and exclude run-timestamp provenance."""
     body = _legacy_packet_hash_body(packet_without_hash)
+    body.pop("company_id", None)
     sources = body.get("sources")
     if not isinstance(sources, list):
         return body
