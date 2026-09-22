@@ -651,7 +651,6 @@ def test_flow_keeps_no_pdf_variant_out_of_grouping():
     assert result.packet["sources"][0]["bilingual_siblings"] == []
 
 
-
 @pytest.mark.parametrize(
     ("content_type", "content", "code"),
     [

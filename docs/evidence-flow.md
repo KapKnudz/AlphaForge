@@ -47,7 +47,9 @@ remain separate and may receive an optional shadow-only review. The preferred
 variant is unconditionally English when available, otherwise Swedish, so a
 later English edition supersedes a previously selected
 Swedish one on re-run; suppressed siblings retain a `duplicate_of`, language,
-group, selection-rule, and relationship audit record, surfaced in the packet as
+group, selection-rule, and relationship audit record (metadata only — the
+demoted edition's attachment, extraction, and page rows are removed),
+surfaced in the packet as
 `selection_state` / `selection_reason` (`PREFERRED_LANGUAGE` /
 `FALLBACK_LANGUAGE`) / `variant_group_id`.
 

@@ -351,9 +351,10 @@ def test_revision_joins_existing_translation_group():
     selected = bilingual_dedupe(docs)
 
     assert len(selected) == 1
-    assert {
-        variant["relationship"] for variant in selected[0]["_suppressed_variants"]
-    } == {"TRANSLATION", "REVISION"}
+    assert {variant["relationship"] for variant in selected[0]["_suppressed_variants"]} == {
+        "TRANSLATION",
+        "REVISION",
+    }
 
 
 def test_unresolved_pdf_languages_never_merge_as_revision_or_translation():

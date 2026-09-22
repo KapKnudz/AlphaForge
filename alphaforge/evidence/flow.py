@@ -184,8 +184,7 @@ def _prepare_selected_article(
     )
     authoritative_language = (
         pdf_language
-        if pdf_language in {"en", "sv"}
-        and _is_pdf_backed_language_evidence(language_evidence)
+        if pdf_language in {"en", "sv"} and _is_pdf_backed_language_evidence(language_evidence)
         else ""
     )
     return {
@@ -289,9 +288,7 @@ def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]
         return None, None
     months = "|".join(sorted(_MONTHS, key=len, reverse=True))
     title = str(article.get("title") or "")
-    fiscal_span_match = re.search(
-        r"\b(20\d{2})\s*[/\-]\s*(?:20)?\d{2}\b", title, re.IGNORECASE
-    )
+    fiscal_span_match = re.search(r"\b(20\d{2})\s*[/\-]\s*(?:20)?\d{2}\b", title, re.IGNORECASE)
     year_match = (
         None
         if fiscal_span_match
@@ -300,7 +297,9 @@ def _body_period_range(article: dict[str, Any]) -> tuple[str | None, str | None]
     fiscal_year = (
         fiscal_span_match.group(1)
         if fiscal_span_match
-        else year_match.group(1) if year_match else None
+        else year_match.group(1)
+        if year_match
+        else None
     )
     # Both ``1 May 2026 – 31 July 2026`` and the common abbreviated form
     # ``1 May – 31 July 2026`` are emitted by MFN pages.
@@ -1184,9 +1183,7 @@ class OneCompanyEvidenceFlow:
             attachment_url = candidate.get("attachment_url") or candidate.get("storage_url")
             if not attachment_url:
                 continue
-            existing = find_complete_evidence_attachment(
-                self.conn, str(attachment_url), company_id
-            )
+            existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
             stored_pdf_language = _stored_pdf_language(existing)
             if stored_pdf_language is not None:
                 language, evidence = stored_pdf_language
@@ -1247,8 +1244,7 @@ class OneCompanyEvidenceFlow:
                 release_lang=str(release_lang),
             )
             if not (
-                pdf_language in {"en", "sv"}
-                and _is_pdf_backed_language_evidence(language_evidence)
+                pdf_language in {"en", "sv"} and _is_pdf_backed_language_evidence(language_evidence)
             ):
                 if release_lang.lower() in {"en", "sv"}:
                     indeterminate_pdf_cache[str(attachment_url)] = (
@@ -1406,7 +1402,9 @@ class OneCompanyEvidenceFlow:
                         "_pdf_language_unresolved": True,
                     }
                     prepared_variants.append(prepared)
-                    candidate_options.append((prepared, candidate_download, candidate_extracted, None))
+                    candidate_options.append(
+                        (prepared, candidate_download, candidate_extracted, None)
+                    )
                     continue
                 prepared = {
                     **variant,
@@ -1417,9 +1415,7 @@ class OneCompanyEvidenceFlow:
                     "_pdf_language_unresolved": False,
                 }
                 if existing is not None and existing.get("canonical_source_url"):
-                    unresolved_existing_source_urls.discard(
-                        str(existing["canonical_source_url"])
-                    )
+                    unresolved_existing_source_urls.discard(str(existing["canonical_source_url"]))
                 prepared_variants.append(prepared)
                 candidate_options.append((prepared, candidate_download, candidate_extracted, None))
             variants = prepared_variants
