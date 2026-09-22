@@ -947,7 +947,9 @@ def find_complete_evidence_attachment(
     row = conn.execute(
         f"""
         SELECT a.*, root.id AS canonical_document_id,
-               root.source_url AS canonical_source_url
+               root.source_url AS canonical_source_url,
+               root.ingested_lang AS canonical_ingested_lang,
+               root.raw_metadata AS canonical_raw_metadata
         FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
         JOIN research_documents root

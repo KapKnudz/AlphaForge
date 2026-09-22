@@ -724,6 +724,66 @@ def test_delayed_english_attaches_to_existing_logical_report():
     assert by_url["https://mfn.test/a/delayed/delarsrapport-q1-2026-2027"] is not None
 
 
+def test_packet_hash_stable_across_database_document_ids():
+    mapping = {
+        "mfn_slug": "all/a/clas-ohlson",
+        "source_url": "https://mfn.test/all/a/clas-ohlson",
+        "discovery_source": "fixture",
+        "verified_at": "2026-09-20T00:00:00Z",
+        "identity_evidence": {"provenance": "fixture", "reason": "acceptance"},
+    }
+    article = {
+        "source_url": "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-27",
+        "title": "Clas Ohlson Interim report Q1 2026/27",
+        "published_at": "2026-09-09T07:30:00Z",
+        "content_text": "Revenue 2847 MSEK. The quarter covered 1 May - 31 July 2026.",
+        "ingested_lang": "en",
+        "period_start": "2026-05-01",
+        "period_end": "2026-07-31",
+        "document_type": "INTERIM_Q1",
+    }
+
+    def build_packet(*, add_unrelated_row: bool) -> dict:
+        conn = _connection()
+        company_id = upsert_company(conn, {"insId": 9010, "name": "Clas Ohlson", "ticker": "CLA B"})
+        if add_unrelated_row:
+            conn.execute(
+                "INSERT INTO research_documents (company_id, source_url, source_type, title, published_at) "
+                "VALUES (?, ?, 'mfn', ?, ?)",
+                (company_id, "https://mfn.test/a/unrelated", "Unrelated", "2026-01-01"),
+            )
+            conn.commit()
+        persist_evidence_document(
+            conn,
+            company_id=company_id,
+            article=article,
+            attachment={
+                "source_url": "https://storage.mfn.test/clas/interim-report-q1-en.pdf",
+                "content_type": "application/pdf",
+                "byte_size": 8,
+                "sha256": "clas-pdf-checksum",
+                "magic_valid": True,
+                "http_status": 200,
+            },
+            extraction={
+                "extractor": "pypdf",
+                "text_checksum": hashlib.sha256(b"[page 1]\nEvidence").hexdigest(),
+                "page_count": 1,
+                "pages_included": "1",
+            },
+            pages=[{"page_number": 1, "text": "Evidence"}],
+        )
+        return build_frozen_evidence_packet(
+            conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
+        )
+
+    first = build_packet(add_unrelated_row=False)
+    second = build_packet(add_unrelated_row=True)
+
+    assert first["sources"][0]["source_id"] != second["sources"][0]["source_id"]
+    assert first["packet_hash"] == second["packet_hash"]
+
+
 def test_packet_hash_stable_across_run_timestamps():
     conn = _connection()
     company_id = _mapped_company(conn)

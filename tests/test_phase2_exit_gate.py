@@ -296,6 +296,35 @@ class TestGoldenPacketRoundTrip:
         }
         assert inputs_summary["evidence_packet_hashes"] == {str(company_id): packet["packet_hash"]}
 
+    def test_packet_hash_ignores_database_local_document_ids(self):
+        packet = {
+            "schema_version": "evidence-packet-v1",
+            "frozen": True,
+            "company_id": 1,
+            "as_of": "2026-09-20",
+            "issuer": {"mfn_slug": "all/a/example", "verified_at": "2026-09-20T00:00:00Z"},
+            "sources": [
+                {
+                    "source_id": "document:7",
+                    "source_url": "https://mfn.test/a/example/q1",
+                    "publication_date": "2026-09-01T00:00:00Z",
+                    "ingestion_date": "2026-09-20T01:00:00Z",
+                    "attachment": {"source_url": "https://storage/q1.pdf", "sha256": "a" * 64},
+                    "body": {
+                        "paragraphs": [
+                            {"anchor": "document:7#paragraph:1", "text": "Evidence"}
+                        ]
+                    },
+                    "pages": [{"anchor": "document:7#page:1", "text": "Evidence"}],
+                }
+            ],
+            "evidence_catalog": {"canonical_source_ids": ["document:7"]},
+            "coverage_facts": {"source_ids": ["document:7"]},
+        }
+        shifted = json.loads(json.dumps(packet).replace("document:7", "document:91"))
+
+        assert stable_packet_hash(packet) == stable_packet_hash(shifted)
+
     def test_packet_hash_reproducibility(self):
         """Packet hash is reproducible from same inputs."""
         companies = [

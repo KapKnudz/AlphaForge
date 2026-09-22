@@ -76,13 +76,15 @@ outcomes.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
-hash over the packet without its own `packet_hash`. Run timestamps
-(`issuer.verified_at`, per-source `ingestion_date`) stay in the stored JSON
-for auditability but are excluded from the hash, so identical artifacts hash
-identically across databases built at different times; packets hashed before
-this change keep validating against their stored hash. Readiness for the
-evidence lane requires that frozen packet hash to validate; a stray document
-row is not sufficient.
+hash over the packet without its own `packet_hash`. Database-local document IDs
+are projected to stable source identities derived from source URL, publication
+date, and attachment checksum for hashing; stored IDs remain available for
+provenance and citations. Run timestamps (`issuer.verified_at`, per-source
+`ingestion_date`) stay in the stored JSON for auditability but are excluded
+from the hash, so identical artifacts hash identically across databases built
+at different times; packets hashed before this change keep validating against
+their stored hash. Readiness for the evidence lane requires that frozen packet
+hash to validate; a stray document row is not sufficient.
 
 ### Live verification
 

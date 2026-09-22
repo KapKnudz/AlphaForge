@@ -24,8 +24,31 @@ HASH_EXCLUDED_ISSUER_KEYS = ("verified_at",)
 HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date",)
 
 
-def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
-    """Project the hashed subset: everything except run-timestamp provenance."""
+def _stable_source_id(source: dict[str, Any]) -> str:
+    attachment = source.get("attachment")
+    attachment_checksum = (
+        attachment.get("sha256") if isinstance(attachment, dict) else None
+    )
+    identity = {
+        "source_url": source.get("source_url"),
+        "publication_date": source.get("publication_date"),
+        "document_checksum": attachment_checksum,
+    }
+    return f"source:{canonical_packet_hash(identity)}"
+
+
+def _replace_source_reference(value: Any, references: dict[str, str]) -> Any:
+    if not isinstance(value, str):
+        return value
+    for old, new in references.items():
+        if value == old:
+            return new
+        if value.startswith(f"{old}#"):
+            return f"{new}{value[len(old):]}"
+    return value
+
+
+def _legacy_packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
     body = {key: value for key, value in packet_without_hash.items() if key != "packet_hash"}
     issuer = body.get("issuer")
     if isinstance(issuer, dict):
@@ -43,6 +66,91 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
+def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
+    """Project stable provider identity and exclude run-timestamp provenance."""
+    body = _legacy_packet_hash_body(packet_without_hash)
+    sources = body.get("sources")
+    if not isinstance(sources, list):
+        return body
+
+    references: dict[str, str] = {}
+    projected_sources: list[Any] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            projected_sources.append(source)
+            continue
+        old_source_id = source.get("source_id")
+        stable_source_id = _stable_source_id(source)
+        if isinstance(old_source_id, str):
+            references[old_source_id] = stable_source_id
+        projected = dict(source)
+        projected["source_id"] = stable_source_id
+        projected_sources.append(projected)
+
+    references_ready = references
+    for source in projected_sources:
+        if not isinstance(source, dict):
+            continue
+        body_value = source.get("body")
+        if isinstance(body_value, dict) and isinstance(body_value.get("paragraphs"), list):
+            source["body"] = {
+                **body_value,
+                "paragraphs": [
+                    {
+                        **paragraph,
+                        "anchor": _replace_source_reference(
+                            paragraph.get("anchor"), references_ready
+                        ),
+                    }
+                    if isinstance(paragraph, dict)
+                    else paragraph
+                    for paragraph in body_value["paragraphs"]
+                ],
+            }
+        if isinstance(source.get("pages"), list):
+            source["pages"] = [
+                {
+                    **page,
+                    "anchor": _replace_source_reference(page.get("anchor"), references_ready),
+                }
+                if isinstance(page, dict)
+                else page
+                for page in source["pages"]
+            ]
+        if isinstance(source.get("bilingual_siblings"), list):
+            source["bilingual_siblings"] = [
+                {
+                    **sibling,
+                    "duplicate_of": _replace_source_reference(
+                        sibling.get("duplicate_of"), references_ready
+                    ),
+                }
+                if isinstance(sibling, dict)
+                else sibling
+                for sibling in source["bilingual_siblings"]
+            ]
+    projected_sources.sort(key=lambda source: source.get("source_id", "") if isinstance(source, dict) else "")
+    body["sources"] = projected_sources
+    for key in ("evidence_catalog", "coverage_facts"):
+        value = body.get(key)
+        if isinstance(value, dict) and isinstance(value.get("source_ids"), list):
+            body[key] = {
+                **value,
+                "source_ids": sorted(
+                    references.get(source_id, source_id) for source_id in value["source_ids"]
+                ),
+            }
+        if key == "evidence_catalog" and isinstance(value, dict):
+            body[key] = {
+                **body[key],
+                "canonical_source_ids": sorted(
+                    references.get(source_id, source_id)
+                    for source_id in value.get("canonical_source_ids", [])
+                ),
+            }
+    return body
+
+
 def stable_packet_hash(packet_without_hash: dict[str, Any]) -> str:
     """Hash new packets over the provenance-excluded canonical subset."""
     return canonical_packet_hash(packet_hash_body(packet_without_hash))
@@ -54,10 +162,13 @@ def packet_hash_matches(packet: dict[str, Any]) -> bool:
         return False
     if stable_packet_hash(packet) == packet_hash:
         return True
-    # Legacy packets hashed the full body including run timestamps; they keep
-    # validating against their stored hash without being rewritten.
+    # Older packets used the timestamp-only projection or the full body; both
+    # remain valid without rewriting their stored hashes.
     without_hash = {key: value for key, value in packet.items() if key != "packet_hash"}
-    return canonical_packet_hash(without_hash) == packet_hash
+    return (
+        canonical_packet_hash(_legacy_packet_hash_body(packet)) == packet_hash
+        or canonical_packet_hash(without_hash) == packet_hash
+    )
 
 
 def validate_frozen_packet(packet: dict[str, Any] | None) -> bool:
