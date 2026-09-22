@@ -531,7 +531,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     and all(isinstance(item, dict) for item in values)
                                 ):
                                     try:
-                                        upsert_kpi_observations(
+                                        _upserted = upsert_kpi_observations(
                                             conn, cid, kpi_id_int, rt, "mean", values
                                         )
                                     except Exception as exc:
@@ -550,6 +550,28 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             },
                                         )
                                         continue
+                                    if _upserted == 0 and any(
+                                        isinstance(item, dict)
+                                        and (
+                                            item.get("v") is not None
+                                            or item.get("value") is not None
+                                        )
+                                        for item in values
+                                    ):
+                                        sync_failed = True
+                                        _kpi_summary_failed = True
+                                        record_job(
+                                            conn,
+                                            "sync_kpis",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_history_upsert_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt} summary values: unpersistable history values",
+                                                "retryable": True,
+                                            },
+                                        )
                                 if branch_id is not None:
                                     try:
                                         conn.execute(
@@ -600,10 +622,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                             },
                                         )
                                         continue
-                                    _kpi_history_ok.add((kpi_id_int, rt))
-                                    if history_rows:
+                                    if not history_rows:
+                                        _kpi_history_ok.add((kpi_id_int, rt))
+                                    else:
                                         try:
-                                            upsert_kpi_observations(
+                                            _upserted = upsert_kpi_observations(
                                                 conn,
                                                 cid,
                                                 kpi_id_int,
@@ -614,7 +637,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                         except Exception as exc:
                                             sync_failed = True
                                             _kpi_summary_failed = True
-                                            _kpi_history_ok.discard((kpi_id_int, rt))
                                             record_job(
                                                 conn,
                                                 "sync_kpis",
@@ -628,6 +650,30 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                                 },
                                             )
                                             continue
+                                        if _upserted == 0 and any(
+                                            isinstance(item, dict)
+                                            and (
+                                                item.get("v") is not None
+                                                or item.get("value") is not None
+                                            )
+                                            for item in history_rows
+                                        ):
+                                            sync_failed = True
+                                            _kpi_summary_failed = True
+                                            record_job(
+                                                conn,
+                                                "sync_kpis",
+                                                company_id=cid,
+                                                borsdata_id=bid,
+                                                status="failed",
+                                                error={
+                                                    "code": "kpi_history_upsert_failed",
+                                                    "message": f"kpi {kpi_id_int}/{rt}: unpersistable history values",
+                                                    "retryable": True,
+                                                },
+                                            )
+                                            continue
+                                        _kpi_history_ok.add((kpi_id_int, rt))
                 # Dedicated fetch for ROIC (37) and net-debt/EBITDA (42) even when
                 # Börsdata summary omits them (Clas Ohlson live: summary has 42 ids
                 # but not 37/42, while history endpoints return 10 rows each).
@@ -663,7 +709,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             continue
                         if _rows:
                             try:
-                                upsert_kpi_observations(conn, cid, int(_kpi_id), _rt, "mean", _rows)
+                                _upserted = upsert_kpi_observations(conn, cid, int(_kpi_id), _rt, "mean", _rows)
                             except Exception as exc:
                                 sync_failed = True
                                 record_job(
@@ -675,6 +721,28 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     error={
                                         "code": "kpi_history_upsert_failed",
                                         "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
+                                        "retryable": True,
+                                    },
+                                )
+                                continue
+                            if _upserted == 0 and any(
+                                isinstance(item, dict)
+                                and (
+                                    item.get("v") is not None
+                                    or item.get("value") is not None
+                                )
+                                for item in _rows
+                            ):
+                                sync_failed = True
+                                record_job(
+                                    conn,
+                                    _job,
+                                    company_id=cid,
+                                    borsdata_id=bid,
+                                    status="failed",
+                                    error={
+                                        "code": "kpi_history_upsert_failed",
+                                        "message": f"kpi {_kpi_id}/{_rt}: unpersistable history values",
                                         "retryable": True,
                                     },
                                 )
