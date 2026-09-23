@@ -156,7 +156,13 @@ INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
 # selection could not pick exactly one — the lane must fail visibly instead
 # of guessing. Defined here (leaf module) so both the scraper and the
 # evidence flow share one authoritative definition without a circular import.
-ATTACHMENT_TIERS: tuple[str, ...] = ("mfn-primary", "main-path", "label-score", "unresolved", "none")
+ATTACHMENT_TIERS: tuple[str, ...] = (
+    "mfn-primary",
+    "main-path",
+    "label-score",
+    "unresolved",
+    "none",
+)
 
 
 def is_invitation_or_presentation(title: str) -> bool:
@@ -164,6 +170,5 @@ def is_invitation_or_presentation(title: str) -> bool:
     lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))
     compact = lower.replace(" ", "")
     return any(
-        marker in lower or marker.replace(" ", "") in compact
-        for marker in INVITATION_MARKERS
+        marker in lower or marker.replace(" ", "") in compact for marker in INVITATION_MARKERS
     )

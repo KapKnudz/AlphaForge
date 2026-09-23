@@ -1964,11 +1964,7 @@ class OneCompanyEvidenceFlow:
                 # Retained by an earlier run: count in-window persisted
                 # coverage and recover its attachment-tier evidence so rerun
                 # diagnostics reflect persisted packet sources.
-                anchor = (
-                    article
-                    if article.get("_persisted_evidence")
-                    else persisted_variants[0]
-                )
+                anchor = article if article.get("_persisted_evidence") else persisted_variants[0]
                 if not _persisted_anchor_in_window(anchor, as_of=as_of, window=window):
                     continue
                 report_class = _completeness_class(anchor)
@@ -1977,9 +1973,7 @@ class OneCompanyEvidenceFlow:
                 result.persisted += 1
                 tier = anchor.get("attachment_tier")
                 if tier in ATTACHMENT_TIERS:
-                    result.attachment_selection[tier] = (
-                        result.attachment_selection.get(tier, 0) + 1
-                    )
+                    result.attachment_selection[tier] = result.attachment_selection.get(tier, 0) + 1
                 continue
             # A language-only feed/detail variant without a PDF must not
             # create a second expected item when its opposite-language edition
@@ -1988,20 +1982,23 @@ class OneCompanyEvidenceFlow:
             # opposite-language retained counterpart.  A lone missing PDF
             # remains an expected completeness deficit.
             if not any(
-                variant.get("attachment_url") or variant.get("storage_url")
-                for variant in variants
+                variant.get("attachment_url") or variant.get("storage_url") for variant in variants
             ):
                 event = article.get("provider_event_id") or article.get("mfn_event_id")
                 language = str(article.get("lang") or article.get("ingested_lang") or "").lower()
-                if event and language in {"en", "sv"} and any(
-                    other is not article
-                    and (other.get("provider_event_id") or other.get("mfn_event_id")) == event
-                    and str(other.get("lang") or other.get("ingested_lang") or "").lower()
-                    in {"en", "sv"}
-                    and str(other.get("lang") or other.get("ingested_lang") or "").lower()
-                    != language
-                    and (other.get("attachment_url") or other.get("storage_url"))
-                    for other in deduped
+                if (
+                    event
+                    and language in {"en", "sv"}
+                    and any(
+                        other is not article
+                        and (other.get("provider_event_id") or other.get("mfn_event_id")) == event
+                        and str(other.get("lang") or other.get("ingested_lang") or "").lower()
+                        in {"en", "sv"}
+                        and str(other.get("lang") or other.get("ingested_lang") or "").lower()
+                        != language
+                        and (other.get("attachment_url") or other.get("storage_url"))
+                        for other in deduped
+                    )
                 ):
                     continue
             # A new group with no attachment anywhere stays in the expected

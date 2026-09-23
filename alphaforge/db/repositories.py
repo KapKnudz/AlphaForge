@@ -1350,7 +1350,7 @@ def load_evidence_packet(
     row = conn.execute(
         f"""
         SELECT packet_json FROM evidence_packets
-        WHERE {' AND '.join(predicates)} ORDER BY id DESC LIMIT 1
+        WHERE {" AND ".join(predicates)} ORDER BY id DESC LIMIT 1
         """,
         tuple(parameters),
     ).fetchone()

@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
-    ATTACHMENT_TIERS,
+    ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
     document_type,
     is_invitation_or_presentation,
     is_report,

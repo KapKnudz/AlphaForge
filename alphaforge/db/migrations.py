@@ -130,8 +130,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         # newer table shape while their user_version is being replayed (for
         # example after a manual repair of an earlier migration).
         columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
+            row[1] for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
         }
         additions = (
             ("report_rules_version", "INTEGER NOT NULL DEFAULT 0"),
