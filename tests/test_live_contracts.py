@@ -234,7 +234,15 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             return []
 
         def get_kpi_metadata(self):
-            return [{"kpiId": 2, "nameSv": "KPI 2", "nameEn": "KPI 2", "format": None, "isString": False}]
+            return [
+                {
+                    "kpiId": 2,
+                    "nameSv": "KPI 2",
+                    "nameEn": "KPI 2",
+                    "format": None,
+                    "isString": False,
+                }
+            ]
 
         def get_report_metadata(self):
             return []

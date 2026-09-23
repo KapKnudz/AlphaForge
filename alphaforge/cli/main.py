@@ -230,7 +230,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
             company_id=None,
             borsdata_id=None,
             status="failed",
-            error={"code": "instruments_fetch_failed", "message": _sanitize_provider_error(e), "retryable": True},
+            error={
+                "code": "instruments_fetch_failed",
+                "message": _sanitize_provider_error(e),
+                "retryable": True,
+            },
         )
 
     # Instruments now exist, so relink rows imported before the sync and only
@@ -344,7 +348,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as exc:
             sync_failed = True
-            print(f"translation metadata sync failed: {_sanitize_provider_error(exc)}", file=sys.stderr)
+            print(
+                f"translation metadata sync failed: {_sanitize_provider_error(exc)}",
+                file=sys.stderr,
+            )
         # kpi/report metadata caches
         try:
             kpis_meta = adapter.get_kpi_metadata()
@@ -448,7 +455,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "reports_contract_failed", "message": _sanitize_provider_error(e), "retryable": True},
+                    error={
+                        "code": "reports_contract_failed",
+                        "message": _sanitize_provider_error(e),
+                        "retryable": True,
+                    },
                 )
 
         # Per-company prices / dividends / kpi branches etc — isolated
@@ -473,7 +484,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "prices_fetch_failed", "message": f"prices: {_sanitize_provider_error(e)}", "retryable": True},
+                    error={
+                        "code": "prices_fetch_failed",
+                        "message": f"prices: {_sanitize_provider_error(e)}",
+                        "retryable": True,
+                    },
                 )
             # kpis — per-instrument branch allowlist discovery via summary
             try:
@@ -711,7 +726,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             continue
                         if _rows:
                             try:
-                                _upserted = upsert_kpi_observations(conn, cid, int(_kpi_id), _rt, "mean", _rows)
+                                _upserted = upsert_kpi_observations(
+                                    conn, cid, int(_kpi_id), _rt, "mean", _rows
+                                )
                             except Exception as exc:
                                 sync_failed = True
                                 record_job(
@@ -731,10 +748,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                 1
                                 for item in _rows
                                 if isinstance(item, dict)
-                                and (
-                                    item.get("v") is not None
-                                    or item.get("value") is not None
-                                )
+                                and (item.get("v") is not None or item.get("value") is not None)
                             ):
                                 sync_failed = True
                                 record_job(
@@ -750,9 +764,13 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                     },
                                 )
                                 continue
-                            record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                            record_job(
+                                conn, _job, company_id=cid, borsdata_id=bid, status="success"
+                            )
                         else:
-                            record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                            record_job(
+                                conn, _job, company_id=cid, borsdata_id=bid, status="success"
+                            )
                             continue
                     if branch_id is not None:
                         try:
@@ -796,7 +814,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "kpi_contract_failed", "message": f"kpi contract: {_sanitize_provider_error(exc)}", "retryable": True},
+                    error={
+                        "code": "kpi_contract_failed",
+                        "message": f"kpi contract: {_sanitize_provider_error(exc)}",
+                        "retryable": True,
+                    },
                 )
 
         # Dividends (global calendar, not per-company) — filter by company if possible

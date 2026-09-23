@@ -25,7 +25,9 @@ ranking never masquerades as a discounted-cash-flow.
   **Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount
   from `RequiredReturnPolicy` market-cap buckets in **absolute SEK**
   (market cap from `price × shares` is in MSEK — scaled ×1e6 for bucket
-  selection).
+  selection). Missing ROIC (KPI 37) is provisional, not fatal: the DCF stays
+  `available` with net reinvestment 0%, lowered confidence, a warning, and
+  `missing_information=("roic",)`.
 * **Engine:** `alphaforge/core/valuation/reverse_dcf.py`
   (`ReverseDcfEngine.value/solve`) — projects `revenue → ebit → nopat → fcff`
   with linear fade of `revenue_growth` and `ebit_margin`, then
@@ -34,6 +36,10 @@ ranking never masquerades as a discounted-cash-flow.
   builds `DcfPolicyDecision` from PIT-filtered annuals and `kpi_observations`
   (37), then `ReverseDcfEngine` → `DcfValue` (enterprise/equity/value per
   share, terminal value, 5 `ProjectedCashFlow` with `fcff`/`discounted_fcff`).
+  PIT means `year <= cutoff.year AND observation_date <= as_of`; KPI 37/42
+  prefer R12 over annual explicitly. DCF market cap, enterprise value, and the
+  required-return hurdle come from the selected DCF report (latest R12, else
+  latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,
   `projected_cash_flows`, plus `implied` solves for
@@ -42,7 +48,9 @@ ranking never masquerades as a discounted-cash-flow.
 * **Export:** `alphaforge rank` writes `exports/<as_of>/dcf.json`
   alongside `ranking.json/csv`; `ranking_loader` also returns top-level
   `dcf` / `reverse_dcf` so callers do not need to reach into
-  `candidate.full_results`.
+  `candidate.full_results`. Every non-valued path emits a structured
+  unavailable result (`dcf.available=false` with `missing_information` and
+  top-level `status="unavailable"`), including outer DCF wiring failures.
 * **Provenance:** `policy_version`, `size_bucket`, `market_cap`, `reinvestment_return`,
   `normalization {confidence, selected_window_years, reasons}`, `warnings`,
   `missing_information` are persisted; heuristic score and DCF are never merged.
@@ -81,6 +89,8 @@ without error.
 ## Integrity
 
 * No guessed fundamentals: absent `ebitda`, gross `total_Debt`, or KPI history
-  stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`.
+  stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`
+  — except missing ROIC, which yields a provisional available DCF at 0%
+  reinvestment (see policy above).
 * Deterministic: identical PIT inputs → identical `DcfValue` and `valuation_score`.
 * Credentials never appear in exports or logs (`authKey` redacted in adapter).

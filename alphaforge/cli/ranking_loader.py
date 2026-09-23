@@ -293,7 +293,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "current_net_debt": current_net_debt,
         "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency,
-        "financial_currency": (dcf_current_report.currency if dcf_current_report is not None else None)
+        "financial_currency": (
+            dcf_current_report.currency if dcf_current_report is not None else None
+        )
         or stock_currency,
         "market_cap": dcf_raw.market_cap,
         "enterprise_value": dcf_raw.enterprise_value,
