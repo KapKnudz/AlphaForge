@@ -2090,7 +2090,9 @@ class OneCompanyEvidenceFlow:
         ]
         if language_fallback_count:
             packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
-        for tier in ("main-path", "label-score"):
+        for tier in ATTACHMENT_TIERS:
+            if tier in ("unresolved", "none"):
+                continue
             tier_count = result.attachment_selection.get(tier, 0)
             if tier_count:
                 packet_limitations.append(f"attachment_selection_{tier}:{tier_count}")

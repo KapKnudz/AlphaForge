@@ -1331,19 +1331,6 @@ def mark_evidence_packets_unusable(
     return int(cursor.rowcount or 0)
 
 
-# Compatibility name for callers from the short-lived versioned-packet patch.
-# It now preserves rows and marks them instead of deleting audit history.
-def delete_stale_evidence_packets(
-    conn: Any, *, company_id: int, as_of: str, current_version: int
-) -> int:
-    return mark_evidence_packets_unusable(
-        conn,
-        company_id=company_id,
-        as_of=as_of,
-        reason=f"stale_evidence_rules:v{current_version}",
-    )
-
-
 def load_evidence_packet(
     conn: Any,
     company_id: int,
