@@ -2,12 +2,18 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
 
-from alphaforge.core.frozen_packet import validate_frozen_packet
+from alphaforge.core.frozen_packet import (
+    EVIDENCE_RULES_VERSION,
+    is_stale_evidence_packet,
+    packet_rules_version,
+    validate_frozen_packet,
+)
 from alphaforge.core.valuation.forward_scenario import (
     ForwardScenarioEngine,
     ForwardScenarioInputs,
     ForwardScenarioReadiness,
 )
+from alphaforge.evidence.report_rules import current_report_rules_fingerprint
 
 ReadinessStatus = Literal[
     "ready",
@@ -75,12 +81,27 @@ class AgentReadinessGate:
 
         evidence = candidate.research_evidence or {}
         if getattr(candidate, "evidence_lane", evidence.get("evidence_lane", False)):
-            if not validate_frozen_packet(evidence.get("evidence_packet")):
+            packet = evidence.get("evidence_packet")
+            if not validate_frozen_packet(packet):
                 blockers.append(
                     ReadinessBlocker(
                         code="frozen_evidence_packet_missing",
                         category="evidence",
                         message="a valid frozen point-in-time evidence packet is required",
+                    )
+                )
+            elif is_stale_evidence_packet(
+                packet, current_rules_fingerprint=current_report_rules_fingerprint()
+            ):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="stale_evidence_packet",
+                        category="evidence",
+                        message=(
+                            "frozen evidence packet was built under older evidence rules"
+                            f" (v{packet_rules_version(packet)}); rerun the evidence lane"
+                            f" for v{EVIDENCE_RULES_VERSION}"
+                        ),
                     )
                 )
         elif not evidence.get("documents"):

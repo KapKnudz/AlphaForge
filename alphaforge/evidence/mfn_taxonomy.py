@@ -33,7 +33,15 @@ IMPORTANCE_KEYWORDS_SE: dict[str, list[str]] = {
         "takeover",
     ],
     "medium": ["delårsrapport", "kvartalsrapport", "order", "avtal"],
-    "low": ["inbjudan", "invitation", "presentation", "webcast"],
+    "low": [
+        "inbjudan",
+        "invitation",
+        "presentation",
+        "webcast",
+        "earnings call",
+        "conference call",
+        "webinar",
+    ],
 }
 
 REPORT_TERMS_SE: list[str] = [

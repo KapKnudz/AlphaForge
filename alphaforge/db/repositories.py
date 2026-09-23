@@ -6,6 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
+
 
 def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
     """Upsert companies row; return company id."""
@@ -1049,6 +1051,7 @@ def persist_evidence_document(
         "lang_confidence",
         "pdf_checksum",
         "attachment_checksum",
+        "attachment_tier",
         "pdf_language",
         "language_evidence",
         "_bilingual_group_id",
@@ -1266,13 +1269,32 @@ def persist_evidence_packet(
     packet_hash = str(packet.get("packet_hash") or "")
     if not packet_hash:
         raise ValueError("frozen evidence packet requires packet_hash")
+    rules = packet.get("report_rules")
+    rules_version = rules.get("version", 0) if isinstance(rules, dict) else 0
+    rules_fingerprint = rules.get("fingerprint", "legacy") if isinstance(rules, dict) else "legacy"
     conn.execute(
         """
-        INSERT INTO evidence_packets (company_id, as_of, packet_hash, packet_json)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(company_id, as_of, packet_hash) DO UPDATE SET packet_json=excluded.packet_json
+        INSERT INTO evidence_packets
+            (company_id, as_of, packet_hash, packet_json, report_rules_version,
+             report_rules_fingerprint, usable, usable_reason)
+        VALUES (?, ?, ?, ?, ?, ?, 1, NULL)
+        ON CONFLICT(company_id, as_of, packet_hash) DO UPDATE SET
+            packet_json=excluded.packet_json,
+            report_rules_version=excluded.report_rules_version,
+            report_rules_fingerprint=excluded.report_rules_fingerprint,
+            usable=1,
+            usable_reason=NULL
         """,
-        (company_id, as_of, packet_hash, packet_json),
+        (
+            company_id,
+            as_of,
+            packet_hash,
+            packet_json,
+            int(rules_version)
+            if isinstance(rules_version, int) and not isinstance(rules_version, bool)
+            else 0,
+            str(rules_fingerprint),
+        ),
     )
     conn.commit()
     row = conn.execute(
@@ -1282,13 +1304,68 @@ def persist_evidence_packet(
     return int(row[0]) if row else 0
 
 
-def load_evidence_packet(conn: Any, company_id: int, as_of: str) -> dict[str, Any] | None:
-    row = conn.execute(
+def mark_evidence_packets_unusable(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    reason: str,
+    commit: bool = True,
+) -> int:
+    """Tombstone every prior packet for one point-in-time evidence run.
+
+    Rows stay queryable for audit/reproducibility. ``commit=False`` is used by
+    the flow immediately before its terminal job record, making the mark and
+    that record one SQLite transaction.
+    """
+    cursor = conn.execute(
         """
-        SELECT packet_json FROM evidence_packets
-        WHERE company_id=? AND as_of=? ORDER BY id DESC LIMIT 1
+        UPDATE evidence_packets
+        SET usable=0, usable_reason=?
+        WHERE company_id=? AND as_of=? AND usable <> 0
         """,
-        (company_id, as_of),
+        (reason, company_id, as_of),
+    )
+    if commit:
+        conn.commit()
+    return int(cursor.rowcount or 0)
+
+
+# Compatibility name for callers from the short-lived versioned-packet patch.
+# It now preserves rows and marks them instead of deleting audit history.
+def delete_stale_evidence_packets(
+    conn: Any, *, company_id: int, as_of: str, current_version: int
+) -> int:
+    return mark_evidence_packets_unusable(
+        conn,
+        company_id=company_id,
+        as_of=as_of,
+        reason=f"stale_evidence_rules:v{current_version}",
+    )
+
+
+def load_evidence_packet(
+    conn: Any,
+    company_id: int,
+    as_of: str,
+    *,
+    current_rules_fingerprint: str | None = None,
+) -> dict[str, Any] | None:
+    if current_rules_fingerprint is None:
+        from alphaforge.evidence.report_rules import current_report_rules_fingerprint
+
+        current_rules_fingerprint = current_report_rules_fingerprint()
+    predicates = ["company_id=?", "as_of=?", "usable=1"]
+    parameters: list[Any] = [company_id, as_of]
+    if current_rules_fingerprint is not None:
+        predicates.append("report_rules_fingerprint=?")
+        parameters.append(current_rules_fingerprint)
+    row = conn.execute(
+        f"""
+        SELECT packet_json FROM evidence_packets
+        WHERE {' AND '.join(predicates)} ORDER BY id DESC LIMIT 1
+        """,
+        tuple(parameters),
     ).fetchone()
     if row is None:
         return None
@@ -1296,7 +1373,57 @@ def load_evidence_packet(conn: Any, company_id: int, as_of: str) -> dict[str, An
         packet = json.loads(row[0])
     except (TypeError, ValueError):
         return None
-    return packet if isinstance(packet, dict) else None
+    if not isinstance(packet, dict):
+        return None
+    if not validate_frozen_packet(packet):
+        return None
+    if packet.get("evidence_rules_version") != EVIDENCE_RULES_VERSION:
+        return None
+    rules = packet.get("report_rules")
+    if not isinstance(rules, dict) or not isinstance(rules.get("fingerprint"), str):
+        return None
+    if current_rules_fingerprint is not None and rules["fingerprint"] != current_rules_fingerprint:
+        return None
+    return packet
+
+
+def describe_evidence_state(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    current_rules_fingerprint: str | None = None,
+) -> dict[str, Any] | None:
+    """Read the last persisted diagnostic for one point-in-time key.
+
+    Complete runs persist diagnostics inside the frozen packet. Terminal
+    non-complete runs persist them in the job error after packet tombstoning.
+    """
+    packet = load_evidence_packet(
+        conn,
+        company_id,
+        as_of,
+        current_rules_fingerprint=current_rules_fingerprint,
+    )
+    if packet is not None:
+        diagnostic = packet.get("evidence_diagnostic")
+        if isinstance(diagnostic, dict):
+            result = dict(diagnostic)
+            result["status"] = "complete"
+            result["packet_hash"] = packet.get("packet_hash")
+            return result
+    row = conn.execute(
+        "SELECT error FROM jobs WHERE job_type='evidence' AND company_id=?",
+        (company_id,),
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    try:
+        error = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    diagnostic = error.get("diagnostic") if isinstance(error, dict) else None
+    return dict(diagnostic) if isinstance(diagnostic, dict) else None
 
 
 def append_jev_shadow_audit(conn: Any, audit: dict[str, Any]) -> int:

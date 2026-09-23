@@ -15,6 +15,7 @@ from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.db.repositories import load_evidence_packet
+from alphaforge.evidence.report_rules import current_report_rules_fingerprint
 
 
 def _number(value: Any) -> float | None:
@@ -89,7 +90,12 @@ def _price(row, fallback_currency: str | None) -> StockPrice:
 def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any]:
     """Load all ranking inputs visible at *as_of* (never current live rows)."""
     cutoff = date.fromisoformat(as_of[:10])
-    evidence_packet = load_evidence_packet(conn, company_id, as_of[:10])
+    evidence_packet = load_evidence_packet(
+        conn,
+        company_id,
+        as_of[:10],
+        current_rules_fingerprint=current_report_rules_fingerprint(),
+    )
     company = conn.execute(
         "SELECT stock_price_currency, report_currency FROM companies WHERE id=?", (company_id,)
     ).fetchone()

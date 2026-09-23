@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 6 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 7 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -125,6 +125,40 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         conn.execute("PRAGMA foreign_keys=ON;")
         current = 6
+    if current < 7:
+        # Apply additively because test/operational databases can have a
+        # newer table shape while their user_version is being replayed (for
+        # example after a manual repair of an earlier migration).
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
+        }
+        additions = (
+            ("report_rules_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("report_rules_fingerprint", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("usable", "INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1))"),
+            ("usable_reason", "TEXT"),
+        )
+        for name, definition in additions:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE evidence_packets ADD COLUMN {name} {definition}")
+        conn.execute(
+            """
+            UPDATE evidence_packets
+            SET report_rules_version = COALESCE(json_extract(packet_json, '$.report_rules.version'), 0),
+                report_rules_fingerprint = COALESCE(json_extract(packet_json, '$.report_rules.fingerprint'), 'legacy')
+            WHERE report_rules_fingerprint = 'legacy'
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+            ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC)
+            """
+        )
+        set_user_version(conn, 7)
+        conn.commit()
+        current = 7
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -219,10 +253,44 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             as_of               TEXT NOT NULL,
             packet_hash         TEXT NOT NULL,
             packet_json         TEXT NOT NULL CHECK (json_valid(packet_json)),
+            report_rules_version INTEGER NOT NULL DEFAULT 0,
+            report_rules_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+            usable              INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1)),
+            usable_reason       TEXT,
             frozen_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             UNIQUE (company_id, as_of, packet_hash)
         ) STRICT;
         CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+            ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
+        """
+    )
+    # A database may have been stamped with the current user_version by an
+    # older build whose initial schema predated packet lifecycle columns.
+    # Repair that shape additively instead of trusting the version alone.
+    packet_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
+    }
+    for name, definition in (
+        ("report_rules_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("report_rules_fingerprint", "TEXT NOT NULL DEFAULT 'legacy'"),
+        ("usable", "INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1))"),
+        ("usable_reason", "TEXT"),
+    ):
+        if name not in packet_columns:
+            conn.execute(f"ALTER TABLE evidence_packets ADD COLUMN {name} {definition}")
+    conn.execute(
+        """
+        UPDATE evidence_packets
+        SET report_rules_version = COALESCE(json_extract(packet_json, '$.report_rules.version'), 0),
+            report_rules_fingerprint = COALESCE(json_extract(packet_json, '$.report_rules.fingerprint'), 'legacy')
+        WHERE report_rules_fingerprint = 'legacy'
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+        ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC)
         """
     )
 

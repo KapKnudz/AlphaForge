@@ -125,8 +125,22 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 `ingestion_date`) stay in the stored JSON for auditability but are excluded
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
-their stored hash. Readiness for the evidence lane requires that frozen packet
-hash to validate; a stray document row is not sufficient.
+their stored hash. Every packet also stamps `evidence_rules_version` (currently
+v1 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+evidence/filter/completeness rule set (report/invitation taxonomy,
+issuer confirmation, attachment-tier selection, completeness counting). Stale
+is defined narrowly as a packet built under an older rule version — including
+pre-versioning packets without the marker. Older packets stay hash-valid but
+readiness rejects them with `stale_evidence_packet`; rerun the lane to rebuild
+under the current rules. Readiness for the evidence lane requires that frozen packet
+hash to validate; a stray document row is not sufficient. Packet rows also carry
+`report_rules_fingerprint`, `usable`, and `usable_reason`. A later non-complete
+run marks every prior packet for the same `(company_id, as_of)` unusable in the
+same transaction as its terminal job record; rows remain queryable for audit
+history, while the loader reuses only valid, current-fingerprint, usable rows.
+Run diagnostics are persisted in the packet on complete runs or the job error
+on terminal failures, and `describe_evidence_state` is the replay source for
+CLI/result diagnostics.
 
 ### Live verification
 

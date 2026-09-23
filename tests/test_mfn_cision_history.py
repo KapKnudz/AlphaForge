@@ -9,9 +9,22 @@ from unittest.mock import patch
 from pypdf import PdfWriter
 
 from alphaforge.config import Settings
+from alphaforge.core.frozen_packet import (
+    EVIDENCE_RULES_VERSION,
+    is_stale_evidence_packet,
+    packet_rules_version,
+    stable_packet_hash,
+    validate_frozen_packet,
+)
+from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
-from alphaforge.db.repositories import upsert_company
+from alphaforge.db.repositories import (
+    describe_evidence_state,
+    load_evidence_packet,
+    persist_evidence_packet,
+    upsert_company,
+)
 from alphaforge.evidence.flow import NoEvidenceReason, OneCompanyEvidenceFlow
 from alphaforge.evidence.ingest import bilingual_dedupe
 from alphaforge.providers.mfn.scraper import MfnScraper
@@ -479,3 +492,363 @@ def test_clas_ohlson_history_recovers_full_window():
         expected_titles
     )
     assert "attachment_selection_label-score:2" in result.packet["limitations"]
+
+
+def _lane_candidate(packet):
+    return SimpleNamespace(
+        ranking_model="general",
+        research_evidence={"evidence_lane": True, "evidence_packet": packet},
+        full_results={
+            "reverse_dcf": {"status": "available"},
+            "valuation": {"ev_ebit_guardrail_low": 5.0, "ev_ebit_guardrail_high": 20.0},
+        },
+        company_id=1,
+        ticker="FLOW",
+    )
+
+
+def _versioned_packet_variant(packet, version):
+    """Represent a packet frozen under older rules with a valid self-hash."""
+    variant = {key: value for key, value in packet.items() if key != "packet_hash"}
+    if version is None:
+        variant.pop("evidence_rules_version", None)
+    else:
+        variant["evidence_rules_version"] = version
+    variant["packet_hash"] = stable_packet_hash(variant)
+    return variant
+
+
+def _quarterly_article(slug, title, published_at, attachment=None):
+    article = {
+        "url": f"https://mfn.test/a/flow/{slug}",
+        "source_url": f"https://mfn.test/a/flow/{slug}",
+        "title": title,
+        "published_at": published_at,
+        "lang": "en",
+    }
+    if attachment is not None:
+        article["attachment_url"] = attachment
+    return article
+
+
+def test_old_rule_packet_is_hash_valid_but_not_trusted_by_readiness():
+    """Stale is defined narrowly as an older evidence/filter/completeness rule version.
+
+    A packet frozen under older rules keeps validating against the frozen
+    model (self-hash plus schema), but readiness must block it with
+    ``stale_evidence_packet`` instead of reporting ready.
+    """
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    feed = [{"url": article["url"], "title": article["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "complete"
+    packet = result.packet
+    assert packet["evidence_rules_version"] == EVIDENCE_RULES_VERSION
+    assert packet_rules_version(packet) == EVIDENCE_RULES_VERSION
+    assert not is_stale_evidence_packet(packet)
+    assert AgentReadinessGate().assess(_lane_candidate(packet)).status == "ready"
+
+    old_packet = _versioned_packet_variant(packet, EVIDENCE_RULES_VERSION - 1)
+    assert packet_rules_version(old_packet) == EVIDENCE_RULES_VERSION - 1
+    assert validate_frozen_packet(old_packet)
+    assert is_stale_evidence_packet(old_packet)
+
+    # A pre-versioning packet without the marker is stale too (fail closed).
+    unmarked = _versioned_packet_variant(packet, None)
+    assert packet_rules_version(unmarked) is None
+    assert validate_frozen_packet(unmarked)
+    assert is_stale_evidence_packet(unmarked)
+
+    assessment = AgentReadinessGate().assess(_lane_candidate(old_packet))
+    assert assessment.status == "evidence_blocked"
+    assert [blocker.code for blocker in assessment.blockers] == ["stale_evidence_packet"]
+
+
+def test_incomplete_rerun_with_old_rule_packet_fails_visibly():
+    """Completeness gate, diagnostic buckets, and stale invalidation together.
+
+    An older-rule complete packet sits in the packet table while the rerun
+    sees one in-window report with no usable PDF. The lane must fail with
+    ``evidence_incomplete`` (never fall back to the old packet), the
+    non-complete exit must invalidate the stale row, and readiness must keep
+    blocking that old packet as stale.
+    """
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    gate = AgentReadinessGate()
+    q1 = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    q2 = _quarterly_article(
+        "interim-report-q2-2026",
+        "Flow AB Interim Report Q2 2026",
+        "2026-08-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q2.pdf",
+    )
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeCisionScraper([{"url": q1["url"], "title": q1["title"]}], [q1])
+        ).run(company_id, as_of="2026-09-20")
+    assert first.status == "complete"
+
+    # Seed the older-rule complete packet the stale check must invalidate.
+    old_packet = _versioned_packet_variant(first.packet, EVIDENCE_RULES_VERSION - 1)
+    persist_evidence_packet(conn, company_id=company_id, as_of="2026-09-20", packet=old_packet)
+
+    def transport(method, url, **kwargs):
+        if url.endswith("q2.pdf"):
+            raise RuntimeError("connection reset")
+        return _pdf_response(_pdf())
+
+    rerun_feed = [{"url": article["url"], "title": article["title"]} for article in (q1, q2)]
+    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(rerun_feed, [q1, q2])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    assert "quarterly expected" in (result.message or "")
+    diagnostic = result.diagnostic()
+    assert diagnostic["download_failed"] == 1
+    quarterly = diagnostic["completeness"]["quarterly"]
+    assert quarterly["retained"] < quarterly["expected"]
+
+    # Any non-complete rerun tombstones every prior packet for this
+    # point-in-time key.  No stale or current packet may keep readiness green.
+    loaded = load_evidence_packet(conn, company_id, "2026-09-20")
+    assert loaded is None
+    rows = conn.execute(
+        "SELECT usable, usable_reason FROM evidence_packets WHERE company_id=? AND as_of=?",
+        (company_id, "2026-09-20"),
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(row[0] == 0 for row in rows)
+    assert all(row[1] == "incomplete_run:evidence_incomplete" for row in rows)
+    # The older-rule packet itself stays hash-valid but untrusted.
+    assert validate_frozen_packet(old_packet)
+    assert is_stale_evidence_packet(old_packet)
+    assessment = gate.assess(_lane_candidate(old_packet))
+    assert assessment.status == "evidence_blocked"
+    assert "stale_evidence_packet" in [blocker.code for blocker in assessment.blockers]
+
+
+def test_same_rule_later_incomplete_run_tombstones_packet_and_replays_diagnostic():
+    """A later same-rule failure cannot reuse the earlier complete packet."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    q1 = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    q2 = _quarterly_article(
+        "interim-report-q2-2026",
+        "Flow AB Interim Report Q2 2026",
+        "2026-08-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q2.pdf",
+    )
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeCisionScraper([{"url": q1["url"], "title": q1["title"]}], [q1])
+        ).run(company_id, as_of="2026-09-20")
+    assert first.status == "complete"
+
+    def transport(method, url, **kwargs):
+        if url.endswith("q2.pdf"):
+            raise RuntimeError("connection reset")
+        return _pdf_response(_pdf())
+
+    feed = [{"url": article["url"], "title": article["title"]} for article in (q1, q2)]
+    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
+        second = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeCisionScraper(feed, [q1, q2])
+        ).run(company_id, as_of="2026-09-20")
+    assert second.status == "evidence_incomplete"
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
+    row = conn.execute(
+        "SELECT usable, usable_reason FROM evidence_packets WHERE company_id=? AND as_of=?",
+        (company_id, "2026-09-20"),
+    ).fetchone()
+    assert tuple(row) == (0, "incomplete_run:evidence_incomplete")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, q1["source_url"]),
+    ).fetchone()[0] == 1
+    persisted = describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20")
+    assert persisted == second.diagnostic()
+    assert AgentReadinessGate().assess(_lane_candidate(None)).status == "evidence_blocked"
+
+
+def test_no_attachment_group_stays_in_expected_denominator():
+    """MFN-002: an in-window report with no usable PDF is a deficit, not a filter."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    q1 = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    q2 = _quarterly_article(
+        "interim-report-q2-2026",
+        "Flow AB Interim Report Q2 2026",
+        "2026-08-01T08:00:00Z",
+    )
+    feed = [{"url": article["url"], "title": article["title"]} for article in (q1, q2)]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [q1, q2])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    assert result.skipped.get("missing_pdf_attachment") == 1
+    assert result.completeness == {"quarterly": {"expected": 2, "retained": 1}}
+    assert "quarterly expected 2 retained 1" in (result.message or "")
+
+
+def test_ambiguous_group_stays_in_expected_denominator():
+    """MFN-002: a refused attachment guess blocks visibly and stays expected."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        _report_article(
+            "flow-interim-report-q1-2026-c41def1c",
+            "Flow AB Interim Report Q1 2026",
+            canonical_issuer="flow",
+            tier="unresolved",
+        )
+    ]
+    feed = [{"url": articles[0]["url"], "title": articles[0]["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, articles)).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    assert result.skipped.get("ambiguous_selection") == 1
+    assert result.completeness == {"quarterly": {"expected": 1, "retained": 0}}
+    assert "quarterly expected 1 retained 0" in (result.message or "")
+    assert "blocked identity/selection check" in (result.message or "")
+    rows = conn.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0]
+    assert rows == 0
+
+
+def test_rerun_retained_diagnostics_reflect_persisted_sources():
+    """MFN-004: rerun diagnostics count persisted sources and keep their tiers."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1-en.pdf",
+    )
+    article["attachment_tier"] = "mfn-primary"
+    feed = [{"url": article["url"], "title": article["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert first.status == "complete"
+    assert first.packet["sources"][0]["attachment_tier"] == "mfn-primary"
+
+    def no_transport(method, url, **kwargs):
+        raise AssertionError(f"redownload of {url}")
+
+    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=no_transport):
+        second = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert second.status == "complete"
+    assert second.completeness == {"quarterly": {"expected": 1, "retained": 1}}
+    diagnostic = second.diagnostic()
+    assert diagnostic["retained"] == 1
+    assert diagnostic["persisted"] == 1
+    assert diagnostic["attachment_selection"] == {"mfn-primary": 1}
+    assert second.packet["sources"][0]["attachment_tier"] == "mfn-primary"
+
+
+def test_non_complete_boundary_invalidates_all_prior_packets():
+    """review-3: acquisition/detail/no-evidence exits tombstone prior packets."""
+    from alphaforge.providers.mfn.errors import MfnAcquisitionError
+
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    persist_evidence_packet(
+        conn,
+        company_id=company_id,
+        as_of="2026-09-20",
+        packet={"packet_hash": "c" * 64, "evidence_rules_version": EVIDENCE_RULES_VERSION},
+    )
+    persist_evidence_packet(
+        conn,
+        company_id=company_id,
+        as_of="2026-09-20",
+        packet={"packet_hash": "o" * 64, "evidence_rules_version": EVIDENCE_RULES_VERSION - 1},
+    )
+
+    class _FailingFeedScraper(_FakeCisionScraper):
+        def discover_feed(self, mfn_slug, *, reports_only=True):
+            raise MfnAcquisitionError("mfn_feed_fetch_failed", "feed unreachable")
+
+    result = OneCompanyEvidenceFlow(conn, scraper=_FailingFeedScraper([], [])).run(
+        company_id, as_of="2026-09-20"
+    )
+    assert result.status == "acquisition_failed"
+    remaining = conn.execute(
+        "SELECT packet_hash, usable, usable_reason FROM evidence_packets WHERE company_id=? AND as_of=? ORDER BY id",
+        (company_id, "2026-09-20"),
+    ).fetchall()
+    assert [row[0] for row in remaining] == ["c" * 64, "o" * 64]
+    assert all(row[1] == 0 for row in remaining)
+    assert all(row[2] == "incomplete_run:acquisition_failed" for row in remaining)
+
+
+def test_dry_run_does_not_invalidate_stale_packets():
+    """review-3: dry runs never mutate the packet table."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    persist_evidence_packet(
+        conn,
+        company_id=company_id,
+        as_of="2026-09-20",
+        packet={"packet_hash": "o" * 64, "evidence_rules_version": EVIDENCE_RULES_VERSION - 1},
+    )
+    result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper([], [])).run(
+        company_id, as_of="2026-09-20", dry_run=True
+    )
+    assert result.status == "dry_run"
+    remaining = conn.execute("SELECT COUNT(*) FROM evidence_packets").fetchone()[0]
+    assert remaining == 1

@@ -13,6 +13,7 @@ from pypdf import PdfWriter
 
 from alphaforge.cli.main import cmd_mfn_map
 from alphaforge.config import Settings
+from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION
 from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
@@ -33,6 +34,7 @@ from alphaforge.evidence.flow import (
     download_pdf,
     validate_frozen_packet,
 )
+from alphaforge.evidence.report_rules import report_rules_metadata
 from alphaforge.providers.mfn.issuer import (
     IssuerResolution,
     MfnIssuerResolver,
@@ -702,6 +704,8 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
     packet = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
+        "evidence_rules_version": EVIDENCE_RULES_VERSION,
+        "report_rules": report_rules_metadata(),
         "company_id": 1,
         "as_of": "2026-05-01",
         "sources": [

@@ -248,10 +248,16 @@ CREATE TABLE IF NOT EXISTS evidence_packets (
     as_of               TEXT NOT NULL,
     packet_hash         TEXT NOT NULL,
     packet_json         TEXT NOT NULL CHECK (json_valid(packet_json)),
+    report_rules_version INTEGER NOT NULL DEFAULT 0,
+    report_rules_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+    usable              INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1)),
+    usable_reason       TEXT,
     frozen_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (company_id, as_of, packet_hash)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
+CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+    ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
 
 CREATE TABLE IF NOT EXISTS jev_shadow_audit (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,

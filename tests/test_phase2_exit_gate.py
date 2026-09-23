@@ -8,7 +8,11 @@ from datetime import date, timedelta
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.core.coverage.liquidity import PriceBar, build
-from alphaforge.core.frozen_packet import stable_packet_hash, validate_frozen_packet
+from alphaforge.core.frozen_packet import (
+    EVIDENCE_RULES_VERSION,
+    stable_packet_hash,
+    validate_frozen_packet,
+)
 from alphaforge.core.ranking.engine import RankingEngine
 from alphaforge.core.types import RankingModel
 from alphaforge.db.connection import get_connection
@@ -19,6 +23,7 @@ from alphaforge.db.repositories import (
     upsert_financial_periods,
     upsert_prices,
 )
+from alphaforge.evidence.report_rules import report_rules_metadata
 
 # --- Test fixtures ---
 
@@ -234,6 +239,8 @@ class TestGoldenPacketRoundTrip:
         packet = {
             "schema_version": "evidence-packet-v1",
             "frozen": True,
+            "evidence_rules_version": EVIDENCE_RULES_VERSION,
+            "report_rules": report_rules_metadata(),
             "company_id": company_id,
             "as_of": "2026-09-20",
             "issuer": {
