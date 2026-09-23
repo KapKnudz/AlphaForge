@@ -577,6 +577,32 @@ def test_old_rule_packet_is_hash_valid_but_not_trusted_by_readiness():
     assert [blocker.code for blocker in assessment.blockers] == ["stale_evidence_packet"]
 
 
+def test_complete_packet_loads_under_current_rules_fingerprint():
+    """A complete run stamps the single authoritative window, so the
+    production loader returns it as current instead of treating it stale."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    feed = [{"url": article["url"], "title": article["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "complete"
+    loaded = load_evidence_packet(conn, company_id, "2026-09-20")
+    assert loaded is not None
+    assert loaded["packet_hash"] == result.packet["packet_hash"]
+    assert not is_stale_evidence_packet(loaded)
+
+
 def test_incomplete_rerun_with_old_rule_packet_fails_visibly():
     """Completeness gate, diagnostic buckets, and stale invalidation together.
 

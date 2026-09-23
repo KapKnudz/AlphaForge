@@ -45,7 +45,11 @@ from alphaforge.evidence.mfn_taxonomy import (
     is_report,
     report_kind,
 )
-from alphaforge.evidence.report_rules import report_rules_metadata
+from alphaforge.evidence.report_rules import (
+    DEFAULT_HISTORY_WINDOW,
+    ReportHistoryWindow,
+    report_rules_metadata,
+)
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
@@ -63,28 +67,6 @@ class EvidenceResourceLimits:
 
 
 DEFAULT_RESOURCE_LIMITS = EvidenceResourceLimits()
-
-
-@dataclass(frozen=True)
-class ReportHistoryWindow:
-    """Bounded historical retrieval window for annual/quarterly reports.
-
-    Interim reports (Q1-Q3 + year-end BKS) and official annual reports
-    drive different horizons: the Hedborg credibility ledger needs
-    ~8-12 quarters, while the annual valuation history benefits from
-    a deeper annual tail.  Both windows are applied as *cutoffs*
-    relative to ``as_of`` so a deeper offset scan can stop early
-    without fetching the entire MFN sales-noise tail.
-    """
-
-    interim_lookback_years: int = 2
-    annual_lookback_years: int = 5
-    max_offsets: int = 12
-    max_detail_fetches: int = 60
-    limit_per_offset: int = 48
-
-
-DEFAULT_HISTORY_WINDOW = ReportHistoryWindow()
 
 
 class PdfAcquisitionError(ValueError):
@@ -1021,7 +1003,6 @@ class OneCompanyEvidenceFlow:
         scraper: MfnScraper | None = None,
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
-        history_window: ReportHistoryWindow | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.conn = conn
@@ -1032,7 +1013,6 @@ class OneCompanyEvidenceFlow:
         self.scraper = scraper
         self.resolver = resolver or MfnIssuerResolver(base_url=self.scraper.base_url)
         self.limits = limits
-        self.history_window: ReportHistoryWindow | None = history_window
         self.now = now or (lambda: datetime.now(UTC))
 
     def run(
@@ -1118,8 +1098,8 @@ class OneCompanyEvidenceFlow:
             return result
         company = dict(row)
         borsdata_id = company.get("borsdata_id")
-        window = self.history_window or DEFAULT_HISTORY_WINDOW
-        active_rules = report_rules_metadata(window)
+        window = DEFAULT_HISTORY_WINDOW
+        active_rules = report_rules_metadata()
         if not dry_run:
             record_job(
                 self.conn,
@@ -1265,21 +1245,11 @@ class OneCompanyEvidenceFlow:
             )
         now = self.now()
         today = now.date()
-        # Bounded historical retrieval: paginated offset/limit feed when a
-        # history window is active.  Without a window we keep the single-page
-        # delta + Sunday page-2 contract so existing tests and incremental
-        # daily runs stay byte-identical.
+        # Bounded historical retrieval: paginated offset/limit feed under
+        # the authoritative history window, with the single-page plus
+        # Sunday page-2 contract when paginated discovery is unavailable.
         try:
-            if self.history_window is not None:
-                feed = _discover_historical_feed(
-                    self.scraper,
-                    mapping["mfn_slug"],
-                    as_of=as_of,
-                    window=window,
-                    today_iso=today.isoformat(),
-                )
-            elif hasattr(self.scraper, "discover_feed_paginated"):
-                # Default historical path: bounded window with default limits.
+            if hasattr(self.scraper, "discover_feed_paginated"):
                 feed = _discover_historical_feed(
                     self.scraper,
                     mapping["mfn_slug"],

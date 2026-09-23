@@ -35,7 +35,7 @@ against the same cutoffs (`pre_cutoff_release` skip). Discovery pages the MFN
 `offset`/`limit` JSON feed with an HTML-fragment fallback (up to 12 offsets of
 48, at most 60 detail fetches); a paginated-feed transport failure raises
 `mfn_feed_fetch_failed` instead of ending the scan silently. Code-level
-defaults live in `ReportHistoryWindow` (`alphaforge/evidence/flow.py`); the
+defaults live in `ReportHistoryWindow` (`alphaforge/evidence/report_rules.py`); the
 legacy single-page plus Sunday page-2 contract applies only when paginated
 discovery is unavailable (on the default paginated path the Sunday page-2
 sweep survives only as a small-page HTML-fallback backstop).

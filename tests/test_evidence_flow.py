@@ -28,7 +28,6 @@ from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
     OneCompanyEvidenceFlow,
-    ReportHistoryWindow,
     _observation_date,
     build_frozen_evidence_packet,
     download_pdf,
@@ -1172,14 +1171,10 @@ def test_flow_paginated_history_retrieves_multiple_reports():
         headers={"Content-Type": "application/pdf"},
         content=_pdf(),
     )
-    window = ReportHistoryWindow(
-        interim_lookback_years=10, annual_lookback_years=10, max_offsets=4, max_detail_fetches=10
-    )
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         result = OneCompanyEvidenceFlow(
             conn,
             scraper=scraper,
-            history_window=window,
             now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         ).run(company_id, as_of="2026-09-20")
     assert result.status == "complete"
@@ -1225,14 +1220,10 @@ def test_flow_history_window_truncates_old_reports():
         headers={"Content-Type": "application/pdf"},
         content=_pdf(),
     )
-    window = ReportHistoryWindow(
-        interim_lookback_years=2, annual_lookback_years=5, max_offsets=4, max_detail_fetches=10
-    )
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         result = OneCompanyEvidenceFlow(
             conn,
             scraper=scraper,
-            history_window=window,
             now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         ).run(company_id, as_of="2026-09-20")
     assert result.status == "complete"

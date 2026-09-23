@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from alphaforge.evidence.mfn_taxonomy import INVITATION_MARKERS, REPORT_TITLE_TERMS
@@ -11,27 +12,35 @@ from alphaforge.evidence.mfn_taxonomy import INVITATION_MARKERS, REPORT_TITLE_TE
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
 REPORT_RULES_VERSION = 1
-_DEFAULT_HISTORY_WINDOW = {
-    "interim_lookback_years": 2,
-    "annual_lookback_years": 5,
-    "max_offsets": 12,
-    "max_detail_fetches": 60,
-    "limit_per_offset": 48,
-}
 
 
-def _history_window_values(window: Any | None) -> dict[str, int]:
-    values = dict(_DEFAULT_HISTORY_WINDOW)
-    if window is not None:
-        for key in values:
-            value = getattr(window, key, values[key])
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"history window {key} must be an integer")
-            values[key] = value
-    return values
+@dataclass(frozen=True)
+class ReportHistoryWindow:
+    """Bounded historical retrieval window for annual/quarterly reports.
+
+    Interim reports (Q1-Q3 + year-end BKS) and official annual reports
+    drive different horizons: the Hedborg credibility ledger needs
+    ~8-12 quarters, while the annual valuation history benefits from
+    a deeper annual tail.  Both windows are applied as *cutoffs*
+    relative to ``as_of`` so a deeper offset scan can stop early
+    without fetching the entire MFN sales-noise tail.
+    """
+
+    interim_lookback_years: int = 2
+    annual_lookback_years: int = 5
+    max_offsets: int = 12
+    max_detail_fetches: int = 60
+    limit_per_offset: int = 48
 
 
-def report_rules_inputs(window: Any | None = None) -> dict[str, Any]:
+DEFAULT_HISTORY_WINDOW = ReportHistoryWindow()
+
+
+def _history_window_values() -> dict[str, int]:
+    return asdict(DEFAULT_HISTORY_WINDOW)
+
+
+def report_rules_inputs() -> dict[str, Any]:
     """Return the canonical inputs that decide report evidence coverage.
 
     Keep title semantics in :mod:`mfn_taxonomy`; this module only fingerprints
@@ -58,27 +67,27 @@ def report_rules_inputs(window: Any | None = None) -> dict[str, Any]:
             "grouping": "bilingual_dedupe_without_feed_group_id",
             "class_rule": "report_kind_annual_or_quarterly",
         },
-        "history_window": _history_window_values(window),
+        "history_window": _history_window_values(),
     }
 
 
-def report_rules_fingerprint(window: Any | None = None) -> str:
+def report_rules_fingerprint() -> str:
     canonical = json.dumps(
-        report_rules_inputs(window), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        report_rules_inputs(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def report_rules_metadata(window: Any | None = None) -> dict[str, Any]:
+def report_rules_metadata() -> dict[str, Any]:
     """Return the compact rule stamp stored in every frozen packet."""
-    inputs = report_rules_inputs(window)
+    inputs = report_rules_inputs()
     return {
         "version": REPORT_RULES_VERSION,
-        "fingerprint": report_rules_fingerprint(window),
+        "fingerprint": report_rules_fingerprint(),
         "history_window": inputs["history_window"],
     }
 
 
 def current_report_rules_fingerprint() -> str:
-    """Fingerprint for the default production history window."""
+    """Fingerprint for the production history window."""
     return report_rules_fingerprint()

@@ -1144,6 +1144,38 @@ def test_neutral_label_alone_is_unresolved():
     assert parsed["attachment_tier"] == "unresolved"
 
 
+def test_report_like_url_with_neutral_label_is_unresolved():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/annual-report-2025.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
+def test_main_path_on_non_cision_host_is_not_main_tier():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/Main/1116/4356813/4130290.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
 def test_tied_report_labels_are_unresolved():
     html = """
     <html>

@@ -294,8 +294,18 @@ def _attachment_score(url: str, label: str = "") -> int:
 ATTACHMENT_TIERS = ("mfn-primary", "main-path", "label-score", "unresolved", "none")
 
 
+def _label_report_score(label: str) -> int:
+    name = label.lower()
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+        return 0
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+        return 2
+    return 1
+
+
 def _is_main_path_pdf(url: str) -> bool:
-    return "/main/" in urlsplit(url).path.lower()
+    parts = urlsplit(url)
+    return parts.netloc.lower() == "mb.cision.com" and "/main/" in parts.path.lower()
 
 
 def _select_attachment(
@@ -303,11 +313,12 @@ def _select_attachment(
 ) -> tuple[str | None, str]:
     """Select exactly one PDF by ranked identity, or refuse with a tier.
 
-    Rank: explicit ``mfn-primary`` marker, then Cision ``Main/`` path, then
-    report-like link text (which additionally requires the corroborating
-    page-level report title — enforced by ``page_is_report``). Ties at any
-    tier, or no positive signal at all, yield ``(None, "unresolved")``;
-    an empty candidate set yields ``(None, "none")``.
+    Rank: explicit ``mfn-primary`` marker, then Cision ``Main/`` path on the
+    Cision attachment host, then report-like link text alone (which
+    additionally requires the corroborating page-level report title —
+    enforced by ``page_is_report``). Ties at any tier, or no positive
+    link-text signal at all, yield ``(None, "unresolved")``; an empty
+    candidate set yields ``(None, "none")``.
     """
     viable = [
         (href, text, css_class)
@@ -333,7 +344,7 @@ def _select_attachment(
     if len(mains) > 1:
         return None, "unresolved"
     scored = sorted(
-        ((_attachment_score(href, text), href) for href, text, _ in viable),
+        ((_label_report_score(text), href) for href, text, _ in viable),
         reverse=True,
     )
     if scored[0][0] == 2 and (len(scored) == 1 or scored[1][0] < 2):
