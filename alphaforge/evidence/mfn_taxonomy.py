@@ -37,6 +37,7 @@ IMPORTANCE_KEYWORDS_SE: dict[str, list[str]] = {
         "inbjudan",
         "invitation",
         "presentation",
+        "briefing",
         "webcast",
         "earnings call",
         "conference call",

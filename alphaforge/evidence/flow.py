@@ -49,6 +49,7 @@ from alphaforge.evidence.report_rules import report_rules_metadata
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
+from alphaforge.providers.mfn.scraper import ATTACHMENT_TIERS
 
 if TYPE_CHECKING:
     from alphaforge.providers.mfn.scraper import MfnScraper
@@ -1465,7 +1466,7 @@ class OneCompanyEvidenceFlow:
                 continue
             pre_cutoff_report = True
             tier = article.get("attachment_tier")
-            if tier in {"mfn-primary", "main-path", "label-score", "unresolved", "none"}:
+            if tier in ATTACHMENT_TIERS:
                 result.attachment_selection[tier] = result.attachment_selection.get(tier, 0) + 1
             eligible.append(
                 {
@@ -1864,13 +1865,7 @@ class OneCompanyEvidenceFlow:
                     if selected.get("_persisted_evidence"):
                         result.persisted += 1
                         persisted_tier = selected.get("attachment_tier")
-                        if persisted_tier in (
-                            "mfn-primary",
-                            "main-path",
-                            "label-score",
-                            "unresolved",
-                            "none",
-                        ):
+                        if persisted_tier in ATTACHMENT_TIERS:
                             result.attachment_selection[persisted_tier] = (
                                 result.attachment_selection.get(persisted_tier, 0) + 1
                             )
@@ -2011,7 +2006,7 @@ class OneCompanyEvidenceFlow:
                 retained[report_class] = retained.get(report_class, 0) + 1
                 result.persisted += 1
                 tier = anchor.get("attachment_tier")
-                if tier in ("mfn-primary", "main-path", "label-score", "unresolved", "none"):
+                if tier in ATTACHMENT_TIERS:
                     result.attachment_selection[tier] = (
                         result.attachment_selection.get(tier, 0) + 1
                     )
