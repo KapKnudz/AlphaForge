@@ -153,4 +153,8 @@ INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
 def is_invitation_or_presentation(title: str) -> bool:
     """Return True when a release title is an invitation/presentation, not a report."""
     lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))
-    return any(marker in lower for marker in INVITATION_MARKERS)
+    compact = lower.replace(" ", "")
+    return any(
+        marker in lower or marker.replace(" ", "") in compact
+        for marker in INVITATION_MARKERS
+    )
