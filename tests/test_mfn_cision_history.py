@@ -299,6 +299,40 @@ def test_stray_pdf_does_not_mark_lane_ready():
     assert result.completeness["quarterly"] == {"expected": 2, "retained": 1}
 
 
+def test_reused_attachment_does_not_cover_different_report():
+    """MFN-022: one PDF linked from two quarterly pages retains one group."""
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    shared_pdf = "https://storage.mfn.test/flow/q1.pdf"
+    q1 = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        shared_pdf,
+    )
+    q2 = _quarterly_article(
+        "interim-report-q2-2026",
+        "Flow AB Interim Report Q2 2026",
+        "2026-08-01T08:00:00Z",
+        shared_pdf,
+    )
+    feed = [{"url": article["url"], "title": article["title"]} for article in (q1, q2)]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [q1, q2])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    assert result.skipped.get("attachment_reused_by_different_report") == 1
+    assert result.completeness == {"quarterly": {"expected": 2, "retained": 1}}
+    assert "quarterly expected 2 retained 1" in (result.message or "")
+    rows = conn.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0]
+    assert rows == 1
+
+
 def test_invitation_only_feed_stays_no_evidence():
     conn = _connection()
     company_id = _mapped_company(conn)

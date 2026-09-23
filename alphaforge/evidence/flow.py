@@ -1831,6 +1831,14 @@ class OneCompanyEvidenceFlow:
                     ),
                 )[0]
                 if selected_existing is not None:
+                    if not any(
+                        variant.get("_persisted_evidence") for variant in variants
+                    ):
+                        result.skipped["attachment_reused_by_different_report"] = (
+                            result.skipped.get("attachment_reused_by_different_report", 0)
+                            + 1
+                        )
+                        continue
                     existing_canonical_source_url = str(selected_existing["canonical_source_url"])
                     if selected.get("_persisted_evidence"):
                         result.persisted += 1
