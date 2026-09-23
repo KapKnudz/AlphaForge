@@ -97,6 +97,25 @@ Successful runs persist a `success` job record. Job records include attempt and
 started/finished timestamps, with structured error diagnostics for non-success
 outcomes.
 
+MFN/Cision report history runs a guarded lane over the shared Nordic
+distribution network: `/cis/a/<issuer>/<slug>-<hash>` release pages on `mfn.se`
+are accepted only when the issuer segment matches the resolved mapping token
+and the page canonical link (`/all/a/<issuer>/…`) confirms the same issuer;
+missing, malformed, or mismatched confirmation blocks the page visibly
+(`canonical_issuer_unconfirmed` / `issuer_mismatch`), never silently.
+`mb.cision.com` attachments are selected by ranked identity — explicit
+`mfn-primary` marker, then Cision `Main/` path, then report-like link text
+with corroborating report title (`attachment_tier` in
+`mfn-primary` / `main-path` / `label-score`) — and ambiguous selection
+(`ambiguous_selection`) fails the lane instead of guessing.
+Invitation/presentation/webcast-titled pages never contribute evidence.
+Diagnostics split into `discovered`, `filtered_before_download`,
+`download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
+the CLI output); per-class `completeness` (annual vs quarterly over
+post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
+gate — shortfalls return `evidence_incomplete` with no frozen packet instead
+of a green `complete`.
+
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
 hash over the packet without its own `packet_hash`. Database-local document IDs

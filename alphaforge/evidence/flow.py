@@ -33,7 +33,12 @@ from alphaforge.evidence.ingest import (
     bilingual_dedupe,
     resolve_document_language,
 )
-from alphaforge.evidence.mfn_taxonomy import document_type, is_report
+from alphaforge.evidence.mfn_taxonomy import (
+    document_type,
+    is_invitation_or_presentation,
+    is_report,
+    report_kind,
+)
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
@@ -727,6 +732,24 @@ def build_frozen_evidence_packet(
     return base
 
 
+# Skip reasons that record a download/parse transport failure rather than a
+# pre-download filter decision. Everything else in ``skipped`` counts as
+# filtered before download; ``ambiguous_selection`` gets its own bucket.
+DOWNLOAD_FAILED_SKIP_REASONS = frozenset(
+    {
+        "transport_error",
+        "http_status",
+        "resource_limit",
+        "invalid_content_type",
+        "invalid_pdf_magic",
+        "pdf_extraction_failed",
+        "mfn_feed_fetch_failed",
+        "mfn_detail_fetch_failed",
+    }
+)
+AMBIGUOUS_SELECTION_SKIP_REASON = "ambiguous_selection"
+
+
 @dataclass
 class EvidenceFlowResult:
     status: str
@@ -740,6 +763,26 @@ class EvidenceFlowResult:
     packet: dict[str, Any] | None = None
     no_evidence_reason: NoEvidenceReason | None = None
     message: str | None = None
+    completeness: dict[str, dict[str, int]] = field(default_factory=dict)
+    attachment_selection: dict[str, int] = field(default_factory=dict)
+
+    def filtered_before_download(self) -> int:
+        return sum(
+            count
+            for reason, count in self.skipped.items()
+            if reason != AMBIGUOUS_SELECTION_SKIP_REASON
+            and reason not in DOWNLOAD_FAILED_SKIP_REASONS
+        )
+
+    def download_failed(self) -> int:
+        return sum(
+            count
+            for reason, count in self.skipped.items()
+            if reason in DOWNLOAD_FAILED_SKIP_REASONS
+        )
+
+    def ambiguous_selection(self) -> int:
+        return self.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0)
 
     def diagnostic(self) -> dict[str, Any]:
         return {
@@ -750,12 +793,71 @@ class EvidenceFlowResult:
             "eligible": self.eligible,
             "downloaded": self.downloaded,
             "skipped": dict(sorted(self.skipped.items())),
+            "filtered_before_download": self.filtered_before_download(),
+            "download_failed": self.download_failed(),
+            "ambiguous_selection": self.ambiguous_selection(),
+            "retained": self.downloaded,
+            "completeness": {
+                report_class: dict(counts) for report_class, counts in self.completeness.items()
+            },
+            "attachment_selection": dict(sorted(self.attachment_selection.items())),
             "packet_hash": self.packet_hash,
             "no_evidence_reason": (
                 self.no_evidence_reason.value if self.no_evidence_reason is not None else None
             ),
             "message": self.message,
         }
+
+
+def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
+    """Read counted scraper drops without breaking fake scrapers in tests."""
+    drain = getattr(scraper, method, None)
+    if not callable(drain):
+        return {}
+    try:
+        drained = drain()
+    except TypeError:
+        return {}
+    return dict(drained or {})
+
+
+def _confirm_cis_issuer(
+    release_url: str, canonical_url: str | None, *, issuer_token: str
+) -> str | None:
+    """Confirm a ``/cis/a/`` release belongs to the resolved issuer.
+
+    Returns None when the release URL issuer segment and the page's MFN
+    canonical issuer segment both match the resolved mapping token.
+    Otherwise returns the ``skipped`` reason: ``issuer_mismatch`` when a
+    present issuer binding points at a different issuer, else
+    ``canonical_issuer_unconfirmed`` (missing, malformed, or off-host
+    canonical). Non-``/cis/a/`` URLs return None (legacy path unchanged).
+    """
+    from urllib.parse import urlsplit as _urlsplit
+
+    from alphaforge.providers.mfn.scraper import _canonical_issuer, _cis_release_issuer
+
+    release_issuer = _cis_release_issuer(release_url)
+    if release_issuer is None:
+        return None
+    if release_issuer.lower() != issuer_token:
+        return "issuer_mismatch"
+    canonical_issuer = _canonical_issuer(canonical_url)
+    if canonical_issuer is None or canonical_issuer.lower() != issuer_token:
+        if canonical_issuer is not None and canonical_issuer.lower() != issuer_token:
+            return "issuer_mismatch"
+        return "canonical_issuer_unconfirmed"
+    if canonical_url is not None:
+        release_host = _urlsplit(release_url).netloc.lower()
+        if _urlsplit(canonical_url).netloc.lower() != release_host:
+            return "canonical_issuer_unconfirmed"
+    return None
+
+
+def _completeness_class(article: dict[str, Any]) -> str:
+    """Return the hard-gate coverage class (annual vs quarterly) of a group."""
+    kind = article.get("report_kind") or report_kind(str(article.get("title") or ""))
+    return kind if kind in {"annual", "quarterly"} else "quarterly"
 
 
 def _discover_feed_page(scraper: Any, mfn_slug: str, page: int) -> list[dict[str, Any]]:
@@ -1151,6 +1253,12 @@ class OneCompanyEvidenceFlow:
                     message=str(exc),
                 )
             )
+        from alphaforge.providers.mfn.scraper import _cis_release_issuer, _issuer_token
+
+        issuer_token = _issuer_token(str(mapping["mfn_slug"]))
+        early_skips: dict[str, int] = {}
+        for reason, count in _drain_skips(self.scraper, "drain_discovery_skips").items():
+            early_skips[reason] = early_skips.get(reason, 0) + count
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
         for entry in feed:
@@ -1159,6 +1267,12 @@ class OneCompanyEvidenceFlow:
                 continue
             if url:
                 seen_feed_urls.add(url)
+            release_issuer = _cis_release_issuer(str(url or ""))
+            if release_issuer is not None and release_issuer.lower() != issuer_token:
+                # A /cis/a/ page bound to a different issuer must never enter
+                # this issuer's lane — drop it before any detail fetch.
+                early_skips["issuer_mismatch"] = early_skips.get("issuer_mismatch", 0) + 1
+                continue
             unique_feed.append(entry)
         unseen_feed = []
         future_dated_complete_release = False
@@ -1207,11 +1321,14 @@ class OneCompanyEvidenceFlow:
                     message=str(exc),
                 )
             )
+        for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
+            early_skips[reason] = early_skips.get(reason, 0) + count
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
             mapping_status="mapped",
             discovered=len(details),
+            skipped=dict(early_skips),
         )
         if future_dated_complete_release:
             result.skipped["future_dated_release"] = 1
@@ -1219,11 +1336,19 @@ class OneCompanyEvidenceFlow:
             result.skipped["not_yet_published_release"] = 1
         eligible: list[dict[str, Any]] = []
         pre_cutoff_report = False
+        hard_blocks = 0
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
                 result.skipped["non_report_release"] = (
                     result.skipped.get("non_report_release", 0) + 1
+                )
+                continue
+            if is_invitation_or_presentation(title):
+                # Backstop for scrapers that bypass the detail-page guard:
+                # invitations about reports are never report evidence.
+                result.skipped["invitation_or_presentation_release"] = (
+                    result.skipped.get("invitation_or_presentation_release", 0) + 1
                 )
                 continue
             published_at = article.get("published_at")
@@ -1252,7 +1377,28 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("pre_cutoff_release", 0) + 1
                 )
                 continue
+            release_url = str(article.get("url") or article.get("source_url") or "")
+            issuer_failure = _confirm_cis_issuer(
+                release_url, article.get("canonical_url"), issuer_token=issuer_token
+            )
+            if issuer_failure is not None:
+                # A /cis/a/ page without MFN canonical confirmation binding
+                # it to the resolved issuer blocks the lane visibly instead
+                # of persisting possibly-foreign evidence.
+                result.skipped[issuer_failure] = result.skipped.get(issuer_failure, 0) + 1
+                hard_blocks += 1
+                continue
+            if article.get("attachment_tier") == "unresolved":
+                # Ranked selection refused to guess between attachments.
+                result.skipped[AMBIGUOUS_SELECTION_SKIP_REASON] = (
+                    result.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0) + 1
+                )
+                hard_blocks += 1
+                continue
             pre_cutoff_report = True
+            tier = article.get("attachment_tier")
+            if tier in {"mfn-primary", "main-path", "label-score", "unresolved", "none"}:
+                result.attachment_selection[tier] = result.attachment_selection.get(tier, 0) + 1
             eligible.append(
                 {
                     **article,
@@ -1455,7 +1601,8 @@ class OneCompanyEvidenceFlow:
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
         language_fallback_count = 0
-        for article in deduped:
+        covered_groups: set[int] = set()
+        for group_index, article in enumerate(deduped):
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
             downloaded = None
@@ -1698,6 +1845,7 @@ class OneCompanyEvidenceFlow:
                                 canonical_source_url=existing_canonical_source_url,
                                 sibling={**variant, "relationship": relation},
                             )
+                    covered_groups.add(group_index)
                     continue
             if selected is None or downloaded is None or extracted is None:
                 for code, count in failures.items():
@@ -1727,6 +1875,7 @@ class OneCompanyEvidenceFlow:
             selected_article = _prepare_selected_article(selected_variant, downloaded, extracted)
             persist_option(selected_article, downloaded, extracted, related_variants)
             result.downloaded += 1
+            covered_groups.add(group_index)
             for variant, candidate_download, candidate_extracted, existing in independent_options:
                 if (
                     existing is not None
@@ -1752,6 +1901,61 @@ class OneCompanyEvidenceFlow:
                 }
                 persist_option(independent_article, candidate_download, candidate_extracted, [])
                 result.downloaded += 1
+        expected: dict[str, int] = {}
+        retained: dict[str, int] = {}
+        for group_index, article in enumerate(deduped):
+            if article.get("_persisted_evidence"):
+                continue
+            variants = [article, *article.get("_suppressed_variants", [])]
+            if not any(
+                variant.get("attachment_url") or variant.get("storage_url") for variant in variants
+            ):
+                # A group with no attachment anywhere can never yield
+                # retained evidence; it stays a counted filter outcome
+                # (missing_pdf_attachment), not a completeness deficit.
+                continue
+            report_class = _completeness_class(article)
+            expected[report_class] = expected.get(report_class, 0) + 1
+            if group_index in covered_groups:
+                retained[report_class] = retained.get(report_class, 0) + 1
+        result.completeness = {
+            report_class: {
+                "expected": expected.get(report_class, 0),
+                "retained": retained.get(report_class, 0),
+            }
+            for report_class in sorted(set(expected) | set(retained))
+        }
+        missing = {
+            report_class: expected[report_class] - retained.get(report_class, 0)
+            for report_class in expected
+            if expected[report_class] > retained.get(report_class, 0)
+        }
+        if hard_blocks or missing:
+            # Completeness is a hard gate: one stray retained PDF must not
+            # mark the lane ready when expected annual/quarterly coverage is
+            # incomplete, and a refused guess must fail visibly. No packet is
+            # frozen on this path; persisted documents remain for the next run.
+            parts = [
+                f"{report_class} expected {expected[report_class]}"
+                f" retained {retained.get(report_class, 0)}"
+                for report_class in sorted(missing)
+            ]
+            if hard_blocks:
+                parts.append(f"{hard_blocks} blocked identity/selection check(s)")
+            return finish(
+                EvidenceFlowResult(
+                    "evidence_incomplete",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=result.discovered,
+                    eligible=result.eligible,
+                    downloaded=result.downloaded,
+                    skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
+                    message="incomplete report history: " + "; ".join(parts),
+                )
+            )
         packet_limitations = [
             f"evidence_flow_{code}:{count}"
             for code, count in sorted(result.skipped.items())
@@ -1764,6 +1968,10 @@ class OneCompanyEvidenceFlow:
         ]
         if language_fallback_count:
             packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
+        for tier in ("main-path", "label-score"):
+            tier_count = result.attachment_selection.get(tier, 0)
+            if tier_count:
+                packet_limitations.append(f"attachment_selection_{tier}:{tier_count}")
         packet = build_frozen_evidence_packet(
             self.conn,
             company_id=company_id,
@@ -1805,6 +2013,8 @@ class OneCompanyEvidenceFlow:
                     eligible=result.eligible,
                     downloaded=result.downloaded,
                     skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
                     no_evidence_reason=reason,
                     message=message,
                 )
@@ -1819,6 +2029,8 @@ class OneCompanyEvidenceFlow:
                     eligible=result.eligible,
                     downloaded=result.downloaded,
                     skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
                     message="canonical packet failed its self-hash or contains an invalid complete source",
                 )
             )

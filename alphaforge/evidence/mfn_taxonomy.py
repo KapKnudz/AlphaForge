@@ -131,3 +131,16 @@ def is_report(title: str) -> bool:
     if any(term in lower for term in ("report schedule", "rapportkalender", "financial calendar")):
         return False
     return report_kind(title) is not None
+
+
+# Titles that announce an invitation, presentation, or webcast about a report —
+# not the report itself. These titles can still match :func:`is_report` (e.g.
+# "invitation to ... briefing for ... Q2 2026 report"), so the evidence lane
+# must exclude them explicitly instead of absorbing their attachments.
+INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
+
+
+def is_invitation_or_presentation(title: str) -> bool:
+    """Return True when a release title is an invitation/presentation, not a report."""
+    lower = " ".join(title.lower().split())
+    return any(marker in lower for marker in INVITATION_MARKERS)
