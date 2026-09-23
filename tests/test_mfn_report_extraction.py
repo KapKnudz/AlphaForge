@@ -1014,6 +1014,10 @@ def test_invitation_titles_are_not_reports_despite_report_words():
         "Invitation to media and analyst briefing for Ericsson Q2 2026 report"
     )
     assert is_invitation_or_presentation("Inbjudan till presentation av bokslutskommuniké")
+    assert is_invitation_or_presentation(
+        "Media and analyst conference-call for Flow Q2 2026 report"
+    )
+    assert is_invitation_or_presentation("Teleconference on Flow Q2 2026 report")
     assert is_invitation_or_presentation("Q1 webcast replay")
     assert not is_invitation_or_presentation("Clas Ohlson delårsrapport Q1 2026/27")
     assert not is_invitation_or_presentation("Clas Ohlson Annual Report 2025/26")
@@ -1089,6 +1093,22 @@ def test_invitation_poison_page_yields_no_attachment():
         )
     assert articles == []
     assert scraper.drain_detail_skips() == {"invitation_or_presentation_release": 1}
+
+
+def test_hyphenated_invitation_page_yields_no_attachment():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-07-17T06:30:00Z"></head>
+      <body>
+        <h1>Media and analyst conference-call for Flow Q2 2026 report</h1>
+        <article><div class="release-body">Dial-in details.</div></article>
+        <a href="https://mb.cision.com/Main/1116/4356813/4130290.pdf">Q2 interim report</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "none"
 
 
 def test_label_score_requires_corroborating_report_title():

@@ -41,6 +41,7 @@ IMPORTANCE_KEYWORDS_SE: dict[str, list[str]] = {
         "webcast",
         "earnings call",
         "conference call",
+        "teleconference",
         "webinar",
     ],
 }
@@ -151,5 +152,5 @@ INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
 
 def is_invitation_or_presentation(title: str) -> bool:
     """Return True when a release title is an invitation/presentation, not a report."""
-    lower = " ".join(title.lower().split())
+    lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))
     return any(marker in lower for marker in INVITATION_MARKERS)
