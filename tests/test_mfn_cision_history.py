@@ -709,9 +709,9 @@ def test_same_rule_later_incomplete_run_tombstones_packet_and_replays_diagnostic
 
     feed = [{"url": article["url"], "title": article["title"]} for article in (q1, q2)]
     with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
-        second = OneCompanyEvidenceFlow(
-            conn, scraper=_FakeCisionScraper(feed, [q1, q2])
-        ).run(company_id, as_of="2026-09-20")
+        second = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [q1, q2])).run(
+            company_id, as_of="2026-09-20"
+        )
     assert second.status == "evidence_incomplete"
     assert load_evidence_packet(conn, company_id, "2026-09-20") is None
     row = conn.execute(
@@ -719,10 +719,13 @@ def test_same_rule_later_incomplete_run_tombstones_packet_and_replays_diagnostic
         (company_id, "2026-09-20"),
     ).fetchone()
     assert tuple(row) == (0, "incomplete_run:evidence_incomplete")
-    assert conn.execute(
-        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
-        (company_id, q1["source_url"]),
-    ).fetchone()[0] == 1
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
+            (company_id, q1["source_url"]),
+        ).fetchone()[0]
+        == 1
+    )
     persisted = describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20")
     assert persisted == second.diagnostic()
     assert AgentReadinessGate().assess(_lane_candidate(None)).status == "evidence_blocked"

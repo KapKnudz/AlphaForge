@@ -8,8 +8,12 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_HOST_MARKERS,
     ATTACHMENT_TIERS,
+    CIS_RELEASE_PATH_RE,
     INVITATION_MARKERS,
+    NON_REPORT_ATTACHMENT_TERMS,
+    REPORT_ATTACHMENT_TERMS,
     REPORT_TITLE_TERMS,
 )
 
@@ -48,22 +52,20 @@ def report_rules_inputs() -> dict[str, Any]:
     """Return the canonical inputs that decide report evidence coverage.
 
     Keep title semantics in :mod:`mfn_taxonomy`; this module only fingerprints
-    the already-owned predicates and the scraper's guarded distribution rules.
+    the already-owned predicates and the guarded distribution rules.
     """
-    from alphaforge.providers.mfn import scraper
-
     return {
         "version": REPORT_RULES_VERSION,
         "taxonomy": {
             "report_title_terms": list(REPORT_TITLE_TERMS),
             "invitation_markers": list(INVITATION_MARKERS),
-            "attachment_report_terms": list(scraper._REPORT_ATTACHMENT_TERMS),
-            "attachment_non_report_terms": list(scraper._NON_REPORT_ATTACHMENT_TERMS),
+            "attachment_report_terms": list(REPORT_ATTACHMENT_TERMS),
+            "attachment_non_report_terms": list(NON_REPORT_ATTACHMENT_TERMS),
             "report_kind_classes": ["annual", "quarterly"],
         },
         "distribution": {
-            "cis_release_path": scraper._CIS_RELEASE_PATH_RE.pattern,
-            "attachment_hosts": list(scraper._ATTACHMENT_HOST_MARKERS),
+            "cis_release_path": CIS_RELEASE_PATH_RE.pattern,
+            "attachment_hosts": list(ATTACHMENT_HOST_MARKERS),
             "attachment_tiers": list(ATTACHMENT_TIERS),
             "main_path_marker": "/main/",
         },

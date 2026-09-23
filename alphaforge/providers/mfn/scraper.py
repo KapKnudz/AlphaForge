@@ -16,7 +16,11 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_HOST_MARKERS,
     ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
+    CIS_RELEASE_PATH_RE,
+    NON_REPORT_ATTACHMENT_TERMS,
+    REPORT_ATTACHMENT_TERMS,
     document_type,
     is_invitation_or_presentation,
     is_report,
@@ -47,31 +51,13 @@ _HTML_VOID_TAGS = frozenset(
         "wbr",
     }
 )
-_REPORT_ATTACHMENT_TERMS = (
-    "annual",
-    "årsredovis",
-    "year-end",
-    "year_end",
-    "interim",
-    "quarter",
-    "delårs",
-    "bokslut",
-    "report",
-    "rapport",
-)
-_NON_REPORT_ATTACHMENT_TERMS = (
-    "presentation",
-    "slides",
-    "webcast",
-    "press release",
-    "pressmeddelande",
-    "cover",
-    "kallelse",
-)
-# Cision-distribution publishing on MFN's own host: /cis/a/<issuer>/<slug>-<8hex>.
-_CIS_RELEASE_PATH_RE = re.compile(r"^/cis/a/([^/]+)/([^/]+)-([0-9a-fA-F]{8})$")
-# Hosts that serve genuine report PDFs behind MFN release pages.
-_ATTACHMENT_HOST_MARKERS = ("storage.mfn.se/", "mb.cision.com/")
+# Rule inputs live authoritatively in mfn_taxonomy (leaf module) so the
+# deterministic core can fingerprint them without importing providers.
+# These aliases preserve the internal uses below.
+_REPORT_ATTACHMENT_TERMS = REPORT_ATTACHMENT_TERMS
+_NON_REPORT_ATTACHMENT_TERMS = NON_REPORT_ATTACHMENT_TERMS
+_CIS_RELEASE_PATH_RE = CIS_RELEASE_PATH_RE
+_ATTACHMENT_HOST_MARKERS = ATTACHMENT_HOST_MARKERS
 _SWEDISH_MONTHS = {
     "januari": "january",
     "februari": "february",

@@ -165,6 +165,38 @@ ATTACHMENT_TIERS: tuple[str, ...] = (
 )
 
 
+# Guarded Cision-distribution rules shared by the scraper and the rule
+# fingerprint. Defined here (leaf module) so the deterministic core can
+# fingerprint them without importing the provider layer (which would pull
+# in ``requests`` and break the ``deterministic core is isolated`` contract).
+REPORT_ATTACHMENT_TERMS: tuple[str, ...] = (
+    "annual",
+    "årsredovis",
+    "year-end",
+    "year_end",
+    "interim",
+    "quarter",
+    "delårs",
+    "bokslut",
+    "report",
+    "rapport",
+)
+NON_REPORT_ATTACHMENT_TERMS: tuple[str, ...] = (
+    "presentation",
+    "slides",
+    "webcast",
+    "press release",
+    "pressmeddelande",
+    "cover",
+    "kallelse",
+)
+# Cision-distribution publishing on MFN's own host: /cis/a/<issuer>/<slug>-<8hex>.
+CIS_RELEASE_PATH_PATTERN: str = r"^/cis/a/([^/]+)/([^/]+)-([0-9a-fA-F]{8})$"
+CIS_RELEASE_PATH_RE = re.compile(CIS_RELEASE_PATH_PATTERN)
+# Hosts that serve genuine report PDFs behind MFN release pages.
+ATTACHMENT_HOST_MARKERS: tuple[str, ...] = ("storage.mfn.se/", "mb.cision.com/")
+
+
 def is_invitation_or_presentation(title: str) -> bool:
     """Return True when a release title is an invitation/presentation, not a report."""
     lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))
