@@ -179,7 +179,9 @@ class DcfAssumptionPolicy:
             warnings.append(
                 "positive ROIC unavailable; net reinvestment set to 0% and confidence lowered"
             )
+            roic_missing = ("roic",)
         else:
+            roic_missing = ()
             reinvestment_share_of_nopat = self._clamp(
                 growth / roic_fraction if growth > 0 else 0.0,
                 0.0,
@@ -247,6 +249,7 @@ class DcfAssumptionPolicy:
             ),
             reinvestment_roic=roic_fraction,
             required_return=required_return,
+            missing_information=roic_missing,
             warnings=tuple(warnings),
         )
 

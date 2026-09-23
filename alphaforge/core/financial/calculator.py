@@ -44,6 +44,12 @@ class FinancialCalculator:
             growth_current, historical, latest_quarter, prior_year_quarter, revenue_growth
         )
 
+        if current.net_debt is not None:
+            effective_net_debt = current.net_debt
+        elif current.total_debt is not None and current.cash is not None:
+            effective_net_debt = current.total_debt - current.cash
+        else:
+            effective_net_debt = None
         return FinancialResult(
             operating_margin=self.calculate_ratio(current.operating_profit, current.revenue),
             net_margin=self.calculate_ratio(current.net_income, current.revenue),
@@ -54,7 +60,7 @@ class FinancialCalculator:
             roe=self.calculate_ratio(current.net_income, current.equity),
             roa=self.calculate_ratio(current.net_income, current.total_assets),
             debt_to_equity=self.calculate_ratio(current.total_debt, current.equity),
-            net_debt=current.total_debt,
+            net_debt=effective_net_debt,
             equity=current.equity,
             revenue_growth_years=revenue_years,
             ebit_growth_years=ebit_years,

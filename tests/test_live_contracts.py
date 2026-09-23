@@ -222,7 +222,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ]
 
         def get_branches(self):
-            return []
+            return [{"id": 1, "name": "Branch 1", "nameEn": "Branch 1", "sectorId": None}]
 
         def get_sectors(self):
             return []
@@ -234,7 +234,15 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             return []
 
         def get_kpi_metadata(self):
-            return []
+            return [
+                {
+                    "kpiId": 2,
+                    "nameSv": "KPI 2",
+                    "nameEn": "KPI 2",
+                    "format": None,
+                    "isString": False,
+                }
+            ]
 
         def get_report_metadata(self):
             return []
@@ -251,6 +259,11 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             return {"kpis": []}
 
         def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            # Dedicated ROIC/NET_DEBT_EBITDA fetches (37/42) should be empty in this
+            # fixture so the idempotent count stays 60 — they are tested with live
+            # data elsewhere where history is present.
+            if kpi_id in (37, 42):
+                return []
             return history_rows
 
         def get_dividends(self, ins_ids=None):

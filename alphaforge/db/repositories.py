@@ -188,12 +188,14 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         # Normalize to YYYY-MM-DD
         if isinstance(period_end, str) and len(period_end) > 10:
             period_end = period_end[:10]
-        # Use mapped for other financials
+        # Use mapped for other financials — REPORT_FIELD_MAP now covers live keys
+        # (total_Equity, net_Debt, cash_Flow_From_Operating_Activities …) so that
+        # ROE, D/E and cash conversion are not silently dropped.
         conn.execute(
             """
             INSERT INTO financial_periods
-                (company_id, period_type, period_end, report_year, report_period, report_date, broken_fiscal_year, currency, currency_ratio, fx_rate_to_sek, fx_source, revenue, gross_income, operating_profit, ebit, ebitda, net_income, free_cash_flow, operating_cash_flow, investing_cash_flow, financing_cash_flow, equity, total_assets, total_debt, cash, eps, dividend_per_share, shares_outstanding, is_placeholder, raw_payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (company_id, period_type, period_end, report_year, report_period, report_date, broken_fiscal_year, currency, currency_ratio, fx_rate_to_sek, fx_source, revenue, gross_income, operating_profit, ebit, ebitda, net_income, free_cash_flow, operating_cash_flow, investing_cash_flow, financing_cash_flow, equity, total_assets, total_debt, net_debt, cash, eps, dividend_per_share, shares_outstanding, is_placeholder, raw_payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, period_type, period_end) DO UPDATE SET
                 report_year=excluded.report_year,
                 report_period=excluded.report_period,
@@ -216,6 +218,7 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 equity=excluded.equity,
                 total_assets=excluded.total_assets,
                 total_debt=excluded.total_debt,
+                net_debt=excluded.net_debt,
                 cash=excluded.cash,
                 eps=excluded.eps,
                 dividend_per_share=excluded.dividend_per_share,
@@ -246,9 +249,10 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 mapped.get("investing_cash_flow", p.get("investing_Cash_Flow")),
                 mapped.get("financing_cash_flow", p.get("financing_Cash_Flow")),
                 mapped.get("equity", p.get("book_Value")),
-                p.get("total_Assets"),
-                p.get("total_Debt"),
-                p.get("cash_And_Equivalents"),
+                mapped.get("total_assets", p.get("total_Assets")),
+                mapped.get("total_debt", p.get("total_Debt")),
+                mapped.get("net_debt", p.get("net_Debt")),
+                mapped.get("cash", p.get("cash_And_Equivalents")),
                 mapped.get("eps", p.get("earnings_Per_Share")),
                 mapped.get("dividend_per_share", p.get("dividend")),
                 mapped.get("shares_outstanding", p.get("number_Of_Shares")),
@@ -381,6 +385,8 @@ def upsert_kpi_observations(
                 continue
             year_int = int(year)
             report_period_int = int(report_period) if report_period is not None else None
+            if isinstance(observation_date, str) and len(observation_date) > 10:
+                observation_date = observation_date[:10]
             if report_period_int is None:
                 existing = conn.execute(
                     """
@@ -393,17 +399,17 @@ def upsert_kpi_observations(
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE kpi_observations SET value=? WHERE id=?",
-                        (val_f, int(existing[0])),
+                        "UPDATE kpi_observations SET value=?, observation_date=COALESCE(?, observation_date) WHERE id=?",
+                        (val_f, observation_date, int(existing[0])),
                     )
                     count += 1
                     continue
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, value)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, observation_date, value)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, year, report_period)
-                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value
+                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=COALESCE(excluded.observation_date, kpi_observations.observation_date)
                 """,
                 (
                     company_id,
@@ -412,6 +418,7 @@ def upsert_kpi_observations(
                     price_type,
                     year_int,
                     report_period_int,
+                    observation_date,
                     val_f,
                 ),
             )

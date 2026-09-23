@@ -14,6 +14,8 @@ class FinancialMapper:
             equity=report.equity,
             total_assets=report.total_assets,
             total_debt=report.total_debt,
+            net_debt=report.net_debt,
+            cash=report.cash,
             shares_outstanding=report.shares_outstanding,
             gross_income=report.gross_income,
             operating_cash_flow=report.operating_cash_flow,

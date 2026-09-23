@@ -61,7 +61,12 @@ def compute_raw_valuation(
         return RawValuation()
 
     market_cap = price * shares
-    net_debt = report.total_debt
+    if report.net_debt is not None:
+        net_debt = report.net_debt
+    elif report.total_debt is not None and report.cash is not None:
+        net_debt = report.total_debt - report.cash
+    else:
+        net_debt = None
     enterprise_value = market_cap + net_debt if net_debt is not None else None
 
     return RawValuation(

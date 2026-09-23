@@ -11,6 +11,15 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 
+def _sanitize_provider_error(exc: BaseException) -> str:
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    name = type(exc).__name__
+    if status is None:
+        return name
+    return f"{name} status={status}"
+
+
 def _get_settings(dsn: str | None = None) -> object:
     from alphaforge.config import Settings
 
@@ -214,14 +223,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 )
     except Exception as e:
         sync_failed = True
-        print(f"sync instruments failed: {e}", file=sys.stderr)
+        print(f"sync instruments failed: {_sanitize_provider_error(e)}", file=sys.stderr)
         record_job(
             conn,
             "sync_instruments",
             company_id=None,
             borsdata_id=None,
             status="failed",
-            error={"code": "instruments_fetch_failed", "message": str(e), "retryable": True},
+            error={
+                "code": "instruments_fetch_failed",
+                "message": _sanitize_provider_error(e),
+                "retryable": True,
+            },
         )
 
     # Instruments now exist, so relink rows imported before the sync and only
@@ -335,7 +348,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as exc:
             sync_failed = True
-            print(f"translation metadata sync failed: {exc}", file=sys.stderr)
+            print(
+                f"translation metadata sync failed: {_sanitize_provider_error(exc)}",
+                file=sys.stderr,
+            )
         # kpi/report metadata caches
         try:
             kpis_meta = adapter.get_kpi_metadata()
@@ -364,10 +380,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as exc:
             sync_failed = True
-            print(f"metadata cache sync failed: {exc}", file=sys.stderr)
+            print(f"metadata cache sync failed: {_sanitize_provider_error(exc)}", file=sys.stderr)
     except Exception as e:
         sync_failed = True
-        print(f"reference dictionaries sync failed: {e}", file=sys.stderr)
+        print(f"reference dictionaries sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
     # Per-company sync with failure isolation — each company wrapped individually
     # Reports (batch 50 inside adapter)
@@ -431,7 +447,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         )
         except Exception as e:
             sync_failed = True
-            print(f"reports sync failed: {e}", file=sys.stderr)
+            print(f"reports sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
             for cid, bid, _ticker in company_rows:
                 record_job(
                     conn,
@@ -439,7 +455,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "reports_contract_failed", "message": str(e), "retryable": True},
+                    error={
+                        "code": "reports_contract_failed",
+                        "message": _sanitize_provider_error(e),
+                        "retryable": True,
+                    },
                 )
 
         # Per-company prices / dividends / kpi branches etc — isolated
@@ -464,7 +484,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "prices_fetch_failed", "message": str(e), "retryable": True},
+                    error={
+                        "code": "prices_fetch_failed",
+                        "message": f"prices: {_sanitize_provider_error(e)}",
+                        "retryable": True,
+                    },
                 )
             # kpis — per-instrument branch allowlist discovery via summary
             try:
@@ -472,46 +496,153 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 cur = conn.execute("SELECT branch_id FROM companies WHERE id=?", (cid,))
                 r = cur.fetchone()
                 branch_id = r[0] if r else None
-                if branch_id is not None:
-                    for rt in ("year", "r12", "quarter"):
+                _kpi_summary_failed = False
+                _allowlist_ok: set[int] = set()
+                _allowlist_failed: set[int] = set()
+                _kpi_history_ok: set[tuple[int, str]] = set()
+                for rt in ("year", "r12", "quarter"):
+                    try:
                         summary = adapter.get_kpi_summary(bid, rt)
-                        if summary and isinstance(summary, dict):
-                            # summary contains kpis with values array
-                            kpis = summary.get("kpis") or summary.get("values") or []
-                            if isinstance(kpis, dict):
-                                kpis = [kpis]
-                            for kp in kpis if isinstance(kpis, list) else []:
+                    except Exception as exc:
+                        sync_failed = True
+                        _kpi_summary_failed = True
+                        record_job(
+                            conn,
+                            "sync_kpis",
+                            company_id=cid,
+                            borsdata_id=bid,
+                            status="failed",
+                            error={
+                                "code": "kpi_summary_fetch_failed",
+                                "message": f"kpi summary/{rt}: {_sanitize_provider_error(exc)}",
+                                "retryable": True,
+                            },
+                        )
+                        continue
+                    if summary and isinstance(summary, dict):
+                        # summary contains kpis with values array
+                        kpis = summary.get("kpis") or summary.get("values") or []
+                        if isinstance(kpis, dict):
+                            kpis = [kpis]
+                        for kp in kpis if isinstance(kpis, list) else []:
+                            try:
                                 kpi_id = kp.get("kpiId") or kp.get("id")
                                 values = kp.get("values") or kp.get("value")
-                                # If values non-empty → allow-list
-                                has_values = False
-                                if isinstance(values, list) and len(values) > 0:
-                                    has_values = any(v is not None for v in values)
-                                elif values is not None:
-                                    has_values = True
-                                if kpi_id is not None and has_values:
+                            except AttributeError:
+                                continue
+                            has_values = False
+                            if isinstance(values, list) and len(values) > 0:
+                                has_values = any(v is not None for v in values)
+                            elif values is not None:
+                                has_values = True
+                            if kpi_id is not None and has_values:
+                                try:
                                     kpi_id_int = int(kpi_id)
-                                    if (
-                                        rt in ("year", "r12")
-                                        and isinstance(values, list)
-                                        and all(isinstance(item, dict) for item in values)
-                                    ):
-                                        upsert_kpi_observations(
+                                except (TypeError, ValueError):
+                                    continue
+                                if (
+                                    rt in ("year", "r12")
+                                    and isinstance(values, list)
+                                    and all(isinstance(item, dict) for item in values)
+                                ):
+                                    try:
+                                        _upserted = upsert_kpi_observations(
                                             conn, cid, kpi_id_int, rt, "mean", values
                                         )
+                                    except Exception as exc:
+                                        sync_failed = True
+                                        _kpi_summary_failed = True
+                                        record_job(
+                                            conn,
+                                            "sync_kpis",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_history_upsert_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt} summary values: {_sanitize_provider_error(exc)}",
+                                                "retryable": True,
+                                            },
+                                        )
+                                        continue
+                                    if _upserted < sum(
+                                        1
+                                        for item in values
+                                        if isinstance(item, dict)
+                                        and (
+                                            item.get("v") is not None
+                                            or item.get("value") is not None
+                                        )
+                                    ):
+                                        sync_failed = True
+                                        _kpi_summary_failed = True
+                                        record_job(
+                                            conn,
+                                            "sync_kpis",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_history_upsert_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt} summary values: unpersistable history values",
+                                                "retryable": True,
+                                            },
+                                        )
+                                if branch_id is not None:
                                     try:
                                         conn.execute(
                                             "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
                                             (int(branch_id), kpi_id_int),
                                         )
-                                    except Exception:
-                                        pass
-                                    if rt in ("year", "r12"):
+                                        if kpi_id_int in (37, 42):
+                                            _allowlist_ok.add(kpi_id_int)
+                                            _allowlist_failed.discard(kpi_id_int)
+                                    except Exception as exc:
+                                        sync_failed = True
+                                        if kpi_id_int in (37, 42):
+                                            _allowlist_failed.add(kpi_id_int)
+                                        else:
+                                            _kpi_summary_failed = True
+                                        record_job(
+                                            conn,
+                                            f"sync_kpis_allowlist_{kpi_id_int}"
+                                            if kpi_id_int in (37, 42)
+                                            else "sync_kpis",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_allowlist_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
+                                                "retryable": True,
+                                            },
+                                        )
+                                if rt in ("year", "r12"):
+                                    try:
                                         history_rows = adapter.get_kpi_history(
                                             bid, kpi_id_int, rt, "mean"
                                         )
-                                        if history_rows:
-                                            upsert_kpi_observations(
+                                    except Exception as exc:
+                                        sync_failed = True
+                                        _kpi_summary_failed = True
+                                        record_job(
+                                            conn,
+                                            "sync_kpis",
+                                            company_id=cid,
+                                            borsdata_id=bid,
+                                            status="failed",
+                                            error={
+                                                "code": "kpi_history_fetch_failed",
+                                                "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
+                                                "retryable": True,
+                                            },
+                                        )
+                                        continue
+                                    if not history_rows:
+                                        _kpi_history_ok.add((kpi_id_int, rt))
+                                    else:
+                                        try:
+                                            _upserted = upsert_kpi_observations(
                                                 conn,
                                                 cid,
                                                 kpi_id_int,
@@ -519,7 +650,162 @@ def cmd_sync(args: argparse.Namespace) -> int:
                                                 "mean",
                                                 history_rows,
                                             )
-                    conn.commit()
+                                        except Exception as exc:
+                                            sync_failed = True
+                                            _kpi_summary_failed = True
+                                            record_job(
+                                                conn,
+                                                "sync_kpis",
+                                                company_id=cid,
+                                                borsdata_id=bid,
+                                                status="failed",
+                                                error={
+                                                    "code": "kpi_history_upsert_failed",
+                                                    "message": f"kpi {kpi_id_int}/{rt}: {_sanitize_provider_error(exc)}",
+                                                    "retryable": True,
+                                                },
+                                            )
+                                            continue
+                                        if _upserted < sum(
+                                            1
+                                            for item in history_rows
+                                            if isinstance(item, dict)
+                                            and (
+                                                item.get("v") is not None
+                                                or item.get("value") is not None
+                                            )
+                                        ):
+                                            sync_failed = True
+                                            _kpi_summary_failed = True
+                                            record_job(
+                                                conn,
+                                                "sync_kpis",
+                                                company_id=cid,
+                                                borsdata_id=bid,
+                                                status="failed",
+                                                error={
+                                                    "code": "kpi_history_upsert_failed",
+                                                    "message": f"kpi {kpi_id_int}/{rt}: unpersistable history values",
+                                                    "retryable": True,
+                                                },
+                                            )
+                                            continue
+                                        _kpi_history_ok.add((kpi_id_int, rt))
+                # Dedicated fetch for ROIC (37) and net-debt/EBITDA (42) even when
+                # Börsdata summary omits them (Clas Ohlson live: summary has 42 ids
+                # but not 37/42, while history endpoints return 10 rows each).
+                # Safe for genuinely unavailable KPIs: 400/empty is treated as missing.
+                from alphaforge.core.kpi_taxonomy import KpiIds as _KpiIds
+
+                for _kpi_id, _rt in (
+                    (_KpiIds.ROIC, "year"),
+                    (_KpiIds.ROIC, "r12"),
+                    (_KpiIds.NET_DEBT_EBITDA, "year"),
+                    (_KpiIds.NET_DEBT_EBITDA, "r12"),
+                ):
+                    _job = f"sync_kpis_{int(_kpi_id)}_{_rt}"
+                    if (int(_kpi_id), _rt) in _kpi_history_ok:
+                        record_job(conn, _job, company_id=cid, borsdata_id=bid, status="success")
+                    else:
+                        try:
+                            _rows = adapter.get_kpi_history(bid, int(_kpi_id), _rt, "mean")
+                        except Exception as exc:
+                            sync_failed = True
+                            record_job(
+                                conn,
+                                _job,
+                                company_id=cid,
+                                borsdata_id=bid,
+                                status="failed",
+                                error={
+                                    "code": "kpi_history_fetch_failed",
+                                    "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
+                                    "retryable": True,
+                                },
+                            )
+                            continue
+                        if _rows:
+                            try:
+                                _upserted = upsert_kpi_observations(
+                                    conn, cid, int(_kpi_id), _rt, "mean", _rows
+                                )
+                            except Exception as exc:
+                                sync_failed = True
+                                record_job(
+                                    conn,
+                                    _job,
+                                    company_id=cid,
+                                    borsdata_id=bid,
+                                    status="failed",
+                                    error={
+                                        "code": "kpi_history_upsert_failed",
+                                        "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
+                                        "retryable": True,
+                                    },
+                                )
+                                continue
+                            if _upserted < sum(
+                                1
+                                for item in _rows
+                                if isinstance(item, dict)
+                                and (item.get("v") is not None or item.get("value") is not None)
+                            ):
+                                sync_failed = True
+                                record_job(
+                                    conn,
+                                    _job,
+                                    company_id=cid,
+                                    borsdata_id=bid,
+                                    status="failed",
+                                    error={
+                                        "code": "kpi_history_upsert_failed",
+                                        "message": f"kpi {_kpi_id}/{_rt}: unpersistable history values",
+                                        "retryable": True,
+                                    },
+                                )
+                                continue
+                            record_job(
+                                conn, _job, company_id=cid, borsdata_id=bid, status="success"
+                            )
+                        else:
+                            record_job(
+                                conn, _job, company_id=cid, borsdata_id=bid, status="success"
+                            )
+                            continue
+                    if branch_id is not None:
+                        try:
+                            conn.execute(
+                                "INSERT INTO branch_kpi_allowlist (branch_id, kpi_id) VALUES (?, ?) ON CONFLICT(branch_id, kpi_id) DO NOTHING",
+                                (int(branch_id), int(_kpi_id)),
+                            )
+                            _allowlist_ok.add(int(_kpi_id))
+                            _allowlist_failed.discard(int(_kpi_id))
+                        except Exception as exc:
+                            _allowlist_failed.add(int(_kpi_id))
+                            sync_failed = True
+                            record_job(
+                                conn,
+                                f"sync_kpis_allowlist_{int(_kpi_id)}",
+                                company_id=cid,
+                                borsdata_id=bid,
+                                status="failed",
+                                error={
+                                    "code": "kpi_allowlist_failed",
+                                    "message": f"kpi {_kpi_id}/{_rt}: {_sanitize_provider_error(exc)}",
+                                    "retryable": True,
+                                },
+                            )
+                if not _kpi_summary_failed:
+                    record_job(conn, "sync_kpis", company_id=cid, borsdata_id=bid, status="success")
+                for _allowlist_kpi in sorted(_allowlist_ok - _allowlist_failed):
+                    record_job(
+                        conn,
+                        f"sync_kpis_allowlist_{_allowlist_kpi}",
+                        company_id=cid,
+                        borsdata_id=bid,
+                        status="success",
+                    )
+                conn.commit()
             except Exception as exc:
                 sync_failed = True
                 record_job(
@@ -528,7 +814,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     company_id=cid,
                     borsdata_id=bid,
                     status="failed",
-                    error={"code": "kpi_contract_failed", "message": str(exc), "retryable": True},
+                    error={
+                        "code": "kpi_contract_failed",
+                        "message": f"kpi contract: {_sanitize_provider_error(exc)}",
+                        "retryable": True,
+                    },
                 )
 
         # Dividends (global calendar, not per-company) — filter by company if possible
@@ -587,7 +877,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             conn.commit()
         except Exception as e:
             sync_failed = True
-            print(f"dividends sync failed: {e}", file=sys.stderr)
+            print(f"dividends sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Stock splits (rolling 1-year window, MAX 1 year per API) — global fetch
         try:
@@ -597,7 +887,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 upsert_stock_splits(conn, splits, company_map=b2c)
         except Exception as e:
             sync_failed = True
-            print(f"stock_splits sync failed: {e}", file=sys.stderr)
+            print(f"stock_splits sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Report calendar (weekly, but sync opportunistically)
         try:
@@ -607,7 +897,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 upsert_report_calendar(conn, cal, company_map=b2c)
         except Exception as e:
             sync_failed = True
-            print(f"report_calendar sync failed: {e}", file=sys.stderr)
+            print(f"report_calendar sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
         # Holdings snapshots (global) — insider, buyback, shorts (shorts is global snapshot)
         # These are deferred per-company detail but snapshot tables are updated
@@ -649,7 +939,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 conn.commit()
         except Exception as e:
             sync_failed = True
-            print(f"shorts sync failed: {e}", file=sys.stderr)
+            print(f"shorts sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)
 
     conn.commit()
     if sync_failed:
@@ -900,6 +1190,31 @@ def cmd_rank(args: argparse.Namespace) -> int:
         evidence_packet_hash=evidence_packet_hash,
         evidence_packet_hashes=evidence_packet_hashes,
     )
+    # Export auditable DCF artefacts alongside the heuristic ranking —
+    # keeps valuation_score and DCF fair-value clearly separate.
+    dcf_path = exports_dir / "dcf.json"
+    try:
+        dcf_export: dict[str, dict] = {}
+        for company in companies:
+            loaded = results_by_company.get(company.id, {})
+            rd = loaded.get("reverse_dcf") or {}
+            if rd:
+                # Keep only serializable, auditable fields
+                dcf_export[str(company.id)] = rd
+            else:
+                dcf_export[str(company.id)] = {
+                    "status": "unavailable",
+                    "dcf": {
+                        "available": False,
+                        "policy_version": None,
+                        "missing_information": ["ranking_inputs_unavailable"],
+                        "warnings": [],
+                    },
+                }
+        dcf_path.write_text(json.dumps(dcf_export, indent=2, ensure_ascii=False, default=str))
+    except Exception as exc:
+        print(f"rank: DCF export failed, {dcf_path} not written: {exc}", file=sys.stderr)
+        return 1
 
     # Save ranking run to DB.
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()

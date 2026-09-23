@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS financial_periods (
     equity              REAL,
     total_assets        REAL,
     total_debt          REAL,
+    net_debt            REAL,
     cash                REAL,
     eps                 REAL,
     dividend_per_share  REAL,
@@ -73,7 +74,7 @@ CREATE TABLE IF NOT EXISTS financial_periods (
     raw_payload         TEXT CHECK (raw_payload IS NULL OR json_valid(raw_payload)),
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (company_id, period_type, period_end),
-    CHECK (is_placeholder = 1 OR revenue IS NOT NULL OR net_income IS NOT NULL OR equity IS NOT NULL OR total_debt IS NOT NULL)
+    CHECK (is_placeholder = 1 OR revenue IS NOT NULL OR net_income IS NOT NULL OR equity IS NOT NULL OR total_debt IS NOT NULL OR net_debt IS NOT NULL)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_financials_company_period_end ON financial_periods(company_id, period_type, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_financials_pit ON financial_periods(company_id, period_type, report_date, period_end) WHERE is_placeholder = 0;
@@ -313,7 +314,7 @@ CREATE TABLE IF NOT EXISTS theses (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_type            TEXT NOT NULL CHECK (job_type IN ('sync_instruments','sync_reports','sync_kpis','sync_prices','sync_dividends','sync_insider','sync_buyback','sync_shorts','rank','evidence','analyze','export')),
+    job_type            TEXT NOT NULL CHECK (job_type IN ('sync_instruments','sync_reports','sync_kpis','sync_kpis_37_year','sync_kpis_42_year','sync_kpis_37_r12','sync_kpis_42_r12','sync_kpis_allowlist_37','sync_kpis_allowlist_42','sync_prices','sync_dividends','sync_insider','sync_buyback','sync_shorts','rank','evidence','analyze','export')),
     company_id          INTEGER REFERENCES companies(id) ON DELETE SET NULL,
     borsdata_id         INTEGER,
     status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','success','failed','partial')),

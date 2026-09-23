@@ -634,7 +634,7 @@ No endpoint is marked “stale”; all 33 are live. Until this integration, the 
 
 ## Addendum A — Data Foundation DDL (normative, excerpt from Appendix D)
 
-*This addendum reproduces the SQLite DDL from `scout-alphaforge-data-foundation` Appendix D with the consolidated v2 amendments (closing-price-only, `fx_rate_to_sek` audit columns, 50+tail metadata). The Postgres variant is the delta described in §3.4; the `importlinter` composition owner is §3.3 / Phase 0. File to commit: `db/alphaforge.sqlite.sql` (normative), `db/alphaforge.postgres.sql` (variant).*
+*This addendum reproduces the SQLite DDL from `scout-alphaforge-data-foundation` Appendix D with the consolidated v2 amendments (closing-price-only, `fx_rate_to_sek` audit columns, 50+tail metadata). The Postgres variant is the delta described in §3.4; the `importlinter` composition owner is §3.3 / Phase 0. File to commit: `db/alphaforge.sqlite.sql` (normative), `db/alphaforge.postgres.sql` (variant). Live schema owner is `db/alphaforge.sqlite.sql` — its `jobs.job_type` CHECK (18 types, incl. `sync_kpis_37_year` etc.) is authoritative; the sketch below stays as the historical 2026-09-16 record.*
 
 ```sql
 -- SQLite 3.38+ (WAL, json1, ON CONFLICT DO UPDATE)
