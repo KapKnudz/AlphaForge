@@ -150,6 +150,15 @@ def is_report(title: str) -> bool:
 INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
 
 
+# Confidence tier of the attachment selected from a release page. ``none``
+# means the page carried no viable PDF candidate (or the page-level report
+# guard refused it); ``unresolved`` means candidates existed but ranked
+# selection could not pick exactly one — the lane must fail visibly instead
+# of guessing. Defined here (leaf module) so both the scraper and the
+# evidence flow share one authoritative definition without a circular import.
+ATTACHMENT_TIERS: tuple[str, ...] = ("mfn-primary", "main-path", "label-score", "unresolved", "none")
+
+
 def is_invitation_or_presentation(title: str) -> bool:
     """Return True when a release title is an invitation/presentation, not a report."""
     lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))

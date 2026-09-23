@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_TIERS,
     document_type,
     is_invitation_or_presentation,
     is_report,
@@ -286,12 +287,8 @@ def _attachment_score(url: str, label: str = "") -> int:
     return 1
 
 
-# Confidence tier of the attachment selected from a release page. ``none``
-# means the page carried no viable PDF candidate (or the page-level report
-# guard refused it); ``unresolved`` means candidates existed but ranked
-# selection could not pick exactly one — the lane must fail visibly instead
-# of guessing.
-ATTACHMENT_TIERS = ("mfn-primary", "main-path", "label-score", "unresolved", "none")
+# ATTACHMENT_TIERS is imported above from mfn_taxonomy (authoritative
+# definition) and remains available as scraper.ATTACHMENT_TIERS.
 
 
 def _label_report_score(label: str) -> int:

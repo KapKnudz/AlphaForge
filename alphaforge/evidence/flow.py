@@ -40,6 +40,7 @@ from alphaforge.evidence.ingest import (
     resolve_document_language,
 )
 from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_TIERS,
     document_type,
     is_invitation_or_presentation,
     is_report,
@@ -53,7 +54,6 @@ from alphaforge.evidence.report_rules import (
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
-from alphaforge.providers.mfn.scraper import ATTACHMENT_TIERS
 
 if TYPE_CHECKING:
     from alphaforge.providers.mfn.scraper import MfnScraper

@@ -7,7 +7,11 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from alphaforge.evidence.mfn_taxonomy import INVITATION_MARKERS, REPORT_TITLE_TERMS
+from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_TIERS,
+    INVITATION_MARKERS,
+    REPORT_TITLE_TERMS,
+)
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
@@ -60,7 +64,7 @@ def report_rules_inputs() -> dict[str, Any]:
         "distribution": {
             "cis_release_path": scraper._CIS_RELEASE_PATH_RE.pattern,
             "attachment_hosts": list(scraper._ATTACHMENT_HOST_MARKERS),
-            "attachment_tiers": list(scraper.ATTACHMENT_TIERS),
+            "attachment_tiers": list(ATTACHMENT_TIERS),
             "main_path_marker": "/main/",
         },
         "completeness": {
