@@ -32,14 +32,12 @@ REPORT_FIELD_MAP: dict[str, str] = {
     # Live uses total_Equity (not book_Value) for equity; keep book_Value for
     # backward compatibility with older fixtures.
     "total_Equity": "equity",
-    "totalEquity": "equity",
     "total_Assets": "total_assets",
     "total_Debt": "total_debt",
     # Live reports expose net_Debt (already net of cash) rather than gross
     # total_Debt — preserve a dedicated net_debt column so the provider value
     # is not mislabelled as gross debt.
     "net_Debt": "net_debt",
-    "netDebt": "net_debt",
     "cash_And_Equivalents": "cash",
     "earnings_Per_Share": "eps",
     "dividend": "dividend_per_share",
