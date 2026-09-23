@@ -18,9 +18,12 @@ from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
+    describe_evidence_state,
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
+    load_evidence_packet,
     persist_evidence_document,
+    record_job,
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
@@ -340,6 +343,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "en",
         },
         {
@@ -395,6 +399,61 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         "https://mfn.test/a/flow/missing",
     }
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+
+
+def test_rerun_does_not_trust_evidence_without_attachment_tier():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/q1",
+        "title": "Flow AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/q1.pdf",
+        "lang": "en",
+    }
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert first.status == "complete"
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        second = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert second.status == "evidence_incomplete"
+    assert second.packet is None
+    assert second.completeness == {"quarterly": {"expected": 1, "retained": 0}}
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
+
+
+def test_describe_evidence_state_ignores_other_as_of_job():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    diagnostic = {"status": "evidence_incomplete", "company_id": company_id}
+    record_job(
+        conn,
+        "evidence",
+        company_id=company_id,
+        borsdata_id=None,
+        status="failed",
+        error={
+            "code": "evidence_incomplete",
+            "message": "incomplete",
+            "as_of": "2026-09-21",
+            "diagnostic": diagnostic,
+        },
+        begin_attempt=False,
+    )
+    assert describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20") is None
+    assert (
+        describe_evidence_state(conn, company_id=company_id, as_of="2026-09-21")
+        == diagnostic
+    )
 
 
 def test_all_future_cutoff_is_typed_no_evidence_and_audited():
@@ -523,6 +582,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-en.pdf",
+            "attachment_tier": "mfn-primary",
             "body": "Material disclosure from the release body.",
             "lang": "en",
             "provider_event_id": "flow-q1-2026",

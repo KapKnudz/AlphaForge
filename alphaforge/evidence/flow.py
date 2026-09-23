@@ -187,6 +187,18 @@ def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | N
     return None
 
 
+def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
+    if isinstance(raw_metadata, str):
+        try:
+            raw_metadata = json.loads(raw_metadata)
+        except (TypeError, ValueError):
+            return False
+    return (
+        isinstance(raw_metadata, dict)
+        and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
+    )
+
+
 def _prepare_selected_article(
     variant: dict[str, Any], downloaded: PdfDownload, extracted: Any
 ) -> dict[str, Any]:
@@ -1058,7 +1070,11 @@ class OneCompanyEvidenceFlow:
                                 int(row["borsdata_id"]) if row["borsdata_id"] is not None else None
                             ),
                             status="failed",
-                            error={"code": "unhandled_error", "message": str(exc)},
+                            error={
+                                "code": "unhandled_error",
+                                "message": str(exc),
+                                "as_of": as_of,
+                            },
                             begin_attempt=False,
                         )
                 except Exception:
@@ -1132,6 +1148,7 @@ class OneCompanyEvidenceFlow:
                 error = {
                     "code": result.status,
                     "message": result.message,
+                    "as_of": as_of,
                     "no_evidence_reason": (
                         result.no_evidence_reason.value
                         if result.no_evidence_reason is not None
@@ -1324,7 +1341,8 @@ class OneCompanyEvidenceFlow:
                         future_dated_complete_release = True
                     elif published_date > today.isoformat():
                         not_yet_published_complete_release = True
-                    continue
+                    if _has_current_attachment_provenance(complete.get("raw_metadata")):
+                        continue
             unseen_feed.append(entry)
         complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
         for document in complete_documents:
@@ -1478,6 +1496,8 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
+            if not _has_current_attachment_provenance(metadata):
+                continue
             pdf_language = (
                 metadata.get("pdf_language")
                 if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))

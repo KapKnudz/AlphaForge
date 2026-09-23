@@ -335,7 +335,7 @@ def _select_attachment(
     return None, "unresolved"
 
 
-def _parse_html(html: str, *, title_hint: str = "") -> dict[str, Any]:
+def _parse_html(html: str) -> dict[str, Any]:
     parser = _MfnHtmlParser()
     parser.feed(html)
     pdf_links = [
@@ -345,9 +345,8 @@ def _parse_html(html: str, *, title_hint: str = "") -> dict[str, Any]:
         and ".pdf" in href.lower()
     ]
     title = " ".join(" ".join(parser.h1_parts).split())
-    effective_title = title or " ".join(title_hint.split())
-    page_is_report = bool(effective_title) and is_report(effective_title)
-    page_is_invitation = bool(effective_title) and is_invitation_or_presentation(effective_title)
+    page_is_report = bool(title) and is_report(title)
+    page_is_invitation = bool(title) and is_invitation_or_presentation(title)
     if page_is_invitation:
         storage_url, tier = None, "none"
     else:
@@ -737,8 +736,8 @@ class MfnScraper:
                 raise MfnAcquisitionError(
                     "mfn_detail_http_status", f"MFN detail request returned HTTP {resp.status_code}"
                 )
-            parsed = _parse_html(resp.text, title_hint=str(seed.get("title") or ""))
-            title = parsed["title"] or seed.get("title") or ""
+            parsed = _parse_html(resp.text)
+            title = parsed["title"] or ""
             if reports_only and not is_report(title):
                 self._count_detail("non_report_title")
                 continue

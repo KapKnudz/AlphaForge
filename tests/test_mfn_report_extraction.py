@@ -1111,6 +1111,32 @@ def test_hyphenated_invitation_page_yields_no_attachment():
     assert parsed["attachment_tier"] == "none"
 
 
+def test_page_without_title_cannot_authorize_attachment():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "none"
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details(
+            [{"url": "https://mfn.test/a/acme/annual", "title": "Acme Year-End Report 2025"}]
+        )
+    assert articles == []
+    assert scraper.drain_detail_skips() == {"non_report_title": 1}
+
+
 def test_label_score_requires_corroborating_report_title():
     html = """
     <html>

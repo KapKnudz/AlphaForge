@@ -1409,7 +1409,9 @@ def describe_evidence_state(
         error = json.loads(row[0])
     except (TypeError, ValueError):
         return None
-    diagnostic = error.get("diagnostic") if isinstance(error, dict) else None
+    if not isinstance(error, dict) or error.get("as_of") != as_of:
+        return None
+    diagnostic = error.get("diagnostic")
     return dict(diagnostic) if isinstance(diagnostic, dict) else None
 
 
