@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 7 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 8 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -158,6 +158,29 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 7)
         conn.commit()
         current = 7
+    if current < 8:
+        document_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(research_documents);").fetchall()
+        }
+        if "report_rules_fingerprint" not in document_columns:
+            conn.execute("ALTER TABLE research_documents ADD COLUMN report_rules_fingerprint TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
+                company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                as_of                   TEXT NOT NULL,
+                status                  TEXT NOT NULL,
+                diagnostic              TEXT NOT NULL CHECK (json_valid(diagnostic)),
+                packet_hash             TEXT,
+                report_rules_fingerprint TEXT NOT NULL,
+                recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY (company_id, as_of)
+            ) STRICT
+            """
+        )
+        set_user_version(conn, 8)
+        conn.commit()
+        current = 8
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -260,10 +283,27 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             UNIQUE (company_id, as_of, packet_hash)
         ) STRICT;
         CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
+
+        CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
+            company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            as_of                   TEXT NOT NULL,
+            status                  TEXT NOT NULL,
+            diagnostic              TEXT NOT NULL CHECK (json_valid(diagnostic)),
+            packet_hash             TEXT,
+            report_rules_fingerprint TEXT NOT NULL,
+            recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            PRIMARY KEY (company_id, as_of)
+        ) STRICT;
         CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
             ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
         """
     )
+    document_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(research_documents);").fetchall()
+    }
+    if "report_rules_fingerprint" not in document_columns:
+        conn.execute("ALTER TABLE research_documents ADD COLUMN report_rules_fingerprint TEXT")
+
     # A database may have been stamped with the current user_version by an
     # older build whose initial schema predated packet lifecycle columns.
     # Repair that shape additively instead of trusting the version alone.

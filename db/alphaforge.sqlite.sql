@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS research_documents (
     ingested_lang       TEXT,
     checksum            TEXT,
     raw_metadata        TEXT CHECK (raw_metadata IS NULL OR json_valid(raw_metadata)),
+    report_rules_fingerprint TEXT,
     UNIQUE (company_id, source_url)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_research_documents_checksum ON research_documents(checksum);
@@ -258,6 +259,17 @@ CREATE TABLE IF NOT EXISTS evidence_packets (
 CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
 CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
     ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
+
+CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
+    company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    as_of                   TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    diagnostic              TEXT NOT NULL CHECK (json_valid(diagnostic)),
+    packet_hash             TEXT,
+    report_rules_fingerprint TEXT NOT NULL,
+    recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (company_id, as_of)
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS jev_shadow_audit (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -592,6 +592,49 @@ def record_job(
     conn.commit()
 
 
+def persist_evidence_diagnostic(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    status: str,
+    diagnostic: dict[str, Any],
+    report_rules_fingerprint: str,
+    packet_hash: str | None = None,
+    commit: bool = True,
+) -> None:
+    """Persist the terminal diagnostic for one company and point-in-time key."""
+    if not report_rules_fingerprint:
+        raise ValueError("evidence diagnostics require an active report-rule fingerprint")
+    payload = dict(diagnostic)
+    payload["status"] = status
+    if packet_hash is not None:
+        payload["packet_hash"] = packet_hash
+    conn.execute(
+        """
+        INSERT INTO evidence_run_diagnostics
+            (company_id, as_of, status, diagnostic, packet_hash, report_rules_fingerprint)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, as_of) DO UPDATE SET
+            status=excluded.status,
+            diagnostic=excluded.diagnostic,
+            packet_hash=excluded.packet_hash,
+            report_rules_fingerprint=excluded.report_rules_fingerprint,
+            recorded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (
+            company_id,
+            as_of,
+            status,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            packet_hash,
+            report_rules_fingerprint,
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
 def save_ranking_run(
     conn: Any,
     *,
@@ -845,7 +888,7 @@ def complete_evidence_identity_documents(
     rows = conn.execute(
         """
         SELECT d.source_url, d.title, d.published_at, d.content_text, d.ingested_lang,
-               d.raw_metadata, d.checksum AS document_checksum,
+               d.raw_metadata, d.report_rules_fingerprint, d.checksum AS document_checksum,
                a.source_url AS attachment_url, a.sha256 AS attachment_checksum
         FROM research_documents d
         JOIN research_attachments a ON a.document_id=d.id
@@ -994,7 +1037,8 @@ def find_complete_evidence_attachment(
         SELECT a.*, root.id AS canonical_document_id,
                root.source_url AS canonical_source_url,
                root.ingested_lang AS canonical_ingested_lang,
-               root.raw_metadata AS canonical_raw_metadata
+               root.raw_metadata AS canonical_raw_metadata,
+               root.report_rules_fingerprint AS canonical_report_rules_fingerprint
         FROM research_attachments a
         JOIN research_documents d ON d.id=a.document_id
         JOIN research_documents root
@@ -1018,6 +1062,7 @@ def persist_evidence_document(
     extraction: dict[str, Any],
     pages: list[dict[str, Any]],
     suppressed_variants: list[dict[str, Any]] | None = None,
+    report_rules_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Persist one selected report and its complete PDF provenance.
 
@@ -1037,6 +1082,12 @@ def persist_evidence_document(
     metadata = dict(article.get("raw_metadata") or {})
     if not isinstance(metadata, dict):
         metadata = {}
+    if report_rules_fingerprint is None:
+        report_rules_fingerprint = article.get("report_rules_fingerprint")
+    if not report_rules_fingerprint:
+        from alphaforge.evidence.report_rules import current_report_rules_fingerprint
+
+        report_rules_fingerprint = current_report_rules_fingerprint()
     for key in (
         "provider_event_id",
         "mfn_event_id",
@@ -1079,8 +1130,8 @@ def persist_evidence_document(
             INSERT INTO research_documents
                 (company_id, source_url, source_type, title, published_at, content_text,
                  page_count, pages_included, page_truncated, duplicate_of,
-                 ingested_lang, checksum, raw_metadata)
-            VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                 ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+            VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
             ON CONFLICT(company_id, source_url) DO UPDATE SET
                 title=excluded.title,
                 published_at=excluded.published_at,
@@ -1091,7 +1142,8 @@ def persist_evidence_document(
                 duplicate_of=NULL,
                 ingested_lang=excluded.ingested_lang,
                 checksum=excluded.checksum,
-                raw_metadata=excluded.raw_metadata
+                raw_metadata=excluded.raw_metadata,
+                report_rules_fingerprint=excluded.report_rules_fingerprint
             """,
             (
                 company_id,
@@ -1105,6 +1157,7 @@ def persist_evidence_document(
                 language,
                 checksum,
                 metadata_json,
+                str(report_rules_fingerprint),
             ),
         )
         document = conn.execute(
@@ -1381,38 +1434,51 @@ def describe_evidence_state(
     as_of: str,
     current_rules_fingerprint: str | None = None,
 ) -> dict[str, Any] | None:
-    """Read the last persisted diagnostic for one point-in-time key.
+    """Read the durable diagnostic for exactly one company and as-of date."""
+    if current_rules_fingerprint is None:
+        from alphaforge.evidence.report_rules import current_report_rules_fingerprint
 
-    Complete runs persist diagnostics inside the frozen packet. Terminal
-    non-complete runs persist them in the job error after packet tombstoning.
-    """
+        current_rules_fingerprint = current_report_rules_fingerprint()
+    row = conn.execute(
+        """
+        SELECT status, diagnostic, packet_hash, report_rules_fingerprint
+        FROM evidence_run_diagnostics
+        WHERE company_id=? AND as_of=?
+        """,
+        (company_id, as_of),
+    ).fetchone()
+    if row is not None:
+        if row[3] != current_rules_fingerprint:
+            return None
+        try:
+            diagnostic = json.loads(row[1])
+        except (TypeError, ValueError):
+            return None
+        if isinstance(diagnostic, dict):
+            result = dict(diagnostic)
+            result["status"] = row[0]
+            if row[2] is not None:
+                result["packet_hash"] = row[2]
+            return result
+        return None
+
+    # Preserve read access to complete packets written before the diagnostic
+    # table existed; no singleton jobs row is consulted for historical state.
     packet = load_evidence_packet(
         conn,
         company_id,
         as_of,
         current_rules_fingerprint=current_rules_fingerprint,
     )
-    if packet is not None:
-        diagnostic = packet.get("evidence_diagnostic")
-        if isinstance(diagnostic, dict):
-            result = dict(diagnostic)
-            result["status"] = "complete"
-            result["packet_hash"] = packet.get("packet_hash")
-            return result
-    row = conn.execute(
-        "SELECT error FROM jobs WHERE job_type='evidence' AND company_id=?",
-        (company_id,),
-    ).fetchone()
-    if row is None or not row[0]:
+    if packet is None:
         return None
-    try:
-        error = json.loads(row[0])
-    except (TypeError, ValueError):
+    diagnostic = packet.get("evidence_diagnostic")
+    if not isinstance(diagnostic, dict):
         return None
-    if not isinstance(error, dict) or error.get("as_of") != as_of:
-        return None
-    diagnostic = error.get("diagnostic")
-    return dict(diagnostic) if isinstance(diagnostic, dict) else None
+    result = dict(diagnostic)
+    result["status"] = "complete"
+    result["packet_hash"] = packet.get("packet_hash")
+    return result
 
 
 def append_jev_shadow_audit(conn: Any, audit: dict[str, Any]) -> int:

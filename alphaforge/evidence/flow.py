@@ -25,6 +25,7 @@ from alphaforge.db.repositories import (
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
     mark_evidence_packets_unusable,
+    persist_evidence_diagnostic,
     persist_evidence_document,
     persist_evidence_packet,
     persist_evidence_sibling,
@@ -194,8 +195,7 @@ def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
         except (TypeError, ValueError):
             return False
     return (
-        isinstance(raw_metadata, dict)
-        and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
+        isinstance(raw_metadata, dict) and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
     )
 
 
@@ -559,6 +559,19 @@ def build_frozen_evidence_packet(
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
     if mapping is None:
         raise ValueError("cannot build evidence packet without a verified MFN mapping")
+    active_rules = report_rules or report_rules_metadata()
+    fingerprint = active_rules.get("fingerprint") if isinstance(active_rules, dict) else None
+    history_values = active_rules.get("history_window") if isinstance(active_rules, dict) else None
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError("cannot build evidence packet without active report-rule provenance")
+    if not isinstance(history_values, dict):
+        raise ValueError("cannot build evidence packet without an active history window")
+    try:
+        window = ReportHistoryWindow(**history_values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cannot build evidence packet with an invalid history window") from exc
+    annual_cutoff = _resolve_cutoff(as_of, window, "annual")
+    interim_cutoff = _resolve_cutoff(as_of, window, "quarterly")
     cutoff = min(as_of[:10], publication_cutoff[:10]) if publication_cutoff else as_of[:10]
     rows = conn.execute(
         """
@@ -573,12 +586,22 @@ def build_frozen_evidence_packet(
         JOIN document_extractions e ON e.document_id=d.id
         WHERE d.company_id=? AND d.duplicate_of IS NULL
           AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
+          AND d.report_rules_fingerprint=?
+          AND substr(d.published_at, 1, 10) >= CASE
+              WHEN json_extract(d.raw_metadata, '$.report_kind') = 'annual'
+              THEN ? ELSE ? END
           AND EXISTS (
               SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
           )
         ORDER BY d.source_url, a.sha256, d.id
         """,
-        (company_id, cutoff),
+        (
+            company_id,
+            cutoff,
+            fingerprint,
+            annual_cutoff,
+            interim_cutoff,
+        ),
     ).fetchall()
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
@@ -717,7 +740,7 @@ def build_frozen_evidence_packet(
         "schema_version": "evidence-packet-v1",
         "frozen": True,
         "evidence_rules_version": EVIDENCE_RULES_VERSION,
-        "report_rules": report_rules or report_rules_metadata(),
+        "report_rules": active_rules,
         "company_id": int(company_id),
         "as_of": as_of[:10],
         "issuer": {
@@ -1156,6 +1179,16 @@ class OneCompanyEvidenceFlow:
                     ),
                     "diagnostic": result.diagnostic(),
                 }
+            persist_evidence_diagnostic(
+                self.conn,
+                company_id=company_id,
+                as_of=as_of,
+                status=result.status,
+                diagnostic=result.diagnostic(),
+                report_rules_fingerprint=active_rules["fingerprint"],
+                packet_hash=result.packet_hash,
+                commit=False,
+            )
             record_job(
                 self.conn,
                 "evidence",
@@ -1341,7 +1374,9 @@ class OneCompanyEvidenceFlow:
                         future_dated_complete_release = True
                     elif published_date > today.isoformat():
                         not_yet_published_complete_release = True
-                    if _has_current_attachment_provenance(complete.get("raw_metadata")):
+                    if complete.get("report_rules_fingerprint") == active_rules[
+                        "fingerprint"
+                    ] and _has_current_attachment_provenance(complete.get("raw_metadata")):
                         continue
             unseen_feed.append(entry)
         complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
@@ -1496,7 +1531,9 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
-            if not _has_current_attachment_provenance(metadata):
+            if persisted.get("report_rules_fingerprint") != active_rules[
+                "fingerprint"
+            ] or not _has_current_attachment_provenance(metadata):
                 continue
             pdf_language = (
                 metadata.get("pdf_language")
@@ -1568,7 +1605,14 @@ class OneCompanyEvidenceFlow:
             if not attachment_url:
                 continue
             existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
-            stored_pdf_language = _stored_pdf_language(existing)
+            if (
+                existing is not None
+                and existing.get("canonical_report_rules_fingerprint")
+                != active_rules["fingerprint"]
+            ):
+                stored_pdf_language = None
+            else:
+                stored_pdf_language = _stored_pdf_language(existing)
             if stored_pdf_language is not None:
                 language, evidence = stored_pdf_language
                 identity_candidates[index] = {
@@ -1839,6 +1883,7 @@ class OneCompanyEvidenceFlow:
                     },
                     pages=list(candidate_extracted.pages),
                     suppressed_variants=siblings,
+                    report_rules_fingerprint=active_rules["fingerprint"],
                 )
 
             selected_existing = None
@@ -1851,12 +1896,9 @@ class OneCompanyEvidenceFlow:
                     ),
                 )[0]
                 if selected_existing is not None:
-                    if not any(
-                        variant.get("_persisted_evidence") for variant in variants
-                    ):
+                    if not any(variant.get("_persisted_evidence") for variant in variants):
                         result.skipped["attachment_reused_by_different_report"] = (
-                            result.skipped.get("attachment_reused_by_different_report", 0)
-                            + 1
+                            result.skipped.get("attachment_reused_by_different_report", 0) + 1
                         )
                         continue
                     existing_canonical_source_url = str(selected_existing["canonical_source_url"])

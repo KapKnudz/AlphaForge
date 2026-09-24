@@ -22,8 +22,8 @@ from alphaforge.db.repositories import (
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
     load_evidence_packet,
+    persist_evidence_diagnostic,
     persist_evidence_document,
-    record_job,
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
@@ -431,29 +431,83 @@ def test_rerun_does_not_trust_evidence_without_attachment_tier():
     assert load_evidence_packet(conn, company_id, "2026-09-20") is None
 
 
-def test_describe_evidence_state_ignores_other_as_of_job():
+def test_describe_evidence_state_replays_two_as_of_diagnostics():
     conn = _connection()
     company_id = _mapped_company(conn)
-    diagnostic = {"status": "evidence_incomplete", "company_id": company_id}
-    record_job(
+    fingerprint = report_rules_metadata()["fingerprint"]
+    diagnostic_a = {
+        "status": "evidence_incomplete",
+        "company_id": company_id,
+        "as_of": "2026-09-20",
+    }
+    diagnostic_b = {"status": "no_evidence", "company_id": company_id, "as_of": "2026-09-21"}
+    persist_evidence_diagnostic(
         conn,
-        "evidence",
         company_id=company_id,
-        borsdata_id=None,
-        status="failed",
-        error={
-            "code": "evidence_incomplete",
-            "message": "incomplete",
-            "as_of": "2026-09-21",
-            "diagnostic": diagnostic,
-        },
-        begin_attempt=False,
+        as_of="2026-09-20",
+        status="evidence_incomplete",
+        diagnostic=diagnostic_a,
+        report_rules_fingerprint=fingerprint,
     )
-    assert describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20") is None
-    assert (
-        describe_evidence_state(conn, company_id=company_id, as_of="2026-09-21")
-        == diagnostic
+    persist_evidence_diagnostic(
+        conn,
+        company_id=company_id,
+        as_of="2026-09-21",
+        status="no_evidence",
+        diagnostic=diagnostic_b,
+        report_rules_fingerprint=fingerprint,
     )
+    assert describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20") == diagnostic_a
+    assert describe_evidence_state(conn, company_id=company_id, as_of="2026-09-21") == diagnostic_b
+
+
+def test_packet_query_excludes_legacy_document_beside_current_document():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    mapping = get_verified_mfn_mapping(conn, company_id)
+
+    def persist(source_url: str, published_at: str, checksum: str) -> None:
+        persist_evidence_document(
+            conn,
+            company_id=company_id,
+            article={
+                "source_url": source_url,
+                "title": "Flow AB Interim Report Q1 2026",
+                "published_at": published_at,
+                "content_text": "The quarter covered 1 May - 31 July 2026.",
+                "report_kind": "quarterly",
+                "attachment_tier": "mfn-primary",
+                "ingested_lang": "en",
+            },
+            attachment={
+                "source_url": source_url + ".pdf",
+                "content_type": "application/pdf",
+                "byte_size": 8,
+                "sha256": checksum,
+                "magic_valid": True,
+                "http_status": 200,
+            },
+            extraction={
+                "extractor": "pypdf",
+                "text_checksum": checksum + "-text",
+                "page_count": 1,
+                "pages_included": "1",
+            },
+            pages=[{"page_number": 1, "text": "Evidence"}],
+        )
+
+    persist("https://mfn.test/a/current", "2026-05-01T08:00:00Z", "current-checksum")
+    persist("https://mfn.test/a/legacy", "2026-06-01T08:00:00Z", "legacy-checksum")
+    conn.execute(
+        "UPDATE research_documents SET report_rules_fingerprint='legacy' WHERE source_url=?",
+        ("https://mfn.test/a/legacy",),
+    )
+    conn.commit()
+
+    packet = build_frozen_evidence_packet(
+        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
+    )
+    assert [source["source_url"] for source in packet["sources"]] == ["https://mfn.test/a/current"]
 
 
 def test_all_future_cutoff_is_typed_no_evidence_and_audited():
