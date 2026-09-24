@@ -741,6 +741,8 @@ DOWNLOAD_FAILED_SKIP_REASONS = frozenset(
         "pdf_extraction_failed",
         "mfn_feed_fetch_failed",
         "mfn_detail_fetch_failed",
+        "mfn_feed_http_status",
+        "mfn_detail_http_status",
     }
 )
 AMBIGUOUS_SELECTION_SKIP_REASON = "ambiguous_selection"
