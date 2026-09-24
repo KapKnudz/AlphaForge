@@ -592,6 +592,37 @@ def record_job(
     conn.commit()
 
 
+def persist_evidence_selection_manifest(
+    conn: Any,
+    manifest: Any,
+    *,
+    packet_hash: str | None = None,
+    commit: bool = True,
+) -> None:
+    """Persist one immutable selection decision for audit and replay."""
+    payload = manifest.to_dict()
+    conn.execute(
+        """
+        INSERT INTO evidence_selection_manifests
+            (company_id, as_of, manifest_id, manifest_json,
+             report_rules_fingerprint, packet_hash)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, as_of, manifest_id) DO UPDATE SET
+            packet_hash=COALESCE(excluded.packet_hash, evidence_selection_manifests.packet_hash)
+        """,
+        (
+            manifest.company_id,
+            manifest.as_of,
+            manifest.manifest_id,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            manifest.report_rules_fingerprint,
+            packet_hash,
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
 def persist_evidence_diagnostic(
     conn: Any,
     *,
@@ -905,6 +936,149 @@ def complete_evidence_identity_documents(
         (company_id, as_of[:10] if as_of else None, as_of[:10] if as_of else None),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def load_evidence_selection_manifest(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    report_rules: dict[str, Any],
+    candidate_records: list[dict[str, Any]] | None = None,
+    publication_cutoff: str | None = None,
+    excluded_source_urls: set[str] | None = None,
+) -> Any:
+    """Read immutable evidence facts and derive the shared selection manifest."""
+    from datetime import date
+
+    from alphaforge.evidence.manifest import select_evidence_manifest
+    from alphaforge.evidence.mfn_taxonomy import RECOGNIZED_ATTACHMENT_TIERS
+    from alphaforge.evidence.report_rules import ReportHistoryWindow
+
+    history_values = report_rules.get("history_window")
+    if not isinstance(history_values, dict):
+        raise ValueError("selection manifest requires an active history window")
+    window = ReportHistoryWindow(**history_values)
+
+    def cutoff(kind: str) -> str:
+        years = (
+            window.annual_lookback_years if kind == "annual" else window.interim_lookback_years
+        )
+        value = date.fromisoformat(as_of[:10])
+        try:
+            return value.replace(year=value.year - years).isoformat()
+        except ValueError:
+            return value.replace(year=value.year - years, day=28).isoformat()
+
+    def metadata(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value:
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    audit_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT id AS document_id, source_url, title, published_at, ingested_lang,
+                   raw_metadata, report_rules_fingerprint, duplicate_of
+            FROM research_documents
+            WHERE company_id=? AND duplicate_of IS NULL
+            ORDER BY source_url, id
+            """,
+            (company_id,),
+        ).fetchall()
+    ]
+    for row in audit_rows:
+        raw = metadata(row.get("raw_metadata"))
+        row["report_kind"] = raw.get("report_kind")
+        row["attachment_tier"] = raw.get("attachment_tier")
+
+    effective_cutoff = (
+        min(as_of[:10], publication_cutoff[:10]) if publication_cutoff else as_of[:10]
+    )
+    excluded = excluded_source_urls or set()
+    placeholders = ",".join("?" for _ in RECOGNIZED_ATTACHMENT_TIERS)
+    packet_rows = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            SELECT d.id AS document_id, d.source_url, d.title, d.published_at,
+                   d.fetched_at, d.ingested_lang, d.raw_metadata,
+                   d.content_text AS release_body,
+                   a.id AS attachment_id, a.source_url AS attachment_url,
+                   a.content_type, a.byte_size, a.sha256 AS attachment_sha256,
+                   e.id AS extraction_id, e.extractor, e.text_checksum, e.page_count,
+                   e.pages_included, e.page_truncated, e.scanned, e.limitations
+            FROM research_documents d
+            JOIN research_attachments a ON a.document_id=d.id
+            JOIN document_extractions e ON e.document_id=d.id
+            WHERE d.company_id=? AND d.duplicate_of IS NULL
+              AND d.published_at IS NOT NULL
+              AND substr(d.published_at, 1, 10) <= ?
+              AND d.report_rules_fingerprint=?
+              AND json_extract(d.raw_metadata, '$.attachment_tier') IN ({placeholders})
+              AND substr(d.published_at, 1, 10) >= CASE
+                  WHEN json_extract(d.raw_metadata, '$.report_kind') = 'annual'
+                  THEN ? ELSE ? END
+              AND a.id=(SELECT MAX(active.id) FROM research_attachments active
+                        WHERE active.document_id=d.id)
+              AND EXISTS (
+                  SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
+              )
+            ORDER BY d.source_url, a.sha256, d.id
+            """,
+            (
+                company_id,
+                effective_cutoff,
+                report_rules["fingerprint"],
+                *RECOGNIZED_ATTACHMENT_TIERS,
+                cutoff("annual"),
+                cutoff("quarterly"),
+            ),
+        ).fetchall()
+    ]
+    packet_rows = [
+        row for row in packet_rows if str(row["source_url"]) not in excluded
+    ]
+    for row in packet_rows:
+        row["report_kind"] = metadata(row.get("raw_metadata")).get("report_kind")
+        row["pages"] = [
+            dict(page)
+            for page in conn.execute(
+                """
+                SELECT page_number, anchor, text, text_checksum
+                FROM document_pages WHERE extraction_id=? ORDER BY page_number
+                """,
+                (row["extraction_id"],),
+            ).fetchall()
+        ]
+        row["siblings"] = [
+            dict(sibling)
+            for sibling in conn.execute(
+                """
+                SELECT source_url, title, published_at, ingested_lang, duplicate_of, raw_metadata
+                FROM research_documents
+                WHERE duplicate_of=? AND published_at IS NOT NULL
+                  AND substr(published_at, 1, 10) <= ?
+                ORDER BY source_url
+                """,
+                (row["document_id"], effective_cutoff),
+            ).fetchall()
+        ]
+    return select_evidence_manifest(
+        company_id=company_id,
+        as_of=as_of,
+        report_rules=report_rules,
+        audit_history=audit_rows,
+        candidate_records=candidate_records,
+        packet_inputs=packet_rows,
+    )
 
 
 def _delete_demoted_evidence_children(conn: Any, document_id: int) -> None:

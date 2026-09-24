@@ -19,6 +19,7 @@ def test_manifest_completeness_and_packet_contents_share_retained_groups():
         },
         audit_history=(source,),
         cache=(source,),
+        reuse=({"attachment_sha256": "sha", "valid_as_of": "2026-09-20"},),
         deduplication=(
             {
                 "group_id": "period:quarterly:2026-07-31",
@@ -28,6 +29,7 @@ def test_manifest_completeness_and_packet_contents_share_retained_groups():
             },
         ),
         packet_inputs=(source,),
+        rejected=(),
         readiness_fallback={"documents_available": True, "current_packet_available": True},
     )
 

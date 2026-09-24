@@ -7,7 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOW = ROOT / "alphaforge/evidence/flow.py"
+MANIFEST = ROOT / "alphaforge/evidence/manifest.py"
 READINESS = ROOT / "alphaforge/core/gate/readiness.py"
+RANKING = ROOT / "alphaforge/cli/ranking_loader.py"
 
 
 def _function(tree: ast.AST, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -27,6 +29,16 @@ def _has_call(node: ast.AST, attribute: str) -> bool:
 
 
 def main() -> None:
+    manifest_text = MANIFEST.read_text(encoding="utf-8")
+    if "sqlite3" in manifest_text or "research_documents" in manifest_text:
+        raise SystemExit("pure manifest must not read raw persistence")
+    manifest_tree = ast.parse(manifest_text)
+    if not any(
+        isinstance(node, ast.FunctionDef) and node.name == "select_evidence_manifest"
+        for node in ast.walk(manifest_tree)
+    ):
+        raise SystemExit("manifest selection constructor is missing")
+
     flow_text = FLOW.read_text(encoding="utf-8")
     flow_tree = ast.parse(flow_text)
     packet_builder = _function(flow_tree, "build_frozen_evidence_packet")
@@ -36,6 +48,10 @@ def main() -> None:
         raise SystemExit("packet construction must consume manifest.packet_contents")
     if "manifest_completeness(" not in flow_text:
         raise SystemExit("flow completeness must consume manifest_completeness")
+
+    ranking_text = RANKING.read_text(encoding="utf-8")
+    if "alphaforge.db.repositories" in ranking_text or "research_documents" in ranking_text:
+        raise SystemExit("ranking evidence fallback must consume the manifest boundary")
 
     readiness_text = READINESS.read_text(encoding="utf-8")
     readiness_tree = ast.parse(readiness_text)

@@ -271,6 +271,20 @@ CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
     PRIMARY KEY (company_id, as_of)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS evidence_selection_manifests (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    as_of               TEXT NOT NULL,
+    manifest_id         TEXT NOT NULL,
+    manifest_json       TEXT NOT NULL CHECK (json_valid(manifest_json)),
+    report_rules_fingerprint TEXT NOT NULL,
+    packet_hash         TEXT,
+    recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (company_id, as_of, manifest_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_evidence_selection_manifests_current
+    ON evidence_selection_manifests(company_id, as_of, id DESC);
+
 CREATE TABLE IF NOT EXISTS jev_shadow_audit (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at           TEXT NOT NULL,

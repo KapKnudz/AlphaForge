@@ -21,7 +21,6 @@ ReadinessStatus = Literal[
     "valuation_blocked",
     "method_unsupported",
 ]
-EvidenceSubsectionStatus = Literal["available", "partial", "unavailable", "stale"]
 BlockerCategory = Literal["evidence", "valuation", "method"]
 
 
@@ -40,8 +39,6 @@ class AgentReadinessAssessment:
     blockers: tuple[ReadinessBlocker, ...] = ()
     limitations: tuple[ReadinessBlocker, ...] = ()
     forward_scenario_readiness: ForwardScenarioReadiness | None = None
-    liquidity_status: EvidenceSubsectionStatus = "unavailable"
-    ownership_status: EvidenceSubsectionStatus = "unavailable"
 
     @property
     def ready(self) -> bool:
@@ -155,9 +152,6 @@ class AgentReadinessGate:
             )
 
         forward_scenario_readiness = assess_forward_scenario_readiness(candidate)
-        ownership_liquidity = candidate.research_evidence.get("ownership_liquidity", {})
-        liquidity_status = _subsection_status(ownership_liquidity.get("liquidity"))
-        ownership_status = _subsection_status(ownership_liquidity.get("ownership"))
         return AgentReadinessAssessment(
             company_id=candidate.company_id,
             ticker=candidate.ticker,
@@ -165,8 +159,6 @@ class AgentReadinessGate:
             blockers=tuple(blockers),
             limitations=tuple(limitations),
             forward_scenario_readiness=forward_scenario_readiness,
-            liquidity_status=liquidity_status,
-            ownership_status=ownership_status,
         )
 
     def require_ready(self, candidates: list) -> tuple[AgentReadinessAssessment, ...]:
@@ -225,13 +217,6 @@ def _status(blockers: list[ReadinessBlocker]) -> ReadinessStatus:
 
 def _field(value, name):
     return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-
-
-def _subsection_status(value) -> EvidenceSubsectionStatus:
-    status = _field(value, "status")
-    if status in {"available", "partial", "unavailable", "stale"}:
-        return status
-    return "unavailable"
 
 
 def _positive(value) -> bool:

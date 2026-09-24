@@ -24,9 +24,11 @@ from alphaforge.db.repositories import (
     find_complete_evidence_document,
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
+    load_evidence_selection_manifest,
     mark_evidence_packets_unusable,
     persist_evidence_diagnostic,
     persist_evidence_document,
+    persist_evidence_selection_manifest,
     persist_evidence_packet,
     persist_evidence_sibling,
     persist_mfn_issuer_candidates,
@@ -43,7 +45,6 @@ from alphaforge.evidence.ingest import (
 from alphaforge.evidence.manifest import (
     EvidenceSelectionManifest,
     completeness as manifest_completeness,
-    load_evidence_selection_manifest,
     packet_contents,
 )
 from alphaforge.evidence.mfn_taxonomy import (
@@ -573,6 +574,8 @@ def build_frozen_evidence_packet(
         raise ValueError("cannot build evidence packet without active report-rule provenance")
     if not isinstance(history_values, dict):
         raise ValueError("cannot build evidence packet without an active history window")
+    if selection_manifest is not None and selection_manifest.report_rules_fingerprint != fingerprint:
+        raise ValueError("selection manifest does not match active report-rule provenance")
     if selection_manifest is None:
         selection_manifest = load_evidence_selection_manifest(
             conn,
@@ -701,6 +704,7 @@ def build_frozen_evidence_packet(
         "frozen": True,
         "evidence_rules_version": EVIDENCE_RULES_VERSION,
         "report_rules": active_rules,
+        "selection_manifest_id": selection_manifest.manifest_id,
         "company_id": int(company_id),
         "as_of": as_of[:10],
         "issuer": {
@@ -1982,6 +1986,10 @@ class OneCompanyEvidenceFlow:
             publication_cutoff=today.isoformat(),
             excluded_source_urls=unresolved_existing_source_urls,
         )
+        if not dry_run:
+            persist_evidence_selection_manifest(
+                self.conn, selection_manifest, commit=False
+            )
         result.completeness = manifest_completeness(selection_manifest)
         expected = {
             report_class: counts["expected"]
@@ -2128,6 +2136,12 @@ class OneCompanyEvidenceFlow:
             except Exception:
                 pass
         persist_evidence_packet(self.conn, company_id=company_id, as_of=as_of, packet=packet)
+        persist_evidence_selection_manifest(
+            self.conn,
+            selection_manifest,
+            packet_hash=packet["packet_hash"],
+            commit=False,
+        )
         result.status = "complete"
         result.packet = packet
         result.packet_hash = packet["packet_hash"]

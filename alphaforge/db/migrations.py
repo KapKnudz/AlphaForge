@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 8 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 9 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -181,6 +181,31 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 8)
         conn.commit()
         current = 8
+    if current < 9:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_selection_manifests (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                as_of               TEXT NOT NULL,
+                manifest_id         TEXT NOT NULL,
+                manifest_json       TEXT NOT NULL CHECK (json_valid(manifest_json)),
+                report_rules_fingerprint TEXT NOT NULL,
+                packet_hash         TEXT,
+                recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                UNIQUE (company_id, as_of, manifest_id)
+            ) STRICT
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_selection_manifests_current
+            ON evidence_selection_manifests(company_id, as_of, id DESC)
+            """
+        )
+        set_user_version(conn, 9)
+        conn.commit()
+        current = 9
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -294,6 +319,20 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             PRIMARY KEY (company_id, as_of)
         ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS evidence_selection_manifests (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            as_of               TEXT NOT NULL,
+            manifest_id         TEXT NOT NULL,
+            manifest_json       TEXT NOT NULL CHECK (json_valid(manifest_json)),
+            report_rules_fingerprint TEXT NOT NULL,
+            packet_hash         TEXT,
+            recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, as_of, manifest_id)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_evidence_selection_manifests_current
+            ON evidence_selection_manifests(company_id, as_of, id DESC);
         CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
             ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
         """
