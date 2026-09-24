@@ -44,6 +44,7 @@ from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,
     RECOGNIZED_ATTACHMENT_TIERS,
     document_type,
+    is_allowed_attachment_url,
     is_invitation_or_presentation,
     is_report,
     report_kind,
@@ -93,6 +94,11 @@ def download_pdf(
     request: Callable[..., Any] | None = None,
 ) -> PdfDownload:
     """Download one bounded PDF and validate headers plus magic bytes."""
+    if not is_allowed_attachment_url(source_url):
+        raise PdfAcquisitionError(
+            "invalid_attachment_host",
+            f"attachment host is not allowlisted: {source_url}",
+        )
     requester = request or request_with_retry
     try:
         response = requester(

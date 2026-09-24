@@ -1202,6 +1202,22 @@ def test_main_path_on_non_cision_host_is_not_main_tier():
     assert parsed["attachment_tier"] == "unresolved"
 
 
+def test_spoofed_host_in_query_string_yields_no_attachment():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://evil.example/?target=https://mb.cision.com/Main/1116/4356813/4130290.pdf">Annual report PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "none"
+
+
 def test_tied_report_labels_are_unresolved():
     html = """
     <html>

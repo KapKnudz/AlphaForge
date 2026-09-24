@@ -16,11 +16,11 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
-    ATTACHMENT_HOST_MARKERS,
     CIS_RELEASE_PATH_RE,
     NON_REPORT_ATTACHMENT_TERMS,
     REPORT_ATTACHMENT_TERMS,
     document_type,
+    is_allowed_attachment_url,
     is_invitation_or_presentation,
     is_report,
     report_kind,
@@ -329,8 +329,7 @@ def _parse_html(html: str) -> dict[str, Any]:
     pdf_links = [
         (href, text, css_class)
         for href, text, css_class in parser.attachment_links
-        if any(marker in href.lower() for marker in ATTACHMENT_HOST_MARKERS)
-        and ".pdf" in href.lower()
+        if is_allowed_attachment_url(href) and ".pdf" in href.lower()
     ]
     title = " ".join(" ".join(parser.h1_parts).split())
     page_is_report = bool(title) and is_report(title)

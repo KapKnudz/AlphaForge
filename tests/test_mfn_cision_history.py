@@ -100,7 +100,7 @@ def _report_article(slug_path, title, *, canonical_issuer="flow", tier=None, att
     if tier is not None:
         article["attachment_tier"] = tier
     if attachment:
-        article["attachment_url"] = "https://storage.mfn.test/flow/report.pdf"
+        article["attachment_url"] = "https://storage.mfn.se/flow/report.pdf"
     return article
 
 
@@ -238,7 +238,7 @@ def test_foreign_issuer_release_filtered_before_download():
         "source_url": "https://mfn.test/a/flow/interim-report-q1-2026",
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.test/flow/q1.pdf",
+        "attachment_url": "https://storage.mfn.se/flow/q1.pdf",
         "attachment_tier": "mfn-primary",
         "lang": "en",
     }
@@ -270,7 +270,7 @@ def test_stray_pdf_does_not_mark_lane_ready():
             "source_url": "https://mfn.test/a/flow/interim-report-q1-2026",
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.test/flow/q1.pdf",
+            "attachment_url": "https://storage.mfn.se/flow/q1.pdf",
             "lang": "en",
         },
         {
@@ -278,7 +278,7 @@ def test_stray_pdf_does_not_mark_lane_ready():
             "source_url": "https://mfn.test/a/flow/interim-report-q2-2026",
             "title": "Flow AB Interim Report Q2 2026",
             "published_at": "2026-08-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.test/flow/q2.pdf",
+            "attachment_url": "https://storage.mfn.se/flow/q2.pdf",
             "lang": "en",
         },
     ]
@@ -304,7 +304,7 @@ def test_reused_attachment_does_not_cover_different_report():
     """MFN-022: one PDF linked from two quarterly pages retains one group."""
     conn = _connection()
     company_id = _mapped_company(conn)
-    shared_pdf = "https://storage.mfn.test/flow/q1.pdf"
+    shared_pdf = "https://storage.mfn.se/flow/q1.pdf"
     q1 = _quarterly_article(
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
@@ -343,7 +343,7 @@ def test_invitation_only_feed_stays_no_evidence():
             "source_url": "https://mfn.test/a/flow/briefing-q2",
             "title": "Invitation to media briefing for Flow Q2 2026 report",
             "published_at": "2026-07-10T08:00:00Z",
-            "attachment_url": "https://storage.mfn.test/flow/briefing.pdf",
+            "attachment_url": "https://storage.mfn.se/flow/briefing.pdf",
             "lang": "en",
         }
     ]
@@ -580,7 +580,7 @@ def test_old_rule_packet_is_hash_valid_but_not_trusted_by_readiness():
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1.pdf",
+        "https://storage.mfn.se/flow/q1.pdf",
     )
     feed = [{"url": article["url"], "title": article["title"]}]
     with patch(
@@ -622,7 +622,7 @@ def test_complete_packet_loads_under_current_rules_fingerprint():
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1.pdf",
+        "https://storage.mfn.se/flow/q1.pdf",
     )
     feed = [{"url": article["url"], "title": article["title"]}]
     with patch(
@@ -655,13 +655,13 @@ def test_incomplete_rerun_with_old_rule_packet_fails_visibly():
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1.pdf",
+        "https://storage.mfn.se/flow/q1.pdf",
     )
     q2 = _quarterly_article(
         "interim-report-q2-2026",
         "Flow AB Interim Report Q2 2026",
         "2026-08-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q2.pdf",
+        "https://storage.mfn.se/flow/q2.pdf",
     )
     with patch(
         "alphaforge.evidence.flow.request_with_retry",
@@ -721,13 +721,13 @@ def test_same_rule_later_incomplete_run_tombstones_packet_and_replays_diagnostic
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1.pdf",
+        "https://storage.mfn.se/flow/q1.pdf",
     )
     q2 = _quarterly_article(
         "interim-report-q2-2026",
         "Flow AB Interim Report Q2 2026",
         "2026-08-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q2.pdf",
+        "https://storage.mfn.se/flow/q2.pdf",
     )
     with patch(
         "alphaforge.evidence.flow.request_with_retry",
@@ -775,7 +775,7 @@ def test_no_attachment_group_stays_in_expected_denominator():
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1.pdf",
+        "https://storage.mfn.se/flow/q1.pdf",
     )
     q2 = _quarterly_article(
         "interim-report-q2-2026",
@@ -835,7 +835,7 @@ def test_rerun_retained_diagnostics_reflect_persisted_sources():
         "interim-report-q1-2026",
         "Flow AB Interim Report Q1 2026",
         "2026-05-01T08:00:00Z",
-        "https://storage.mfn.test/flow/q1-en.pdf",
+        "https://storage.mfn.se/flow/q1-en.pdf",
     )
     article["attachment_tier"] = "mfn-primary"
     feed = [{"url": article["url"], "title": article["title"]}]

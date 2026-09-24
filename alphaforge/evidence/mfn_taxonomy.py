@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 CATEGORY_KEYWORDS_SE: dict[str, list[str]] = {
     "earnings": [
@@ -200,6 +201,18 @@ CIS_RELEASE_PATH_PATTERN: str = r"^/cis/a/([^/]+)/([^/]+)-([0-9a-fA-F]{8})$"
 CIS_RELEASE_PATH_RE = re.compile(CIS_RELEASE_PATH_PATTERN)
 # Hosts that serve genuine report PDFs behind MFN release pages.
 ATTACHMENT_HOST_MARKERS: tuple[str, ...] = ("storage.mfn.se/", "mb.cision.com/")
+ATTACHMENT_HOSTS: tuple[str, ...] = tuple(marker.rstrip("/") for marker in ATTACHMENT_HOST_MARKERS)
+
+
+def is_allowed_attachment_url(url: str) -> bool:
+    """Return True when an attachment URL targets a recognized host over HTTPS."""
+    try:
+        parts = urlsplit(str(url).strip())
+    except ValueError:
+        return False
+    if parts.scheme.lower() != "https":
+        return False
+    return (parts.hostname or "").lower() in ATTACHMENT_HOSTS
 
 
 def is_invitation_or_presentation(title: str) -> bool:
