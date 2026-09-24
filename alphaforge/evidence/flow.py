@@ -856,6 +856,15 @@ class EvidenceFlowResult:
         }
 
 
+def _is_same_source_revalidation(variant: dict[str, Any], existing: dict[str, Any] | None) -> bool:
+    if not existing:
+        return False
+    existing_source = str(existing.get("canonical_source_url") or "")
+    if not existing_source:
+        return False
+    return str(variant.get("source_url") or variant.get("url") or "") == existing_source
+
+
 def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
     """Read counted scraper drops without breaking fake scrapers in tests."""
     drain = getattr(scraper, method, None)
@@ -1926,6 +1935,9 @@ class OneCompanyEvidenceFlow:
                     suppressed_variants=siblings,
                     report_rules_fingerprint=active_rules["fingerprint"],
                 )
+                unresolved_existing_source_urls.discard(
+                    str(article.get("source_url") or article.get("url") or "")
+                )
 
             selected_existing = None
             if candidate_options:
@@ -1936,7 +1948,11 @@ class OneCompanyEvidenceFlow:
                         str(option[0].get("source_url") or option[0].get("url") or ""),
                     ),
                 )[0]
-                if selected_existing is not None:
+                if selected_existing is not None and not (
+                    not selected.get("_persisted_evidence")
+                    and selected.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
+                    and _is_same_source_revalidation(selected, selected_existing)
+                ):
                     if not any(variant.get("_persisted_evidence") for variant in variants):
                         result.skipped["attachment_reused_by_different_report"] = (
                             result.skipped.get("attachment_reused_by_different_report", 0) + 1
@@ -2035,10 +2051,12 @@ class OneCompanyEvidenceFlow:
             result.downloaded += 1
             covered_groups.add(group_index)
             for variant, candidate_download, candidate_extracted, existing in independent_options:
-                if (
-                    existing is not None
-                    or candidate_download is None
-                    or candidate_extracted is None
+                if candidate_download is None or candidate_extracted is None:
+                    continue
+                if existing is not None and not (
+                    not variant.get("_persisted_evidence")
+                    and variant.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
+                    and _is_same_source_revalidation(variant, existing)
                 ):
                     continue
                 independent_article = _prepare_selected_article(

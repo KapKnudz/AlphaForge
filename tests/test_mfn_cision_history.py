@@ -917,3 +917,46 @@ def test_dry_run_does_not_invalidate_stale_packets():
     assert result.status == "dry_run"
     remaining = conn.execute("SELECT COUNT(*) FROM evidence_packets").fetchone()[0]
     assert remaining == 1
+
+
+def test_legacy_attachment_revalidates_same_report():
+    from alphaforge.evidence.report_rules import current_report_rules_fingerprint
+
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.se/flow/q1.pdf",
+    )
+    feed = [{"url": article["url"], "title": article["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert first.status == "complete"
+    conn.execute(
+        "UPDATE research_documents SET report_rules_fingerprint=? WHERE company_id=?",
+        ("stale-fingerprint", company_id),
+    )
+    conn.commit()
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        second = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert second.status == "complete"
+    assert second.skipped.get("attachment_reused_by_different_report") is None
+    assert second.completeness == {"quarterly": {"expected": 1, "retained": 1}}
+    row = conn.execute(
+        "SELECT report_rules_fingerprint FROM research_documents WHERE company_id=?",
+        (company_id,),
+    ).fetchone()
+    assert row[0] == current_report_rules_fingerprint()
+    assert len(second.packet["sources"]) == 1
