@@ -1509,6 +1509,110 @@ def test_rerun_excludes_out_of_window_persisted_report_but_keeps_audit_row():
     assert rerun.completeness.get("quarterly", {}).get("retained", 0) == 0
 
 
+def test_feed_acquisition_failure_preserves_discovery_skips():
+    from alphaforge.providers.mfn.errors import MfnAcquisitionError
+
+    conn = _connection()
+    company_id = _mapped_company(conn)
+
+    class _FeedFailingScraper:
+        base_url = "https://mfn.test"
+
+        def __init__(self):
+            self._discovery_skips = {"non_report_title": 2}
+
+        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
+            raise MfnAcquisitionError("mfn_feed_fetch_failed", "feed down")
+
+        def drain_discovery_skips(self):
+            drained = dict(self._discovery_skips)
+            self._discovery_skips = {}
+            return drained
+
+        def drain_detail_skips(self):
+            return {}
+
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FeedFailingScraper(),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-21")
+    assert result.status == "acquisition_failed"
+    assert result.skipped == {"non_report_title": 2, "mfn_feed_fetch_failed": 1}
+
+
+def test_detail_acquisition_failure_preserves_discovery_skips():
+    from alphaforge.providers.mfn.errors import MfnAcquisitionError
+
+    conn = _connection()
+    company_id = _mapped_company(conn)
+
+    class _DetailFailingScraper:
+        base_url = "https://mfn.test"
+
+        def __init__(self):
+            self._discovery_skips = {"non_report_title": 2}
+            self._detail_skips = {"invitation_or_presentation_release": 1}
+
+        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
+            return (
+                [{"url": "https://mfn.test/a/flow/q1", "source_url": "https://mfn.test/a/flow/q1"}],
+                None,
+            )
+
+        def drain_discovery_skips(self):
+            drained = dict(self._discovery_skips)
+            self._discovery_skips = {}
+            return drained
+
+        def drain_detail_skips(self):
+            drained = dict(self._detail_skips)
+            self._detail_skips = {}
+            return drained
+
+        def scrape_details(self, entries, *, reports_only=True):
+            raise MfnAcquisitionError("mfn_detail_fetch_failed", "detail down")
+
+    result = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_DetailFailingScraper(),
+        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-21")
+    assert result.status == "acquisition_failed"
+    assert result.skipped == {
+        "non_report_title": 2,
+        "invitation_or_presentation_release": 1,
+        "mfn_detail_fetch_failed": 1,
+    }
+
+
+def test_ensure_schema_extensions_repairs_legacy_evidence_packets_shape():
+    import sqlite3
+
+    from alphaforge.db.migrations import _ensure_schema_extensions
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE research_documents (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        """CREATE TABLE evidence_packets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id INTEGER NOT NULL,
+            as_of TEXT NOT NULL,
+            packet_hash TEXT NOT NULL,
+            packet_json TEXT NOT NULL,
+            frozen_at TEXT NOT NULL DEFAULT 'x',
+            UNIQUE (company_id, as_of, packet_hash)
+        ) STRICT"""
+    )
+    _ensure_schema_extensions(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence_packets)").fetchall()}
+    assert {"usable", "report_rules_fingerprint", "report_rules_version", "usable_reason"} <= columns
+    indexes = [
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    ]
+    assert "idx_evidence_packets_usable" in indexes
+
+
 def test_discover_feed_page_two_uses_offset():
     """Legacy ``?page=2`` must map to offset/limit so Sunday backstop advances."""
     from alphaforge.providers.mfn.scraper import MfnScraper

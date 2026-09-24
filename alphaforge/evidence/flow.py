@@ -1352,12 +1352,16 @@ class OneCompanyEvidenceFlow:
                 if now.weekday() == 6:
                     feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
         except MfnAcquisitionError as exc:
+            acquisition_skips = _drain_skips(self.scraper, "drain_discovery_skips")
+            for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
+                acquisition_skips[reason] = acquisition_skips.get(reason, 0) + count
+            acquisition_skips[exc.code] = acquisition_skips.get(exc.code, 0) + 1
             return finish(
                 EvidenceFlowResult(
                     "acquisition_failed",
                     company_id,
                     mapping_status="mapped",
-                    skipped={exc.code: 1},
+                    skipped=acquisition_skips,
                     message=str(exc),
                 )
             )
@@ -1422,13 +1426,17 @@ class OneCompanyEvidenceFlow:
         try:
             details = self.scraper.scrape_details(unseen_feed, reports_only=True)
         except MfnAcquisitionError as exc:
+            detail_failure_skips = dict(early_skips)
+            for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
+                detail_failure_skips[reason] = detail_failure_skips.get(reason, 0) + count
+            detail_failure_skips[exc.code] = detail_failure_skips.get(exc.code, 0) + 1
             return finish(
                 EvidenceFlowResult(
                     "acquisition_failed",
                     company_id,
                     mapping_status="mapped",
                     discovered=len(unseen_feed),
-                    skipped={exc.code: 1},
+                    skipped=detail_failure_skips,
                     message=str(exc),
                 )
             )
