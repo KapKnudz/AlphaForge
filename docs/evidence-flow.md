@@ -118,7 +118,7 @@ of a green `complete`.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
-hash over the packet without its own `packet_hash`. Database-local document IDs
+hash over the packet without its own `packet_hash` and without the embedded `evidence_diagnostic` (acquisition counters, not evidence identity, so a rerun reusing the same PDFs keeps the same hash). Database-local document IDs
 are projected to stable source identities derived from source URL, publication
 date, and attachment checksum for hashing; stored IDs remain available for
 provenance and citations. Run timestamps (`issuer.verified_at`, per-source
