@@ -80,27 +80,36 @@ class AgentReadinessGate:
             )
 
         evidence = candidate.research_evidence or {}
-        packet = evidence.get("evidence_packet")
-        if not validate_frozen_packet(packet):
-            blockers.append(
-                ReadinessBlocker(
-                    code="frozen_evidence_packet_missing",
-                    category="evidence",
-                    message="a valid frozen point-in-time evidence packet is required",
+        if getattr(candidate, "evidence_lane", evidence.get("evidence_lane", False)):
+            packet = evidence.get("evidence_packet")
+            if not validate_frozen_packet(packet):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="frozen_evidence_packet_missing",
+                        category="evidence",
+                        message="a valid frozen point-in-time evidence packet is required",
+                    )
                 )
-            )
-        elif is_stale_evidence_packet(
-            packet, current_rules_fingerprint=current_report_rules_fingerprint()
-        ):
+            elif is_stale_evidence_packet(
+                packet, current_rules_fingerprint=current_report_rules_fingerprint()
+            ):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="stale_evidence_packet",
+                        category="evidence",
+                        message=(
+                            "frozen evidence packet was built under older evidence rules"
+                            f" (v{packet_rules_version(packet)}); rerun the evidence lane"
+                            f" for v{EVIDENCE_RULES_VERSION}"
+                        ),
+                    )
+                )
+        elif not evidence.get("documents"):
             blockers.append(
                 ReadinessBlocker(
-                    code="stale_evidence_packet",
+                    code="primary_evidence_missing",
                     category="evidence",
-                    message=(
-                        "frozen evidence packet was built under older evidence rules"
-                        f" (v{packet_rules_version(packet)}); rerun the evidence lane"
-                        f" for v{EVIDENCE_RULES_VERSION}"
-                    ),
+                    message="no textual company reports or releases are stored",
                 )
             )
 

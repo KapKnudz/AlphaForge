@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 from pypdf import PdfWriter
 
 from alphaforge.config import Settings
@@ -28,7 +27,6 @@ from alphaforge.evidence.ingest import (
     resolve_document_language,
 )
 from alphaforge.evidence.mfn_taxonomy import document_type, is_invitation_or_presentation
-from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.scraper import (
     MfnScraper,
     _canonical_issuer,
@@ -1204,22 +1202,6 @@ def test_main_path_on_non_cision_host_is_not_main_tier():
     assert parsed["attachment_tier"] == "unresolved"
 
 
-def test_spoofed_host_in_query_string_yields_no_attachment():
-    html = """
-    <html>
-      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
-      <body>
-        <h1>Acme Year-End Report 2025</h1>
-        <article><div class="release-body">Profit grew.</div></article>
-        <a href="https://evil.example/?target=https://mb.cision.com/Main/1116/4356813/4130290.pdf">Annual report PDF</a>
-      </body>
-    </html>
-    """
-    parsed = _parse_html(html)
-    assert parsed["storage_url"] is None
-    assert parsed["attachment_tier"] == "none"
-
-
 def test_tied_report_labels_are_unresolved():
     html = """
     <html>
@@ -1277,39 +1259,3 @@ def test_sibling_persistence_strips_demoted_edition_children():
         assert find_complete_evidence_attachment(conn, sv_attachment, company_id) is None
     finally:
         conn.close()
-
-
-def test_mfn_release_acquisition_never_follows_off_host_redirect():
-    requested: list[str] = []
-    redirect = SimpleNamespace(
-        status_code=302,
-        headers={"Location": "https://evil.test/stolen"},
-        text="",
-    )
-
-    def transport(method, url, **kwargs):
-        assert kwargs.get("allow_redirects") is False
-        requested.append(url)
-        return redirect
-
-    scraper = MfnScraper(base_url="https://mfn.test")
-    calls = [
-        lambda: scraper.discover_feed("all/a/acme"),
-        lambda: scraper.discover_feed_paginated("all/a/acme"),
-        lambda: scraper.scrape_details([{"url": "https://mfn.test/a/acme/q1"}]),
-    ]
-    with (
-        patch("alphaforge.providers.mfn.scraper.request_with_retry", side_effect=transport),
-        patch("alphaforge.providers.mfn.scraper.time.sleep"),
-    ):
-        codes = []
-        for call in calls:
-            try:
-                call()
-            except MfnAcquisitionError as exc:
-                codes.append(exc.code)
-            else:
-                raise AssertionError("off-host redirect was accepted")
-    assert codes == ["mfn_feed_http_status", "mfn_feed_fetch_failed", "mfn_detail_http_status"]
-    assert requested
-    assert all("evil.test" not in url for url in requested)

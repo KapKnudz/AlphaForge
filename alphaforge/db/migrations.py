@@ -294,6 +294,8 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             PRIMARY KEY (company_id, as_of)
         ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+            ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
         """
     )
     document_columns = {

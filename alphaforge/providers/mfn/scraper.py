@@ -16,11 +16,12 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_HOST_MARKERS,
+    ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
     CIS_RELEASE_PATH_RE,
     NON_REPORT_ATTACHMENT_TERMS,
     REPORT_ATTACHMENT_TERMS,
     document_type,
-    is_allowed_attachment_url,
     is_invitation_or_presentation,
     is_report,
     report_kind,
@@ -50,6 +51,13 @@ _HTML_VOID_TAGS = frozenset(
         "wbr",
     }
 )
+# Rule inputs live authoritatively in mfn_taxonomy (leaf module) so the
+# deterministic core can fingerprint them without importing providers.
+# These aliases preserve the internal uses below.
+_REPORT_ATTACHMENT_TERMS = REPORT_ATTACHMENT_TERMS
+_NON_REPORT_ATTACHMENT_TERMS = NON_REPORT_ATTACHMENT_TERMS
+_CIS_RELEASE_PATH_RE = CIS_RELEASE_PATH_RE
+_ATTACHMENT_HOST_MARKERS = ATTACHMENT_HOST_MARKERS
 _SWEDISH_MONTHS = {
     "januari": "january",
     "februari": "february",
@@ -258,18 +266,22 @@ class _MfnHtmlParser(HTMLParser):
 
 def _attachment_score(url: str, label: str = "") -> int:
     name = f"{unquote(urlsplit(url).path)} {label}".lower()
-    if any(term in name for term in NON_REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
         return 0
-    if any(term in name for term in REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
         return 2
     return 1
 
 
+# ATTACHMENT_TIERS is imported above from mfn_taxonomy (authoritative
+# definition) and remains available as scraper.ATTACHMENT_TIERS.
+
+
 def _label_report_score(label: str) -> int:
     name = label.lower()
-    if any(term in name for term in NON_REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
         return 0
-    if any(term in name for term in REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
         return 2
     return 1
 
@@ -329,7 +341,8 @@ def _parse_html(html: str) -> dict[str, Any]:
     pdf_links = [
         (href, text, css_class)
         for href, text, css_class in parser.attachment_links
-        if is_allowed_attachment_url(href) and ".pdf" in href.lower()
+        if any(marker in href.lower() for marker in _ATTACHMENT_HOST_MARKERS)
+        and ".pdf" in href.lower()
     ]
     title = " ".join(" ".join(parser.h1_parts).split())
     page_is_report = bool(title) and is_report(title)
@@ -381,13 +394,13 @@ def _is_mfn_release_url(url: str, base_url: str) -> bool:
     if path.startswith("/cis/a/"):
         # Cision-distribution publishing: only the stable
         # /cis/a/<issuer>/<slug>-<8hex> shape, never a bare prefix.
-        return CIS_RELEASE_PATH_RE.match(path) is not None
+        return _CIS_RELEASE_PATH_RE.match(path) is not None
     return path.startswith(("/a/", "/cision/"))
 
 
 def _cis_release_issuer(url: str) -> str | None:
     """Return the issuer segment of a ``/cis/a/`` release URL, else None."""
-    match = CIS_RELEASE_PATH_RE.match(urlsplit(url).path)
+    match = _CIS_RELEASE_PATH_RE.match(urlsplit(url).path)
     return match.group(1) if match else None
 
 
@@ -527,9 +540,7 @@ class MfnScraper:
         url = f"{self.base_url}/{mfn_slug.lstrip('/')}"
         time.sleep(1.0)
         try:
-            resp = request_with_retry(
-                "GET", url, timeout=30, max_retries=MAX_RETRIES, allow_redirects=False
-            )
+            resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
         except Exception as exc:
             raise MfnAcquisitionError(
                 "mfn_feed_fetch_failed", f"MFN feed request failed: {exc}"
@@ -595,7 +606,6 @@ class MfnScraper:
                 timeout=30,
                 max_retries=MAX_RETRIES,
                 headers={"Accept": "application/json"},
-                allow_redirects=False,
             )
         except Exception:
             resp = None  # type: ignore[assignment]
@@ -650,9 +660,7 @@ class MfnScraper:
         for url in (html_url, fragment_url):
             time.sleep(0.5)
             try:
-                resp = request_with_retry(
-                    "GET", url, timeout=30, max_retries=MAX_RETRIES, allow_redirects=False
-                )
+                resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
             except Exception:
                 continue
             if resp.status_code != 200:
@@ -719,9 +727,7 @@ class MfnScraper:
                 continue
             time.sleep(1.0)
             try:
-                resp = request_with_retry(
-                    "GET", url, timeout=60, max_retries=MAX_RETRIES, allow_redirects=False
-                )
+                resp = request_with_retry("GET", url, timeout=60, max_retries=MAX_RETRIES)
             except Exception as exc:
                 raise MfnAcquisitionError(
                     "mfn_detail_fetch_failed", f"MFN detail request failed: {exc}"

@@ -19,19 +19,11 @@ def request_with_retry(
     headers: dict[str, str] | None = None,
     timeout: int = 60,
     max_retries: int = MAX_RETRIES,
-    allow_redirects: bool = True,
 ) -> requests.Response:
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.request(
-                method,
-                url,
-                params=params,
-                headers=headers,
-                timeout=timeout,
-                allow_redirects=allow_redirects,
-            )
+            resp = requests.request(method, url, params=params, headers=headers, timeout=timeout)
             # Honor Retry-After on 429/503
             if resp.status_code in (429, 503):
                 retry_after = resp.headers.get("Retry-After")

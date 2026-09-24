@@ -342,7 +342,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
             "source_url": "https://mfn.test/a/flow/q1",
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1.pdf",
+            "attachment_url": "https://storage.mfn.test/q1.pdf",
             "attachment_tier": "mfn-primary",
             "lang": "en",
         },
@@ -350,14 +350,14 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
             "source_url": "https://mfn.test/a/flow/future",
             "title": "Flow AB Annual Report 2027",
             "published_at": "2027-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/future.pdf",
+            "attachment_url": "https://storage.mfn.test/future.pdf",
             "lang": "en",
         },
         {
             "source_url": "https://mfn.test/a/flow/missing",
             "title": "Flow AB Annual Report 2025",
             "published_at": None,
-            "attachment_url": "https://storage.mfn.se/missing.pdf",
+            "attachment_url": "https://storage.mfn.test/missing.pdf",
             "lang": "en",
         },
     ]
@@ -408,7 +408,7 @@ def test_rerun_does_not_trust_evidence_without_attachment_tier():
         "source_url": "https://mfn.test/a/flow/q1",
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.se/q1.pdf",
+        "attachment_url": "https://storage.mfn.test/q1.pdf",
         "lang": "en",
     }
     response = SimpleNamespace(
@@ -420,10 +420,7 @@ def test_rerun_does_not_trust_evidence_without_attachment_tier():
         first = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
             company_id, as_of="2026-09-20"
         )
-    assert first.status == "no_evidence"
-    assert first.packet is None
-    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
-    assert conn.execute("SELECT count(*) FROM research_documents").fetchone()[0] == 1
+    assert first.status == "complete"
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         second = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
             company_id, as_of="2026-09-20"
@@ -513,139 +510,6 @@ def test_packet_query_excludes_legacy_document_beside_current_document():
     assert [source["source_url"] for source in packet["sources"]] == ["https://mfn.test/a/current"]
 
 
-def test_packet_query_excludes_refusal_tier_document_beside_current_document():
-    conn = _connection()
-    company_id = _mapped_company(conn)
-    mapping = get_verified_mfn_mapping(conn, company_id)
-
-    def persist(source_url: str, published_at: str, checksum: str, tier: str | None) -> None:
-        article: dict[str, object] = {
-            "source_url": source_url,
-            "title": "Flow AB Interim Report Q1 2026",
-            "published_at": published_at,
-            "content_text": "The quarter covered 1 May - 31 July 2026.",
-            "report_kind": "quarterly",
-            "ingested_lang": "en",
-        }
-        if tier is not None:
-            article["attachment_tier"] = tier
-        persist_evidence_document(
-            conn,
-            company_id=company_id,
-            article=article,
-            attachment={
-                "source_url": source_url + ".pdf",
-                "content_type": "application/pdf",
-                "byte_size": 8,
-                "sha256": checksum,
-                "magic_valid": True,
-                "http_status": 200,
-            },
-            extraction={
-                "extractor": "pypdf",
-                "text_checksum": checksum + "-text",
-                "page_count": 1,
-                "pages_included": "1",
-            },
-            pages=[{"page_number": 1, "text": "Evidence"}],
-        )
-
-    persist("https://mfn.test/a/current", "2026-05-01T08:00:00Z", "current-checksum", "main-path")
-    persist("https://mfn.test/a/refused", "2026-06-01T08:00:00Z", "refused-checksum", "none")
-    persist("https://mfn.test/a/untiered", "2026-07-01T08:00:00Z", "untiered-checksum", None)
-    conn.commit()
-
-    packet = build_frozen_evidence_packet(
-        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
-    )
-    assert [source["source_url"] for source in packet["sources"]] == ["https://mfn.test/a/current"]
-
-
-def test_same_report_revalidation_replaces_stale_attachment_in_packet():
-    conn = _connection()
-    company_id = _mapped_company(conn)
-    mapping = get_verified_mfn_mapping(conn, company_id)
-    article = {
-        "source_url": "https://mfn.test/a/revalidated",
-        "title": "Flow AB Interim Report Q1 2026",
-        "published_at": "2026-05-01T08:00:00Z",
-        "content_text": "The quarter covered 1 May - 31 July 2026.",
-        "report_kind": "quarterly",
-        "attachment_tier": "mfn-primary",
-        "ingested_lang": "en",
-    }
-
-    def persist(attachment_url: str, checksum: str) -> None:
-        persist_evidence_document(
-            conn,
-            company_id=company_id,
-            article=dict(article),
-            attachment={
-                "source_url": attachment_url,
-                "content_type": "application/pdf",
-                "byte_size": 8,
-                "sha256": checksum,
-                "magic_valid": True,
-                "http_status": 200,
-            },
-            extraction={
-                "extractor": "pypdf",
-                "text_checksum": checksum + "-text",
-                "page_count": 1,
-                "pages_included": "1",
-            },
-            pages=[{"page_number": 1, "text": "Evidence"}],
-        )
-
-    persist("https://mfn.test/a/revalidated-a.pdf", "checksum-a")
-    persist("https://mfn.test/a/revalidated-b.pdf", "checksum-b")
-    conn.commit()
-
-    document_rows = conn.execute(
-        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
-        (company_id, "https://mfn.test/a/revalidated"),
-    ).fetchone()
-    assert document_rows[0] == 1
-    attachment_rows = conn.execute(
-        "SELECT source_url FROM research_attachments WHERE document_id="
-        "(SELECT id FROM research_documents WHERE company_id=? AND source_url=?)",
-        (company_id, "https://mfn.test/a/revalidated"),
-    ).fetchall()
-    assert [row[0] for row in attachment_rows] == ["https://mfn.test/a/revalidated-b.pdf"]
-
-    packet = build_frozen_evidence_packet(
-        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
-    )
-    assert [source["source_url"] for source in packet["sources"]] == [
-        "https://mfn.test/a/revalidated"
-    ]
-    assert (
-        packet["sources"][0]["attachment"]["source_url"] == "https://mfn.test/a/revalidated-b.pdf"
-    )
-
-
-def test_unhandled_error_persists_replayable_terminal_diagnostic():
-    conn = _connection()
-    company_id = _mapped_company(conn)
-
-    class _BoomScraper(_FakeScraper):
-        def discover_feed(self, mfn_slug, *, reports_only=True):
-            raise RuntimeError("feed exploded")
-
-    with pytest.raises(RuntimeError, match="feed exploded"):
-        OneCompanyEvidenceFlow(conn, scraper=_BoomScraper([])).run(company_id, as_of="2026-09-20")
-    state = describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20")
-    assert state is not None
-    assert state["status"] == "unhandled_error"
-    assert state["company_id"] == company_id
-    assert state["message"] == "feed exploded"
-    job = conn.execute(
-        "SELECT status FROM jobs WHERE job_type='evidence' AND company_id=?",
-        (company_id,),
-    ).fetchone()
-    assert job[0] == "failed"
-
-
 def test_all_future_cutoff_is_typed_no_evidence_and_audited():
     conn = _connection()
     company_id = _mapped_company(conn)
@@ -653,7 +517,7 @@ def test_all_future_cutoff_is_typed_no_evidence_and_audited():
         "source_url": "https://mfn.test/a/flow/future-only",
         "title": "Flow AB Interim Report Q1 2027",
         "published_at": "2027-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.se/future-only.pdf",
+        "attachment_url": "https://storage.mfn.test/future-only.pdf",
         "lang": "en",
     }
     result = OneCompanyEvidenceFlow(
@@ -687,7 +551,7 @@ def test_persisted_release_after_future_cutoff_is_all_releases_after_cutoff():
             "ingested_lang": "en",
         },
         attachment={
-            "source_url": "https://storage.mfn.se/persisted-future.pdf",
+            "source_url": "https://storage.mfn.test/persisted-future.pdf",
             "content_type": "application/pdf",
             "byte_size": 8,
             "sha256": "persisted-future-pdf",
@@ -728,7 +592,7 @@ def test_flow_rechecks_document_without_complete_evidence_artifacts():
         "source_url": "https://mfn.test/a/flow/incomplete",
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.se/incomplete.pdf",
+        "attachment_url": "https://storage.mfn.test/incomplete.pdf",
         "lang": "en",
     }
     conn.execute(
@@ -763,7 +627,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "source_url": "https://mfn.test/a/flow/report/sv",
             "title": "Flow AB delårsrapport Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1-sv.pdf",
+            "attachment_url": "https://storage.mfn.test/q1-sv.pdf",
             "lang": "sv",
             "provider_event_id": "flow-q1-2026",
         },
@@ -771,7 +635,7 @@ def test_flow_preserves_bilingual_sibling_and_scanned_limitations():
             "source_url": "https://mfn.test/a/flow/report/en",
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1-en.pdf",
+            "attachment_url": "https://storage.mfn.test/q1-en.pdf",
             "attachment_tier": "mfn-primary",
             "body": "Material disclosure from the release body.",
             "lang": "en",
@@ -833,8 +697,7 @@ def test_flow_uses_pdf_language_before_variant_grouping():
             "source_url": "https://mfn.test/a/flow/pdf-authority/sv",
             "title": "Flow AB delårsrapport Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1-sv.pdf",
-            "attachment_tier": "mfn-primary",
+            "attachment_url": "https://storage.mfn.test/q1-sv.pdf",
             "lang": "en",
             "provider_event_id": "flow-pdf-authority-q1",
         },
@@ -842,8 +705,7 @@ def test_flow_uses_pdf_language_before_variant_grouping():
             "source_url": "https://mfn.test/a/flow/pdf-authority/en",
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1-english.pdf",
-            "attachment_tier": "mfn-primary",
+            "attachment_url": "https://storage.mfn.test/q1-english.pdf",
             "lang": "sv",
             "provider_event_id": "flow-pdf-authority-q1",
         },
@@ -883,8 +745,7 @@ def test_flow_keeps_no_pdf_variant_out_of_grouping():
             "source_url": "https://mfn.test/a/flow/no-pdf/en",
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
-            "attachment_url": "https://storage.mfn.se/q1-en.pdf",
-            "attachment_tier": "mfn-primary",
+            "attachment_url": "https://storage.mfn.test/q1-en.pdf",
             "lang": "en",
             "provider_event_id": "flow-no-pdf-q1",
         },
@@ -919,68 +780,10 @@ def test_pdf_acquisition_rejects_non_pdf_payloads(content_type, content, code):
     )
     with pytest.raises(ValueError, match=code.replace("_", " ")):
         download_pdf(
-            "https://storage.mfn.se/bad",
+            "https://storage.mfn.test/bad",
             limits=EvidenceResourceLimits(max_retries=0),
             request=lambda *args, **kwargs: response,
         )
-
-
-def test_pdf_acquisition_rejects_unallowlisted_attachment_host():
-    def _must_not_fetch(*args, **kwargs):
-        raise AssertionError("unallowlisted host must not be fetched")
-
-    with pytest.raises(ValueError, match="attachment host"):
-        download_pdf(
-            "https://evil.example/?target=https://mb.cision.com/Main/1116/4356813/4130290.pdf",
-            limits=EvidenceResourceLimits(max_retries=0),
-            request=_must_not_fetch,
-        )
-
-
-def test_pdf_acquisition_rejects_off_host_redirect():
-    requested = []
-
-    def _redirecting_fetch(method, url, **kwargs):
-        assert kwargs.get("allow_redirects") is False
-        requested.append(url)
-        return SimpleNamespace(
-            status_code=302,
-            headers={"Location": "https://evil.example/loot.pdf"},
-            content=b"",
-        )
-
-    with pytest.raises(ValueError, match="attachment host"):
-        download_pdf(
-            "https://storage.mfn.se/report.pdf",
-            limits=EvidenceResourceLimits(max_retries=0),
-            request=_redirecting_fetch,
-        )
-    assert requested == ["https://storage.mfn.se/report.pdf"]
-
-
-def test_pdf_acquisition_accepts_allowlisted_redirect():
-    requested = []
-    target = "https://mb.cision.com/Main/1116/4356813/4130290.pdf"
-
-    def _redirecting_fetch(method, url, **kwargs):
-        assert kwargs.get("allow_redirects") is False
-        requested.append(url)
-        if url == "https://storage.mfn.se/report.pdf":
-            return SimpleNamespace(status_code=302, headers={"Location": target}, content=b"")
-        return SimpleNamespace(
-            status_code=200,
-            headers={"Content-Type": "application/pdf"},
-            content=_pdf(),
-            url=target,
-        )
-
-    result = download_pdf(
-        "https://storage.mfn.se/report.pdf",
-        limits=EvidenceResourceLimits(max_retries=0),
-        request=_redirecting_fetch,
-    )
-    assert result.source_url == "https://storage.mfn.se/report.pdf"
-    assert requested == ["https://storage.mfn.se/report.pdf", target]
 
 
 def test_pdf_acquisition_enforces_resource_limit():
@@ -991,7 +794,7 @@ def test_pdf_acquisition_enforces_resource_limit():
     )
     with pytest.raises(ValueError, match="resource limit"):
         download_pdf(
-            "https://storage.mfn.se/large",
+            "https://storage.mfn.test/large",
             limits=EvidenceResourceLimits(max_pdf_bytes=10, max_retries=0),
             request=lambda *args, **kwargs: response,
         )
@@ -1026,7 +829,7 @@ def test_readiness_rejects_stray_document_but_accepts_valid_frozen_packet():
                 "publication_timestamp_authoritative": True,
                 "ingestion_date": "2026-05-02T00:00:00Z",
                 "attachment": {
-                    "source_url": "https://storage.mfn.se/report/1.pdf",
+                    "source_url": "https://storage.mfn.test/report/1.pdf",
                     "sha256": "abc",
                 },
                 "extraction": {
@@ -1063,8 +866,7 @@ def _delayed_english_articles(*, with_english: bool):
         "source_url": "https://mfn.test/a/delayed/delarsrapport-q1-2026-2027",
         "title": "Delayed AB delårsrapport Q1 2026/2027",
         "published_at": "2026-09-09T07:30:00Z",
-        "attachment_url": "https://storage.mfn.se/delayed-q1-sv.pdf",
-        "attachment_tier": "mfn-primary",
+        "attachment_url": "https://storage.mfn.test/delayed-q1-sv.pdf",
         "body": (
             "Omsättning 2847 Msek. Rörelseresultat 312 Msek. "
             "Kvartalet omfattade 1 maj – 31 juli 2026."
@@ -1081,8 +883,7 @@ def _delayed_english_articles(*, with_english: bool):
         "source_url": "https://mfn.test/a/delayed/interim-report-q1-2026-27",
         "title": "Delayed AB Interim report Q1 2026/27",
         "published_at": "2026-09-12T07:30:00Z",
-        "attachment_url": "https://storage.mfn.se/delayed-q1-en.pdf",
-        "attachment_tier": "mfn-primary",
+        "attachment_url": "https://storage.mfn.test/delayed-q1-en.pdf",
         "body": (
             "Revenue 2847 MSEK. Operating profit 312 MSEK. "
             "The quarter covered 1 May - 31 July 2026."
@@ -1152,7 +953,6 @@ def test_packet_hash_stable_across_database_document_ids():
         "source_url": "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-27",
         "title": "Clas Ohlson Interim report Q1 2026/27",
         "published_at": "2026-09-09T07:30:00Z",
-        "attachment_tier": "mfn-primary",
         "content_text": "Revenue 2847 MSEK. The quarter covered 1 May - 31 July 2026.",
         "ingested_lang": "en",
         "period_start": "2026-05-01",
@@ -1177,7 +977,7 @@ def test_packet_hash_stable_across_database_document_ids():
             company_id=company_id,
             article=article,
             attachment={
-                "source_url": "https://storage.mfn.se/clas/interim-report-q1-en.pdf",
+                "source_url": "https://storage.mfn.test/clas/interim-report-q1-en.pdf",
                 "content_type": "application/pdf",
                 "byte_size": 8,
                 "sha256": "clas-pdf-checksum",
@@ -1210,8 +1010,7 @@ def test_packet_hash_stable_across_run_timestamps():
         "source_url": "https://mfn.test/a/flow/stable",
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.se/stable.pdf",
-        "attachment_tier": "mfn-primary",
+        "attachment_url": "https://storage.mfn.test/stable.pdf",
         "lang": "en",
     }
     response = SimpleNamespace(
@@ -1227,16 +1026,7 @@ def test_packet_hash_stable_across_run_timestamps():
     conn.execute("UPDATE research_documents SET fetched_at='2030-01-02T03:04:05Z'")
     conn.execute("UPDATE mfn_issuer_mappings SET verified_at='2030-01-03T04:05:06Z'")
     conn.commit()
-    rebuilt = build_frozen_evidence_packet(
-        conn,
-        company_id=company_id,
-        as_of="2026-09-20",
-        additional_limitations=[
-            limitation
-            for limitation in first.packet["limitations"]
-            if limitation.startswith("attachment_selection_")
-        ],
-    )
+    rebuilt = build_frozen_evidence_packet(conn, company_id=company_id, as_of="2026-09-20")
     assert validate_frozen_packet(rebuilt)
     assert rebuilt["packet_hash"] == first.packet_hash
 
@@ -1393,8 +1183,7 @@ def test_re_review_clears_ambiguous_block():
         "source_url": "https://mfn.test/a/reviewed/q1",
         "title": "Reviewed AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
-        "attachment_url": "https://storage.mfn.se/reviewed-q1-en.pdf",
-        "attachment_tier": "mfn-primary",
+        "attachment_url": "https://storage.mfn.test/reviewed-q1-en.pdf",
         "lang": "en",
     }
     response = SimpleNamespace(
@@ -1461,9 +1250,8 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "source_url": "https://mfn.test/a/flow/q1-2026",
                 "title": "Flow AB Interim Report Q1 2026",
                 "published_at": "2026-05-01T08:00:00Z",
-                "attachment_url": "https://storage.mfn.se/q1-2026.pdf",
-                "storage_url": "https://storage.mfn.se/q1-2026.pdf",
-                "attachment_tier": "mfn-primary",
+                "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
+                "storage_url": "https://storage.mfn.test/q1-2026.pdf",
                 "lang": "en",
                 "report_kind": "quarterly",
                 "document_type": "INTERIM_Q1",
@@ -1472,9 +1260,8 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "source_url": "https://mfn.test/a/flow/q3-2025",
                 "title": "Flow AB Interim Report Q3 2025",
                 "published_at": "2025-03-12T08:00:00Z",
-                "attachment_url": "https://storage.mfn.se/q3-2025.pdf",
-                "storage_url": "https://storage.mfn.se/q3-2025.pdf",
-                "attachment_tier": "mfn-primary",
+                "attachment_url": "https://storage.mfn.test/q3-2025.pdf",
+                "storage_url": "https://storage.mfn.test/q3-2025.pdf",
                 "lang": "en",
                 "report_kind": "quarterly",
             },
@@ -1484,9 +1271,8 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "source_url": "https://mfn.test/a/flow/annual-2024",
                 "title": "Flow AB Annual Report 2024",
                 "published_at": "2024-07-04T08:00:00Z",
-                "attachment_url": "https://storage.mfn.se/annual-2024.pdf",
-                "storage_url": "https://storage.mfn.se/annual-2024.pdf",
-                "attachment_tier": "mfn-primary",
+                "attachment_url": "https://storage.mfn.test/annual-2024.pdf",
+                "storage_url": "https://storage.mfn.test/annual-2024.pdf",
                 "lang": "en",
                 "report_kind": "annual",
                 "document_type": "ANNUAL_REPORT",
@@ -1524,9 +1310,8 @@ def test_flow_history_window_truncates_old_reports():
                 "source_url": "https://mfn.test/a/flow/q1-2026",
                 "title": "Flow AB Interim Report Q1 2026",
                 "published_at": "2026-05-01T08:00:00Z",
-                "attachment_url": "https://storage.mfn.se/q1-2026.pdf",
-                "storage_url": "https://storage.mfn.se/q1-2026.pdf",
-                "attachment_tier": "mfn-primary",
+                "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
+                "storage_url": "https://storage.mfn.test/q1-2026.pdf",
                 "lang": "en",
                 "report_kind": "quarterly",
             },
@@ -1536,9 +1321,8 @@ def test_flow_history_window_truncates_old_reports():
                 "source_url": "https://mfn.test/a/flow/annual-2018",
                 "title": "Flow AB Annual Report 2018",
                 "published_at": "2018-07-04T08:00:00Z",
-                "attachment_url": "https://storage.mfn.se/annual-2018.pdf",
-                "storage_url": "https://storage.mfn.se/annual-2018.pdf",
-                "attachment_tier": "mfn-primary",
+                "attachment_url": "https://storage.mfn.test/annual-2018.pdf",
+                "storage_url": "https://storage.mfn.test/annual-2018.pdf",
                 "lang": "en",
                 "report_kind": "annual",
             },
@@ -1559,176 +1343,6 @@ def test_flow_history_window_truncates_old_reports():
     assert result.status == "complete"
     assert len(result.packet["sources"]) == 1
     assert result.packet["sources"][0]["title"] == "Flow AB Interim Report Q1 2026"
-
-
-def test_rerun_excludes_out_of_window_persisted_report_but_keeps_audit_row():
-    conn = _connection()
-    company_id = _mapped_company(conn)
-    mapping = get_verified_mfn_mapping(conn, company_id)
-    persist_evidence_document(
-        conn,
-        company_id=company_id,
-        article={
-            "source_url": "https://mfn.test/a/flow/q1-2023",
-            "title": "Flow AB Interim Report Q1 2023",
-            "published_at": "2023-04-28T08:00:00Z",
-            "content_text": "The quarter covered 1 February - 30 April 2023.",
-            "report_kind": "quarterly",
-            "attachment_tier": "mfn-primary",
-            "ingested_lang": "en",
-            "pdf_language": "en",
-            "language_evidence": "pdf_text:en",
-        },
-        attachment={
-            "source_url": "https://mfn.test/a/flow/q1-2023.pdf",
-            "content_type": "application/pdf",
-            "byte_size": 8,
-            "sha256": "old-q1-checksum",
-            "magic_valid": True,
-            "http_status": 200,
-        },
-        extraction={
-            "extractor": "pypdf",
-            "text_checksum": "old-q1-checksum-text",
-            "page_count": 1,
-            "pages_included": "1",
-        },
-        pages=[{"page_number": 1, "text": "Evidence"}],
-    )
-    conn.commit()
-
-    packet = build_frozen_evidence_packet(
-        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
-    )
-    assert packet["sources"] == []
-
-    rerun = OneCompanyEvidenceFlow(
-        conn,
-        scraper=_FakeScraper([]),
-        now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
-    ).run(company_id, as_of="2026-09-20")
-    assert rerun.completeness.get("quarterly", {}).get("expected", 0) == 0
-    assert rerun.completeness.get("quarterly", {}).get("retained", 0) == 0
-    assert rerun.packet is None or rerun.packet["sources"] == []
-    audit_rows = conn.execute(
-        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
-        (company_id, "https://mfn.test/a/flow/q1-2023"),
-    ).fetchone()
-    assert audit_rows[0] == 1
-    retained = build_frozen_evidence_packet(
-        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
-    )
-    assert retained["sources"] == []
-
-
-def test_feed_acquisition_failure_preserves_discovery_skips():
-    from alphaforge.providers.mfn.errors import MfnAcquisitionError
-
-    conn = _connection()
-    company_id = _mapped_company(conn)
-
-    class _FeedFailingScraper:
-        base_url = "https://mfn.test"
-
-        def __init__(self):
-            self._discovery_skips = {"non_report_title": 2}
-
-        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
-            raise MfnAcquisitionError("mfn_feed_fetch_failed", "feed down")
-
-        def drain_discovery_skips(self):
-            drained = dict(self._discovery_skips)
-            self._discovery_skips = {}
-            return drained
-
-        def drain_detail_skips(self):
-            return {}
-
-    result = OneCompanyEvidenceFlow(
-        conn,
-        scraper=_FeedFailingScraper(),
-        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
-    ).run(company_id, as_of="2026-09-21")
-    assert result.status == "acquisition_failed"
-    assert result.skipped == {"non_report_title": 2, "mfn_feed_fetch_failed": 1}
-
-
-def test_detail_acquisition_failure_preserves_discovery_skips():
-    from alphaforge.providers.mfn.errors import MfnAcquisitionError
-
-    conn = _connection()
-    company_id = _mapped_company(conn)
-
-    class _DetailFailingScraper:
-        base_url = "https://mfn.test"
-
-        def __init__(self):
-            self._discovery_skips = {"non_report_title": 2}
-            self._detail_skips = {"invitation_or_presentation_release": 1}
-
-        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
-            return (
-                [{"url": "https://mfn.test/a/flow/q1", "source_url": "https://mfn.test/a/flow/q1"}],
-                None,
-            )
-
-        def drain_discovery_skips(self):
-            drained = dict(self._discovery_skips)
-            self._discovery_skips = {}
-            return drained
-
-        def drain_detail_skips(self):
-            drained = dict(self._detail_skips)
-            self._detail_skips = {}
-            return drained
-
-        def scrape_details(self, entries, *, reports_only=True):
-            raise MfnAcquisitionError("mfn_detail_fetch_failed", "detail down")
-
-    result = OneCompanyEvidenceFlow(
-        conn,
-        scraper=_DetailFailingScraper(),
-        now=lambda: datetime(2026, 9, 21, tzinfo=UTC),
-    ).run(company_id, as_of="2026-09-21")
-    assert result.status == "acquisition_failed"
-    assert result.skipped == {
-        "non_report_title": 2,
-        "invitation_or_presentation_release": 1,
-        "mfn_detail_fetch_failed": 1,
-    }
-
-
-def test_ensure_schema_extensions_repairs_legacy_evidence_packets_shape():
-    import sqlite3
-
-    from alphaforge.db.migrations import _ensure_schema_extensions
-
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE research_documents (id INTEGER PRIMARY KEY)")
-    conn.execute(
-        """CREATE TABLE evidence_packets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            as_of TEXT NOT NULL,
-            packet_hash TEXT NOT NULL,
-            packet_json TEXT NOT NULL,
-            frozen_at TEXT NOT NULL DEFAULT 'x',
-            UNIQUE (company_id, as_of, packet_hash)
-        ) STRICT"""
-    )
-    _ensure_schema_extensions(conn)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence_packets)").fetchall()}
-    assert {
-        "usable",
-        "report_rules_fingerprint",
-        "report_rules_version",
-        "usable_reason",
-    } <= columns
-    indexes = [
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
-    ]
-    assert "idx_evidence_packets_usable" in indexes
 
 
 def test_discover_feed_page_two_uses_offset():

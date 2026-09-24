@@ -118,7 +118,7 @@ of a green `complete`.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
-hash over the packet without its own `packet_hash` and without the embedded `evidence_diagnostic` (acquisition counters, not evidence identity, so a rerun reusing the same PDFs keeps the same hash). Database-local document IDs
+hash over the packet without its own `packet_hash`. Database-local document IDs
 are projected to stable source identities derived from source URL, publication
 date, and attachment checksum for hashing; stored IDs remain available for
 provenance and citations. Run timestamps (`issuer.verified_at`, per-source
@@ -138,10 +138,8 @@ hash to validate; a stray document row is not sufficient. Packet rows also carry
 run marks every prior packet for the same `(company_id, as_of)` unusable in the
 same transaction as its terminal job record; rows remain queryable for audit
 history, while the loader reuses only valid, current-fingerprint, usable rows.
-Run diagnostics for every terminal outcome are persisted in
-`evidence_run_diagnostics` keyed by `(company_id, as_of)` (complete runs
-additionally embed the diagnostic in the packet; failures also record a job
-error), and `describe_evidence_state` replays from that table for
+Run diagnostics are persisted in the packet on complete runs or the job error
+on terminal failures, and `describe_evidence_state` is the replay source for
 CLI/result diagnostics.
 
 ### Live verification

@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urljoin
 
 from alphaforge.core.frozen_packet import (
     EVIDENCE_RULES_VERSION,
@@ -43,9 +42,7 @@ from alphaforge.evidence.ingest import (
 )
 from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,
-    RECOGNIZED_ATTACHMENT_TIERS,
     document_type,
-    is_allowed_attachment_url,
     is_invitation_or_presentation,
     is_report,
     report_kind,
@@ -95,50 +92,19 @@ def download_pdf(
     request: Callable[..., Any] | None = None,
 ) -> PdfDownload:
     """Download one bounded PDF and validate headers plus magic bytes."""
-    if not is_allowed_attachment_url(source_url):
-        raise PdfAcquisitionError(
-            "invalid_attachment_host",
-            f"attachment host is not allowlisted: {source_url}",
-        )
     requester = request or request_with_retry
-    current_url = source_url
-    response: Any = None
-    for _ in range(6):
-        try:
-            response = requester(
-                "GET",
-                current_url,
-                timeout=60,
-                max_retries=limits.max_retries,
-                allow_redirects=False,
-            )
-        except Exception as exc:
-            raise PdfAcquisitionError("transport_error", f"PDF request failed: {exc}") from exc
-        status = int(getattr(response, "status_code", 0) or 0)
-        if status not in (301, 302, 303, 307, 308):
-            break
-        headers = getattr(response, "headers", {}) or {}
-        location = str(headers.get("Location") or headers.get("location") or "")
-        if not location:
-            raise PdfAcquisitionError("http_status", "PDF redirect has no Location header")
-        next_url = urljoin(current_url, location)
-        if not is_allowed_attachment_url(next_url):
-            raise PdfAcquisitionError(
-                "invalid_attachment_host",
-                f"attachment redirect left the allowlisted hosts: {source_url}",
-            )
-        current_url = next_url
-    else:
-        raise PdfAcquisitionError("http_status", "PDF redirect chain is too long")
+    try:
+        response = requester(
+            "GET",
+            source_url,
+            timeout=60,
+            max_retries=limits.max_retries,
+        )
+    except Exception as exc:
+        raise PdfAcquisitionError("transport_error", f"PDF request failed: {exc}") from exc
     status = int(getattr(response, "status_code", 0) or 0)
     if status != 200:
         raise PdfAcquisitionError("http_status", f"PDF request returned HTTP {status}")
-    final_url = str(getattr(response, "url", "") or "") or current_url
-    if not is_allowed_attachment_url(final_url):
-        raise PdfAcquisitionError(
-            "invalid_attachment_host",
-            f"attachment redirect left the allowlisted hosts: {source_url}",
-        )
     headers = getattr(response, "headers", {}) or {}
     content_type = str(headers.get("Content-Type") or headers.get("content-type") or "").lower()
     declared_length = headers.get("Content-Length") or headers.get("content-length")
@@ -229,8 +195,7 @@ def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
         except (TypeError, ValueError):
             return False
     return (
-        isinstance(raw_metadata, dict)
-        and raw_metadata.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
+        isinstance(raw_metadata, dict) and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
     )
 
 
@@ -625,7 +590,6 @@ def build_frozen_evidence_packet(
           AND substr(d.published_at, 1, 10) >= CASE
               WHEN json_extract(d.raw_metadata, '$.report_kind') = 'annual'
               THEN ? ELSE ? END
-          AND json_extract(d.raw_metadata, '$.attachment_tier') IN (?,?,?)
           AND EXISTS (
               SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
           )
@@ -637,7 +601,6 @@ def build_frozen_evidence_packet(
             fingerprint,
             annual_cutoff,
             interim_cutoff,
-            *RECOGNIZED_ATTACHMENT_TIERS,
         ),
     ).fetchall()
     sources: list[dict[str, Any]] = []
@@ -814,8 +777,6 @@ DOWNLOAD_FAILED_SKIP_REASONS = frozenset(
         "pdf_extraction_failed",
         "mfn_feed_fetch_failed",
         "mfn_detail_fetch_failed",
-        "mfn_feed_http_status",
-        "mfn_detail_http_status",
     }
 )
 AMBIGUOUS_SELECTION_SKIP_REASON = "ambiguous_selection"
@@ -885,25 +846,6 @@ class EvidenceFlowResult:
         }
 
 
-def _is_same_source_revalidation(variant: dict[str, Any], existing: dict[str, Any] | None) -> bool:
-    if not existing:
-        return False
-    existing_source = str(existing.get("canonical_source_url") or "")
-    if not existing_source:
-        return False
-    return str(variant.get("source_url") or variant.get("url") or "") == existing_source
-
-
-def _group_source_urls(article: dict[str, Any]) -> set[str]:
-    urls: set[str] = set()
-    for variant in (article, *article.get("_suppressed_variants", [])):
-        for key in ("source_url", "url"):
-            value = variant.get(key)
-            if value:
-                urls.add(str(value))
-    return urls
-
-
 def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
     """Read counted scraper drops without breaking fake scrapers in tests."""
     drain = getattr(scraper, method, None)
@@ -937,8 +879,6 @@ def _confirm_cis_issuer(
         return None
     if release_issuer.lower() != issuer_token:
         return "issuer_mismatch"
-    if canonical_url is not None:
-        canonical_url = urljoin(release_url, canonical_url)
     canonical_issuer = _canonical_issuer(canonical_url)
     if canonical_issuer is None or canonical_issuer.lower() != issuer_token:
         if canonical_issuer is not None and canonical_issuer.lower() != issuer_token:
@@ -1143,20 +1083,6 @@ class OneCompanyEvidenceFlow:
                             company_id=company_id,
                             as_of=as_of,
                             reason=f"failed:unhandled_error:{exc}",
-                            commit=False,
-                        )
-                        persist_evidence_diagnostic(
-                            self.conn,
-                            company_id=company_id,
-                            as_of=as_of,
-                            status="unhandled_error",
-                            diagnostic=EvidenceFlowResult(
-                                "unhandled_error",
-                                company_id,
-                                message=str(exc),
-                            ).diagnostic(),
-                            report_rules_fingerprint=report_rules_metadata()["fingerprint"],
-                            packet_hash=None,
                             commit=False,
                         )
                         record_job(
@@ -1402,16 +1328,12 @@ class OneCompanyEvidenceFlow:
                 if now.weekday() == 6:
                     feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
         except MfnAcquisitionError as exc:
-            acquisition_skips = _drain_skips(self.scraper, "drain_discovery_skips")
-            for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
-                acquisition_skips[reason] = acquisition_skips.get(reason, 0) + count
-            acquisition_skips[exc.code] = acquisition_skips.get(exc.code, 0) + 1
             return finish(
                 EvidenceFlowResult(
                     "acquisition_failed",
                     company_id,
                     mapping_status="mapped",
-                    skipped=acquisition_skips,
+                    skipped={exc.code: 1},
                     message=str(exc),
                 )
             )
@@ -1476,17 +1398,13 @@ class OneCompanyEvidenceFlow:
         try:
             details = self.scraper.scrape_details(unseen_feed, reports_only=True)
         except MfnAcquisitionError as exc:
-            detail_failure_skips = dict(early_skips)
-            for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
-                detail_failure_skips[reason] = detail_failure_skips.get(reason, 0) + count
-            detail_failure_skips[exc.code] = detail_failure_skips.get(exc.code, 0) + 1
             return finish(
                 EvidenceFlowResult(
                     "acquisition_failed",
                     company_id,
                     mapping_status="mapped",
                     discovered=len(unseen_feed),
-                    skipped=detail_failure_skips,
+                    skipped={exc.code: 1},
                     message=str(exc),
                 )
             )
@@ -1616,15 +1534,6 @@ class OneCompanyEvidenceFlow:
             if persisted.get("report_rules_fingerprint") != active_rules[
                 "fingerprint"
             ] or not _has_current_attachment_provenance(metadata):
-                continue
-            if not _persisted_anchor_in_window(
-                {
-                    "published_at": persisted.get("published_at"),
-                    "report_kind": metadata.get("report_kind"),
-                },
-                as_of=as_of,
-                window=window,
-            ):
                 continue
             pdf_language = (
                 metadata.get("pdf_language")
@@ -1976,9 +1885,6 @@ class OneCompanyEvidenceFlow:
                     suppressed_variants=siblings,
                     report_rules_fingerprint=active_rules["fingerprint"],
                 )
-                unresolved_existing_source_urls.discard(
-                    str(article.get("source_url") or article.get("url") or "")
-                )
 
             selected_existing = None
             if candidate_options:
@@ -1989,11 +1895,7 @@ class OneCompanyEvidenceFlow:
                         str(option[0].get("source_url") or option[0].get("url") or ""),
                     ),
                 )[0]
-                if selected_existing is not None and not (
-                    not selected.get("_persisted_evidence")
-                    and selected.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
-                    and _is_same_source_revalidation(selected, selected_existing)
-                ):
+                if selected_existing is not None:
                     if not any(variant.get("_persisted_evidence") for variant in variants):
                         result.skipped["attachment_reused_by_different_report"] = (
                             result.skipped.get("attachment_reused_by_different_report", 0) + 1
@@ -2092,12 +1994,10 @@ class OneCompanyEvidenceFlow:
             result.downloaded += 1
             covered_groups.add(group_index)
             for variant, candidate_download, candidate_extracted, existing in independent_options:
-                if candidate_download is None or candidate_extracted is None:
-                    continue
-                if existing is not None and not (
-                    not variant.get("_persisted_evidence")
-                    and variant.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
-                    and _is_same_source_revalidation(variant, existing)
+                if (
+                    existing is not None
+                    or candidate_download is None
+                    or candidate_extracted is None
                 ):
                     continue
                 independent_article = _prepare_selected_article(
@@ -2122,13 +2022,10 @@ class OneCompanyEvidenceFlow:
         retained: dict[str, int] = {}
         for group_index, article in enumerate(deduped):
             variants = [article, *article.get("_suppressed_variants", [])]
-            group_urls = _group_source_urls(article)
-            group_excluded = bool(group_urls) and group_urls <= unresolved_existing_source_urls
             if group_index in covered_groups:
                 report_class = _completeness_class(article)
                 expected[report_class] = expected.get(report_class, 0) + 1
-                if not group_excluded:
-                    retained[report_class] = retained.get(report_class, 0) + 1
+                retained[report_class] = retained.get(report_class, 0) + 1
                 continue
             persisted_variants = [
                 variant for variant in variants if variant.get("_persisted_evidence")
@@ -2139,10 +2036,6 @@ class OneCompanyEvidenceFlow:
                 # diagnostics reflect persisted packet sources.
                 anchor = article if article.get("_persisted_evidence") else persisted_variants[0]
                 if not _persisted_anchor_in_window(anchor, as_of=as_of, window=window):
-                    continue
-                if group_excluded:
-                    report_class = _completeness_class(anchor)
-                    expected[report_class] = expected.get(report_class, 0) + 1
                     continue
                 report_class = _completeness_class(anchor)
                 expected[report_class] = expected.get(report_class, 0) + 1
