@@ -1442,6 +1442,61 @@ def test_flow_history_window_truncates_old_reports():
     assert result.packet["sources"][0]["title"] == "Flow AB Interim Report Q1 2026"
 
 
+def test_rerun_excludes_out_of_window_persisted_report_but_keeps_audit_row():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    mapping = get_verified_mfn_mapping(conn, company_id)
+    persist_evidence_document(
+        conn,
+        company_id=company_id,
+        article={
+            "source_url": "https://mfn.test/a/flow/q1-2023",
+            "title": "Flow AB Interim Report Q1 2023",
+            "published_at": "2023-04-28T08:00:00Z",
+            "content_text": "The quarter covered 1 February - 30 April 2023.",
+            "report_kind": "quarterly",
+            "attachment_tier": "mfn-primary",
+            "ingested_lang": "en",
+            "pdf_language": "en",
+            "language_evidence": "pdf_text:en",
+        },
+        attachment={
+            "source_url": "https://mfn.test/a/flow/q1-2023.pdf",
+            "content_type": "application/pdf",
+            "byte_size": 8,
+            "sha256": "old-q1-checksum",
+            "magic_valid": True,
+            "http_status": 200,
+        },
+        extraction={
+            "extractor": "pypdf",
+            "text_checksum": "old-q1-checksum-text",
+            "page_count": 1,
+            "pages_included": "1",
+        },
+        pages=[{"page_number": 1, "text": "Evidence"}],
+    )
+    conn.commit()
+
+    packet = build_frozen_evidence_packet(
+        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
+    )
+    assert packet["sources"] == []
+    audit_rows = conn.execute(
+        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, "https://mfn.test/a/flow/q1-2023"),
+    ).fetchone()
+    assert audit_rows[0] == 1
+
+    rerun = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper([]),
+        now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+    ).run(company_id, as_of="2026-09-20")
+    assert rerun.completeness.get("quarterly", {}).get("expected", 0) == 0
+    assert rerun.completeness.get("quarterly", {}).get("retained", 0) == 0
+
+
 def test_discover_feed_page_two_uses_offset():
     """Legacy ``?page=2`` must map to offset/limit so Sunday backstop advances."""
     from alphaforge.providers.mfn.scraper import MfnScraper

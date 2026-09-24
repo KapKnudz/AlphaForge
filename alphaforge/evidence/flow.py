@@ -1553,6 +1553,15 @@ class OneCompanyEvidenceFlow:
                 "fingerprint"
             ] or not _has_current_attachment_provenance(metadata):
                 continue
+            if not _persisted_anchor_in_window(
+                {
+                    "published_at": persisted.get("published_at"),
+                    "report_kind": metadata.get("report_kind"),
+                },
+                as_of=as_of,
+                window=window,
+            ):
+                continue
             pdf_language = (
                 metadata.get("pdf_language")
                 if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))

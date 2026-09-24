@@ -50,13 +50,6 @@ _HTML_VOID_TAGS = frozenset(
         "wbr",
     }
 )
-# Rule inputs live authoritatively in mfn_taxonomy (leaf module) so the
-# deterministic core can fingerprint them without importing providers.
-# These aliases preserve the internal uses below.
-_REPORT_ATTACHMENT_TERMS = REPORT_ATTACHMENT_TERMS
-_NON_REPORT_ATTACHMENT_TERMS = NON_REPORT_ATTACHMENT_TERMS
-_CIS_RELEASE_PATH_RE = CIS_RELEASE_PATH_RE
-_ATTACHMENT_HOST_MARKERS = ATTACHMENT_HOST_MARKERS
 _SWEDISH_MONTHS = {
     "januari": "january",
     "februari": "february",
@@ -265,18 +258,18 @@ class _MfnHtmlParser(HTMLParser):
 
 def _attachment_score(url: str, label: str = "") -> int:
     name = f"{unquote(urlsplit(url).path)} {label}".lower()
-    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in NON_REPORT_ATTACHMENT_TERMS):
         return 0
-    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in REPORT_ATTACHMENT_TERMS):
         return 2
     return 1
 
 
 def _label_report_score(label: str) -> int:
     name = label.lower()
-    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in NON_REPORT_ATTACHMENT_TERMS):
         return 0
-    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+    if any(term in name for term in REPORT_ATTACHMENT_TERMS):
         return 2
     return 1
 
@@ -336,7 +329,7 @@ def _parse_html(html: str) -> dict[str, Any]:
     pdf_links = [
         (href, text, css_class)
         for href, text, css_class in parser.attachment_links
-        if any(marker in href.lower() for marker in _ATTACHMENT_HOST_MARKERS)
+        if any(marker in href.lower() for marker in ATTACHMENT_HOST_MARKERS)
         and ".pdf" in href.lower()
     ]
     title = " ".join(" ".join(parser.h1_parts).split())
@@ -389,13 +382,13 @@ def _is_mfn_release_url(url: str, base_url: str) -> bool:
     if path.startswith("/cis/a/"):
         # Cision-distribution publishing: only the stable
         # /cis/a/<issuer>/<slug>-<8hex> shape, never a bare prefix.
-        return _CIS_RELEASE_PATH_RE.match(path) is not None
+        return CIS_RELEASE_PATH_RE.match(path) is not None
     return path.startswith(("/a/", "/cision/"))
 
 
 def _cis_release_issuer(url: str) -> str | None:
     """Return the issuer segment of a ``/cis/a/`` release URL, else None."""
-    match = _CIS_RELEASE_PATH_RE.match(urlsplit(url).path)
+    match = CIS_RELEASE_PATH_RE.match(urlsplit(url).path)
     return match.group(1) if match else None
 
 
