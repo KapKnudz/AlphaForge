@@ -1167,6 +1167,9 @@ def persist_evidence_document(
         if document is None:
             raise RuntimeError("research document was not persisted")
         document_id = int(document[0])
+        attachment_url = str(
+            attachment.get("source_url") or article.get("attachment_url") or source_url
+        )
         conn.execute(
             """
             INSERT INTO research_attachments
@@ -1182,7 +1185,7 @@ def persist_evidence_document(
             """,
             (
                 document_id,
-                attachment.get("source_url") or article.get("attachment_url") or source_url,
+                attachment_url,
                 attachment.get("content_type"),
                 int(attachment.get("byte_size") or 0),
                 checksum,
@@ -1192,6 +1195,10 @@ def persist_evidence_document(
                 if attachment.get("raw_metadata") is not None
                 else None,
             ),
+        )
+        conn.execute(
+            "DELETE FROM research_attachments WHERE document_id=? AND source_url<>?",
+            (document_id, attachment_url),
         )
         limitations = list(extraction.get("limitations") or [])
         extraction_json = json.dumps(limitations, ensure_ascii=False, sort_keys=True)

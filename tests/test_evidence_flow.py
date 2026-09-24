@@ -561,6 +561,67 @@ def test_packet_query_excludes_refusal_tier_document_beside_current_document():
     assert [source["source_url"] for source in packet["sources"]] == ["https://mfn.test/a/current"]
 
 
+def test_same_report_revalidation_replaces_stale_attachment_in_packet():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    mapping = get_verified_mfn_mapping(conn, company_id)
+    article = {
+        "source_url": "https://mfn.test/a/revalidated",
+        "title": "Flow AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "content_text": "The quarter covered 1 May - 31 July 2026.",
+        "report_kind": "quarterly",
+        "attachment_tier": "mfn-primary",
+        "ingested_lang": "en",
+    }
+
+    def persist(attachment_url: str, checksum: str) -> None:
+        persist_evidence_document(
+            conn,
+            company_id=company_id,
+            article=dict(article),
+            attachment={
+                "source_url": attachment_url,
+                "content_type": "application/pdf",
+                "byte_size": 8,
+                "sha256": checksum,
+                "magic_valid": True,
+                "http_status": 200,
+            },
+            extraction={
+                "extractor": "pypdf",
+                "text_checksum": checksum + "-text",
+                "page_count": 1,
+                "pages_included": "1",
+            },
+            pages=[{"page_number": 1, "text": "Evidence"}],
+        )
+
+    persist("https://mfn.test/a/revalidated-a.pdf", "checksum-a")
+    persist("https://mfn.test/a/revalidated-b.pdf", "checksum-b")
+    conn.commit()
+
+    document_rows = conn.execute(
+        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, "https://mfn.test/a/revalidated"),
+    ).fetchone()
+    assert document_rows[0] == 1
+    attachment_rows = conn.execute(
+        "SELECT source_url FROM research_attachments WHERE document_id="
+        "(SELECT id FROM research_documents WHERE company_id=? AND source_url=?)",
+        (company_id, "https://mfn.test/a/revalidated"),
+    ).fetchall()
+    assert [row[0] for row in attachment_rows] == ["https://mfn.test/a/revalidated-b.pdf"]
+
+    packet = build_frozen_evidence_packet(
+        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
+    )
+    assert [source["source_url"] for source in packet["sources"]] == [
+        "https://mfn.test/a/revalidated"
+    ]
+    assert packet["sources"][0]["attachment"]["source_url"] == "https://mfn.test/a/revalidated-b.pdf"
+
+
 def test_unhandled_error_persists_replayable_terminal_diagnostic():
     conn = _connection()
     company_id = _mapped_company(conn)
