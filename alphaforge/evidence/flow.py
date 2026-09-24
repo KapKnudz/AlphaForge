@@ -925,6 +925,8 @@ def _confirm_cis_issuer(
         return None
     if release_issuer.lower() != issuer_token:
         return "issuer_mismatch"
+    if canonical_url is not None:
+        canonical_url = urljoin(release_url, canonical_url)
     canonical_issuer = _canonical_issuer(canonical_url)
     if canonical_issuer is None or canonical_issuer.lower() != issuer_token:
         if canonical_issuer is not None and canonical_issuer.lower() != issuer_token:

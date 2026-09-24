@@ -230,6 +230,28 @@ def test_missing_canonical_confirmation_fails_lane():
     assert result.skipped.get("canonical_issuer_unconfirmed") == 1
 
 
+def test_relative_canonical_confirmation_accepts_report():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _report_article(
+        "flow-year-end-report-2025-c41def1c",
+        "Flow AB Year-End Report 2025",
+        tier="mfn-primary",
+    )
+    article["canonical_url"] = "/all/a/flow/page"
+    feed = [{"url": article["url"], "title": article["title"]}]
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper(feed, [article])).run(
+            company_id, as_of="2026-09-20"
+        )
+    assert result.status == "complete"
+    assert result.skipped.get("canonical_issuer_unconfirmed") is None
+    assert len(result.packet["sources"]) == 1
+
+
 def test_foreign_issuer_release_filtered_before_download():
     conn = _connection()
     company_id = _mapped_company(conn)
