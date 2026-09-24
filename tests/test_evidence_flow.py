@@ -876,6 +876,38 @@ def test_pdf_acquisition_rejects_unallowlisted_attachment_host():
         )
 
 
+def test_pdf_acquisition_rejects_off_host_redirect():
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+        url="https://evil.example/loot.pdf",
+        history=[SimpleNamespace(url="https://storage.mfn.se/report.pdf")],
+    )
+    with pytest.raises(ValueError, match="attachment host"):
+        download_pdf(
+            "https://storage.mfn.se/report.pdf",
+            limits=EvidenceResourceLimits(max_retries=0),
+            request=lambda *args, **kwargs: response,
+        )
+
+
+def test_pdf_acquisition_accepts_allowlisted_redirect():
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+        url="https://mb.cision.com/Main/1116/4356813/4130290.pdf",
+        history=[SimpleNamespace(url="https://storage.mfn.se/report.pdf")],
+    )
+    result = download_pdf(
+        "https://storage.mfn.se/report.pdf",
+        limits=EvidenceResourceLimits(max_retries=0),
+        request=lambda *args, **kwargs: response,
+    )
+    assert result.source_url == "https://storage.mfn.se/report.pdf"
+
+
 def test_pdf_acquisition_enforces_resource_limit():
     response = SimpleNamespace(
         status_code=200,

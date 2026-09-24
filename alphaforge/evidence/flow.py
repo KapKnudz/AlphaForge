@@ -112,6 +112,15 @@ def download_pdf(
     status = int(getattr(response, "status_code", 0) or 0)
     if status != 200:
         raise PdfAcquisitionError("http_status", f"PDF request returned HTTP {status}")
+    redirect_hops = [
+        str(getattr(hop, "url", "") or "") for hop in (getattr(response, "history", None) or [])
+    ]
+    redirect_hops.append(str(getattr(response, "url", "") or "") or source_url)
+    if any(hop and not is_allowed_attachment_url(hop) for hop in redirect_hops):
+        raise PdfAcquisitionError(
+            "invalid_attachment_host",
+            f"attachment redirect left the allowlisted hosts: {source_url}",
+        )
     headers = getattr(response, "headers", {}) or {}
     content_type = str(headers.get("Content-Type") or headers.get("content-type") or "").lower()
     declared_length = headers.get("Content-Length") or headers.get("content-length")
