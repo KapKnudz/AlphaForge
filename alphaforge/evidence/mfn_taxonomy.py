@@ -163,6 +163,7 @@ ATTACHMENT_TIERS: tuple[str, ...] = (
     "unresolved",
     "none",
 )
+RECOGNIZED_ATTACHMENT_TIERS: tuple[str, ...] = ATTACHMENT_TIERS[:3]
 
 
 # Guarded Cision-distribution rules shared by the scraper and the rule

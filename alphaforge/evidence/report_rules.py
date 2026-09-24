@@ -11,6 +11,7 @@ from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_HOST_MARKERS,
     ATTACHMENT_TIERS,
     CIS_RELEASE_PATH_RE,
+    RECOGNIZED_ATTACHMENT_TIERS,
     INVITATION_MARKERS,
     NON_REPORT_ATTACHMENT_TERMS,
     REPORT_ATTACHMENT_TERMS,
@@ -67,6 +68,7 @@ def report_rules_inputs() -> dict[str, Any]:
             "cis_release_path": CIS_RELEASE_PATH_RE.pattern,
             "attachment_hosts": list(ATTACHMENT_HOST_MARKERS),
             "attachment_tiers": list(ATTACHMENT_TIERS),
+            "recognized_attachment_tiers": list(RECOGNIZED_ATTACHMENT_TIERS),
             "main_path_marker": "/main/",
         },
         "completeness": {

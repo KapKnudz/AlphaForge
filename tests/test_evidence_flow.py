@@ -498,6 +498,7 @@ def test_packet_query_excludes_legacy_document_beside_current_document():
 
     persist("https://mfn.test/a/current", "2026-05-01T08:00:00Z", "current-checksum")
     persist("https://mfn.test/a/legacy", "2026-06-01T08:00:00Z", "legacy-checksum")
+    persist("https://mfn.test/a/old", "2018-06-01T08:00:00Z", "old-checksum")
     conn.execute(
         "UPDATE research_documents SET report_rules_fingerprint='legacy' WHERE source_url=?",
         ("https://mfn.test/a/legacy",),
@@ -508,6 +509,13 @@ def test_packet_query_excludes_legacy_document_beside_current_document():
         conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
     )
     assert [source["source_url"] for source in packet["sources"]] == ["https://mfn.test/a/current"]
+    audit_urls = {
+        row[0]
+        for row in conn.execute(
+            "SELECT source_url FROM research_documents WHERE company_id=?", (company_id,)
+        ).fetchall()
+    }
+    assert {"https://mfn.test/a/legacy", "https://mfn.test/a/old"} <= audit_urls
 
 
 def test_all_future_cutoff_is_typed_no_evidence_and_audited():

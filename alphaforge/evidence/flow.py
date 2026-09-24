@@ -40,6 +40,12 @@ from alphaforge.evidence.ingest import (
     bilingual_dedupe,
     resolve_document_language,
 )
+from alphaforge.evidence.manifest import (
+    EvidenceSelectionManifest,
+    completeness as manifest_completeness,
+    load_evidence_selection_manifest,
+    packet_contents,
+)
 from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,
     document_type,
@@ -554,6 +560,7 @@ def build_frozen_evidence_packet(
     excluded_source_urls: set[str] | None = None,
     report_rules: dict[str, Any] | None = None,
     evidence_diagnostic: dict[str, Any] | None = None,
+    selection_manifest: EvidenceSelectionManifest | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
@@ -566,71 +573,24 @@ def build_frozen_evidence_packet(
         raise ValueError("cannot build evidence packet without active report-rule provenance")
     if not isinstance(history_values, dict):
         raise ValueError("cannot build evidence packet without an active history window")
-    try:
-        window = ReportHistoryWindow(**history_values)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("cannot build evidence packet with an invalid history window") from exc
-    annual_cutoff = _resolve_cutoff(as_of, window, "annual")
-    interim_cutoff = _resolve_cutoff(as_of, window, "quarterly")
-    cutoff = min(as_of[:10], publication_cutoff[:10]) if publication_cutoff else as_of[:10]
-    rows = conn.execute(
-        """
-        SELECT d.id AS document_id, d.source_url, d.title, d.published_at,
-               d.fetched_at, d.ingested_lang, d.raw_metadata, d.content_text AS release_body,
-               a.source_url AS attachment_url, a.content_type, a.byte_size,
-               a.sha256 AS attachment_sha256,
-               e.extractor, e.text_checksum, e.page_count, e.pages_included,
-               e.page_truncated, e.scanned, e.limitations
-        FROM research_documents d
-        JOIN research_attachments a ON a.document_id=d.id
-        JOIN document_extractions e ON e.document_id=d.id
-        WHERE d.company_id=? AND d.duplicate_of IS NULL
-          AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
-          AND d.report_rules_fingerprint=?
-          AND substr(d.published_at, 1, 10) >= CASE
-              WHEN json_extract(d.raw_metadata, '$.report_kind') = 'annual'
-              THEN ? ELSE ? END
-          AND EXISTS (
-              SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
-          )
-        ORDER BY d.source_url, a.sha256, d.id
-        """,
-        (
-            company_id,
-            cutoff,
-            fingerprint,
-            annual_cutoff,
-            interim_cutoff,
-        ),
-    ).fetchall()
+    if selection_manifest is None:
+        selection_manifest = load_evidence_selection_manifest(
+            conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules=active_rules,
+            publication_cutoff=publication_cutoff,
+            excluded_source_urls=excluded_source_urls,
+        )
+    rows = packet_contents(selection_manifest)
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
     fallback_source_count = 0
     excluded_source_urls = excluded_source_urls or set()
     for row in rows:
-        if str(row["source_url"]) in excluded_source_urls:
-            continue
         document_id = int(row["document_id"])
-        page_rows = conn.execute(
-            """
-            SELECT page_number, anchor, text, text_checksum
-            FROM document_pages
-            WHERE extraction_id=(SELECT id FROM document_extractions WHERE document_id=?)
-            ORDER BY page_number
-            """,
-            (document_id,),
-        ).fetchall()
-        sibling_rows = conn.execute(
-            """
-            SELECT source_url, title, published_at, ingested_lang, duplicate_of, raw_metadata
-            FROM research_documents
-            WHERE duplicate_of=?
-              AND published_at IS NOT NULL
-              AND substr(published_at, 1, 10) <= ?
-            ORDER BY source_url
-            """,
-            (document_id, cutoff),
-        ).fetchall()
+        page_rows = row.get("pages", [])
+        sibling_rows = row.get("siblings", [])
         row_limitations: list[str] = []
         if row["limitations"]:
             try:
@@ -1424,7 +1384,6 @@ class OneCompanyEvidenceFlow:
         eligible: list[dict[str, Any]] = []
         pre_cutoff_report = False
         hard_blocks = 0
-        blocked_expected: dict[str, int] = {}
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
@@ -1484,8 +1443,6 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0) + 1
                 )
                 hard_blocks += 1
-                report_class = _completeness_class(article)
-                blocked_expected[report_class] = blocked_expected.get(report_class, 0) + 1
                 continue
             pre_cutoff_report = True
             tier = article.get("attachment_tier")
@@ -1705,7 +1662,6 @@ class OneCompanyEvidenceFlow:
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
         language_fallback_count = 0
-        covered_groups: set[int] = set()
         for group_index, article in enumerate(deduped):
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
@@ -1885,6 +1841,7 @@ class OneCompanyEvidenceFlow:
                     suppressed_variants=siblings,
                     report_rules_fingerprint=active_rules["fingerprint"],
                 )
+                article["_persisted_evidence"] = True
 
             selected_existing = None
             if candidate_options:
@@ -1962,7 +1919,6 @@ class OneCompanyEvidenceFlow:
                                 canonical_source_url=existing_canonical_source_url,
                                 sibling={**variant, "relationship": relation},
                             )
-                    covered_groups.add(group_index)
                     continue
             if selected is None or downloaded is None or extracted is None:
                 for code, count in failures.items():
@@ -1992,7 +1948,6 @@ class OneCompanyEvidenceFlow:
             selected_article = _prepare_selected_article(selected_variant, downloaded, extracted)
             persist_option(selected_article, downloaded, extracted, related_variants)
             result.downloaded += 1
-            covered_groups.add(group_index)
             for variant, candidate_download, candidate_extracted, existing in independent_options:
                 if (
                     existing is not None
@@ -2018,70 +1973,23 @@ class OneCompanyEvidenceFlow:
                 }
                 persist_option(independent_article, candidate_download, candidate_extracted, [])
                 result.downloaded += 1
-        expected: dict[str, int] = dict(blocked_expected)
-        retained: dict[str, int] = {}
-        for group_index, article in enumerate(deduped):
-            variants = [article, *article.get("_suppressed_variants", [])]
-            if group_index in covered_groups:
-                report_class = _completeness_class(article)
-                expected[report_class] = expected.get(report_class, 0) + 1
-                retained[report_class] = retained.get(report_class, 0) + 1
-                continue
-            persisted_variants = [
-                variant for variant in variants if variant.get("_persisted_evidence")
-            ]
-            if persisted_variants:
-                # Retained by an earlier run: count in-window persisted
-                # coverage and recover its attachment-tier evidence so rerun
-                # diagnostics reflect persisted packet sources.
-                anchor = article if article.get("_persisted_evidence") else persisted_variants[0]
-                if not _persisted_anchor_in_window(anchor, as_of=as_of, window=window):
-                    continue
-                report_class = _completeness_class(anchor)
-                expected[report_class] = expected.get(report_class, 0) + 1
-                retained[report_class] = retained.get(report_class, 0) + 1
-                result.persisted += 1
-                tier = anchor.get("attachment_tier")
-                if tier in ATTACHMENT_TIERS:
-                    result.attachment_selection[tier] = result.attachment_selection.get(tier, 0) + 1
-                continue
-            # A language-only feed/detail variant without a PDF must not
-            # create a second expected item when its opposite-language edition
-            # is already retained.  This is intentionally narrower than
-            # bilingual_dedupe: it requires the provider event identity and an
-            # opposite-language retained counterpart.  A lone missing PDF
-            # remains an expected completeness deficit.
-            if not any(
-                variant.get("attachment_url") or variant.get("storage_url") for variant in variants
-            ):
-                event = article.get("provider_event_id") or article.get("mfn_event_id")
-                language = str(article.get("lang") or article.get("ingested_lang") or "").lower()
-                if (
-                    event
-                    and language in {"en", "sv"}
-                    and any(
-                        other is not article
-                        and (other.get("provider_event_id") or other.get("mfn_event_id")) == event
-                        and str(other.get("lang") or other.get("ingested_lang") or "").lower()
-                        in {"en", "sv"}
-                        and str(other.get("lang") or other.get("ingested_lang") or "").lower()
-                        != language
-                        and (other.get("attachment_url") or other.get("storage_url"))
-                        for other in deduped
-                    )
-                ):
-                    continue
-            # A new group with no attachment anywhere stays in the expected
-            # denominator as unretained; it is a completeness deficit, not
-            # just a counted filter outcome.
-            report_class = _completeness_class(article)
-            expected[report_class] = expected.get(report_class, 0) + 1
-        result.completeness = {
-            report_class: {
-                "expected": expected.get(report_class, 0),
-                "retained": retained.get(report_class, 0),
-            }
-            for report_class in sorted(set(expected) | set(retained))
+        selection_manifest = load_evidence_selection_manifest(
+            self.conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules=active_rules,
+            candidate_records=identity_candidates,
+            publication_cutoff=today.isoformat(),
+            excluded_source_urls=unresolved_existing_source_urls,
+        )
+        result.completeness = manifest_completeness(selection_manifest)
+        expected = {
+            report_class: counts["expected"]
+            for report_class, counts in result.completeness.items()
+        }
+        retained = {
+            report_class: counts["retained"]
+            for report_class, counts in result.completeness.items()
         }
         missing = {
             report_class: expected[report_class] - retained.get(report_class, 0)
@@ -2147,6 +2055,7 @@ class OneCompanyEvidenceFlow:
             excluded_source_urls=unresolved_existing_source_urls,
             report_rules=active_rules,
             evidence_diagnostic=result.diagnostic(),
+            selection_manifest=selection_manifest,
         )
         if not packet.get("sources"):
             if (

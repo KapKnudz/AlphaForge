@@ -104,14 +104,28 @@ class AgentReadinessGate:
                         ),
                     )
                 )
-        elif not evidence.get("documents"):
-            blockers.append(
-                ReadinessBlocker(
-                    code="primary_evidence_missing",
-                    category="evidence",
-                    message="no textual company reports or releases are stored",
+        else:
+            manifest = evidence.get("evidence_manifest") or {}
+            fallback = manifest.get("readiness_fallback") or {}
+            if fallback.get("documents_available"):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="frozen_evidence_packet_missing",
+                        category="evidence",
+                        message=(
+                            "auditable evidence exists, but a usable current frozen "
+                            "evidence packet is required"
+                        ),
+                    )
                 )
-            )
+            elif not evidence.get("documents"):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="primary_evidence_missing",
+                        category="evidence",
+                        message="no textual company reports or releases are stored",
+                    )
+                )
 
         reverse_dcf = candidate.full_results.get("reverse_dcf") or {}
         if _field(reverse_dcf, "status") != "available":
