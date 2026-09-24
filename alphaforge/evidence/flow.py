@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin
 
 from alphaforge.core.frozen_packet import (
     EVIDENCE_RULES_VERSION,
@@ -100,23 +101,40 @@ def download_pdf(
             f"attachment host is not allowlisted: {source_url}",
         )
     requester = request or request_with_retry
-    try:
-        response = requester(
-            "GET",
-            source_url,
-            timeout=60,
-            max_retries=limits.max_retries,
-        )
-    except Exception as exc:
-        raise PdfAcquisitionError("transport_error", f"PDF request failed: {exc}") from exc
+    current_url = source_url
+    response: Any = None
+    for _ in range(6):
+        try:
+            response = requester(
+                "GET",
+                current_url,
+                timeout=60,
+                max_retries=limits.max_retries,
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            raise PdfAcquisitionError("transport_error", f"PDF request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status not in (301, 302, 303, 307, 308):
+            break
+        headers = getattr(response, "headers", {}) or {}
+        location = str(headers.get("Location") or headers.get("location") or "")
+        if not location:
+            raise PdfAcquisitionError("http_status", "PDF redirect has no Location header")
+        next_url = urljoin(current_url, location)
+        if not is_allowed_attachment_url(next_url):
+            raise PdfAcquisitionError(
+                "invalid_attachment_host",
+                f"attachment redirect left the allowlisted hosts: {source_url}",
+            )
+        current_url = next_url
+    else:
+        raise PdfAcquisitionError("http_status", "PDF redirect chain is too long")
     status = int(getattr(response, "status_code", 0) or 0)
     if status != 200:
         raise PdfAcquisitionError("http_status", f"PDF request returned HTTP {status}")
-    redirect_hops = [
-        str(getattr(hop, "url", "") or "") for hop in (getattr(response, "history", None) or [])
-    ]
-    redirect_hops.append(str(getattr(response, "url", "") or "") or source_url)
-    if any(hop and not is_allowed_attachment_url(hop) for hop in redirect_hops):
+    final_url = str(getattr(response, "url", "") or "") or current_url
+    if not is_allowed_attachment_url(final_url):
         raise PdfAcquisitionError(
             "invalid_attachment_host",
             f"attachment redirect left the allowlisted hosts: {source_url}",

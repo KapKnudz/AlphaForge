@@ -877,35 +877,51 @@ def test_pdf_acquisition_rejects_unallowlisted_attachment_host():
 
 
 def test_pdf_acquisition_rejects_off_host_redirect():
-    response = SimpleNamespace(
-        status_code=200,
-        headers={"Content-Type": "application/pdf"},
-        content=_pdf(),
-        url="https://evil.example/loot.pdf",
-        history=[SimpleNamespace(url="https://storage.mfn.se/report.pdf")],
-    )
+    requested = []
+
+    def _redirecting_fetch(method, url, **kwargs):
+        assert kwargs.get("allow_redirects") is False
+        requested.append(url)
+        return SimpleNamespace(
+            status_code=302,
+            headers={"Location": "https://evil.example/loot.pdf"},
+            content=b"",
+        )
+
     with pytest.raises(ValueError, match="attachment host"):
         download_pdf(
             "https://storage.mfn.se/report.pdf",
             limits=EvidenceResourceLimits(max_retries=0),
-            request=lambda *args, **kwargs: response,
+            request=_redirecting_fetch,
         )
+    assert requested == ["https://storage.mfn.se/report.pdf"]
 
 
 def test_pdf_acquisition_accepts_allowlisted_redirect():
-    response = SimpleNamespace(
-        status_code=200,
-        headers={"Content-Type": "application/pdf"},
-        content=_pdf(),
-        url="https://mb.cision.com/Main/1116/4356813/4130290.pdf",
-        history=[SimpleNamespace(url="https://storage.mfn.se/report.pdf")],
-    )
+    requested = []
+    target = "https://mb.cision.com/Main/1116/4356813/4130290.pdf"
+
+    def _redirecting_fetch(method, url, **kwargs):
+        assert kwargs.get("allow_redirects") is False
+        requested.append(url)
+        if url == "https://storage.mfn.se/report.pdf":
+            return SimpleNamespace(
+                status_code=302, headers={"Location": target}, content=b""
+            )
+        return SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "application/pdf"},
+            content=_pdf(),
+            url=target,
+        )
+
     result = download_pdf(
         "https://storage.mfn.se/report.pdf",
         limits=EvidenceResourceLimits(max_retries=0),
-        request=lambda *args, **kwargs: response,
+        request=_redirecting_fetch,
     )
     assert result.source_url == "https://storage.mfn.se/report.pdf"
+    assert requested == ["https://storage.mfn.se/report.pdf", target]
 
 
 def test_pdf_acquisition_enforces_resource_limit():
