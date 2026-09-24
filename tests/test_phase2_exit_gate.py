@@ -595,9 +595,7 @@ class TestReadinessGate:
 
         assessment = gate.assess(candidate)
         assert assessment.status == "evidence_blocked"
-        assert "frozen_evidence_packet_missing" in [
-            blocker.code for blocker in assessment.blockers
-        ]
+        assert "frozen_evidence_packet_missing" in [blocker.code for blocker in assessment.blockers]
 
     def test_readiness_gate_method_unsupported(self):
         """Readiness gate returns method_unsupported for property/bank."""

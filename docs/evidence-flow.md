@@ -138,8 +138,10 @@ hash to validate; a stray document row is not sufficient. Packet rows also carry
 run marks every prior packet for the same `(company_id, as_of)` unusable in the
 same transaction as its terminal job record; rows remain queryable for audit
 history, while the loader reuses only valid, current-fingerprint, usable rows.
-Run diagnostics are persisted in the packet on complete runs or the job error
-on terminal failures, and `describe_evidence_state` is the replay source for
+Run diagnostics for every terminal outcome are persisted in
+`evidence_run_diagnostics` keyed by `(company_id, as_of)` (complete runs
+additionally embed the diagnostic in the packet; failures also record a job
+error), and `describe_evidence_state` replays from that table for
 CLI/result diagnostics.
 
 ### Live verification

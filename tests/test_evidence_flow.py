@@ -619,7 +619,9 @@ def test_same_report_revalidation_replaces_stale_attachment_in_packet():
     assert [source["source_url"] for source in packet["sources"]] == [
         "https://mfn.test/a/revalidated"
     ]
-    assert packet["sources"][0]["attachment"]["source_url"] == "https://mfn.test/a/revalidated-b.pdf"
+    assert (
+        packet["sources"][0]["attachment"]["source_url"] == "https://mfn.test/a/revalidated-b.pdf"
+    )
 
 
 def test_unhandled_error_persists_replayable_terminal_diagnostic():
@@ -631,9 +633,7 @@ def test_unhandled_error_persists_replayable_terminal_diagnostic():
             raise RuntimeError("feed exploded")
 
     with pytest.raises(RuntimeError, match="feed exploded"):
-        OneCompanyEvidenceFlow(conn, scraper=_BoomScraper([])).run(
-            company_id, as_of="2026-09-20"
-        )
+        OneCompanyEvidenceFlow(conn, scraper=_BoomScraper([])).run(company_id, as_of="2026-09-20")
     state = describe_evidence_state(conn, company_id=company_id, as_of="2026-09-20")
     assert state is not None
     assert state["status"] == "unhandled_error"
@@ -966,9 +966,7 @@ def test_pdf_acquisition_accepts_allowlisted_redirect():
         assert kwargs.get("allow_redirects") is False
         requested.append(url)
         if url == "https://storage.mfn.se/report.pdf":
-            return SimpleNamespace(
-                status_code=302, headers={"Location": target}, content=b""
-            )
+            return SimpleNamespace(status_code=302, headers={"Location": target}, content=b"")
         return SimpleNamespace(
             status_code=200,
             headers={"Content-Type": "application/pdf"},
@@ -1720,9 +1718,15 @@ def test_ensure_schema_extensions_repairs_legacy_evidence_packets_shape():
     )
     _ensure_schema_extensions(conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence_packets)").fetchall()}
-    assert {"usable", "report_rules_fingerprint", "report_rules_version", "usable_reason"} <= columns
+    assert {
+        "usable",
+        "report_rules_fingerprint",
+        "report_rules_version",
+        "usable_reason",
+    } <= columns
     indexes = [
-        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
     ]
     assert "idx_evidence_packets_usable" in indexes
 
