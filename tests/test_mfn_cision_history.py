@@ -25,7 +25,7 @@ from alphaforge.db.repositories import (
     persist_evidence_packet,
     upsert_company,
 )
-from alphaforge.evidence.flow import NoEvidenceReason, OneCompanyEvidenceFlow
+from alphaforge.evidence.flow import EvidenceFlowResult, NoEvidenceReason, OneCompanyEvidenceFlow
 from alphaforge.evidence.ingest import bilingual_dedupe
 from alphaforge.providers.mfn.scraper import MfnScraper
 
@@ -982,3 +982,64 @@ def test_legacy_attachment_revalidates_same_report():
     ).fetchone()
     assert row[0] == current_report_rules_fingerprint()
     assert len(second.packet["sources"]) == 1
+
+
+def test_feed_detail_http_status_counts_as_download_failed():
+    result = EvidenceFlowResult(
+        "acquisition_failed",
+        1,
+        mapping_status="mapped",
+        skipped={
+            "mfn_feed_http_status": 1,
+            "mfn_detail_http_status": 1,
+            "non_report_release": 1,
+        },
+    )
+    diagnostic = result.diagnostic()
+    assert diagnostic["download_failed"] == 2
+    assert diagnostic["filtered_before_download"] == 1
+
+
+def test_unresolved_prior_source_fails_completeness_visibly():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    q1 = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.se/flow/q1.pdf",
+    )
+    q2 = _quarterly_article(
+        "interim-report-q2-2026",
+        "Flow AB Interim Report Q2 2026",
+        "2026-08-01T08:00:00Z",
+        "https://storage.mfn.se/flow/q2.pdf",
+    )
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeCisionScraper(
+                [{"url": q1["url"], "title": q1["title"]}], [q1]
+            ),
+        ).run(company_id, as_of="2026-09-20")
+    assert first.status == "complete"
+    assert len(first.packet["sources"]) == 1
+
+    def transport(method, url, **kwargs):
+        if url == "https://storage.mfn.se/flow/q1.pdf":
+            raise RuntimeError("connection reset")
+        return _pdf_response(_pdf())
+
+    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeCisionScraper(
+                [{"url": q2["url"], "title": q2["title"]}], [q2]
+            ),
+        ).run(company_id, as_of="2026-09-20")
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    assert result.completeness["quarterly"] == {"expected": 2, "retained": 1}

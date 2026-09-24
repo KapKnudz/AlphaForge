@@ -527,7 +527,9 @@ class MfnScraper:
         url = f"{self.base_url}/{mfn_slug.lstrip('/')}"
         time.sleep(1.0)
         try:
-            resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
+            resp = request_with_retry(
+                "GET", url, timeout=30, max_retries=MAX_RETRIES, allow_redirects=False
+            )
         except Exception as exc:
             raise MfnAcquisitionError(
                 "mfn_feed_fetch_failed", f"MFN feed request failed: {exc}"
@@ -593,6 +595,7 @@ class MfnScraper:
                 timeout=30,
                 max_retries=MAX_RETRIES,
                 headers={"Accept": "application/json"},
+                allow_redirects=False,
             )
         except Exception:
             resp = None  # type: ignore[assignment]
@@ -647,7 +650,9 @@ class MfnScraper:
         for url in (html_url, fragment_url):
             time.sleep(0.5)
             try:
-                resp = request_with_retry("GET", url, timeout=30, max_retries=MAX_RETRIES)
+                resp = request_with_retry(
+                    "GET", url, timeout=30, max_retries=MAX_RETRIES, allow_redirects=False
+                )
             except Exception:
                 continue
             if resp.status_code != 200:
@@ -714,7 +719,9 @@ class MfnScraper:
                 continue
             time.sleep(1.0)
             try:
-                resp = request_with_retry("GET", url, timeout=60, max_retries=MAX_RETRIES)
+                resp = request_with_retry(
+                    "GET", url, timeout=60, max_retries=MAX_RETRIES, allow_redirects=False
+                )
             except Exception as exc:
                 raise MfnAcquisitionError(
                     "mfn_detail_fetch_failed", f"MFN detail request failed: {exc}"

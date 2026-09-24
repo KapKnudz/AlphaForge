@@ -814,6 +814,8 @@ DOWNLOAD_FAILED_SKIP_REASONS = frozenset(
         "pdf_extraction_failed",
         "mfn_feed_fetch_failed",
         "mfn_detail_fetch_failed",
+        "mfn_feed_http_status",
+        "mfn_detail_http_status",
     }
 )
 AMBIGUOUS_SELECTION_SKIP_REASON = "ambiguous_selection"
@@ -890,6 +892,16 @@ def _is_same_source_revalidation(variant: dict[str, Any], existing: dict[str, An
     if not existing_source:
         return False
     return str(variant.get("source_url") or variant.get("url") or "") == existing_source
+
+
+def _group_source_urls(article: dict[str, Any]) -> set[str]:
+    urls: set[str] = set()
+    for variant in (article, *article.get("_suppressed_variants", [])):
+        for key in ("source_url", "url"):
+            value = variant.get(key)
+            if value:
+                urls.add(str(value))
+    return urls
 
 
 def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
@@ -2110,10 +2122,13 @@ class OneCompanyEvidenceFlow:
         retained: dict[str, int] = {}
         for group_index, article in enumerate(deduped):
             variants = [article, *article.get("_suppressed_variants", [])]
+            group_urls = _group_source_urls(article)
+            group_excluded = bool(group_urls) and group_urls <= unresolved_existing_source_urls
             if group_index in covered_groups:
                 report_class = _completeness_class(article)
                 expected[report_class] = expected.get(report_class, 0) + 1
-                retained[report_class] = retained.get(report_class, 0) + 1
+                if not group_excluded:
+                    retained[report_class] = retained.get(report_class, 0) + 1
                 continue
             persisted_variants = [
                 variant for variant in variants if variant.get("_persisted_evidence")
@@ -2124,6 +2139,10 @@ class OneCompanyEvidenceFlow:
                 # diagnostics reflect persisted packet sources.
                 anchor = article if article.get("_persisted_evidence") else persisted_variants[0]
                 if not _persisted_anchor_in_window(anchor, as_of=as_of, window=window):
+                    continue
+                if group_excluded:
+                    report_class = _completeness_class(anchor)
+                    expected[report_class] = expected.get(report_class, 0) + 1
                     continue
                 report_class = _completeness_class(anchor)
                 expected[report_class] = expected.get(report_class, 0) + 1
