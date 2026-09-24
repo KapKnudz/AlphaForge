@@ -163,6 +163,11 @@ ATTACHMENT_TIERS: tuple[str, ...] = (
     "unresolved",
     "none",
 )
+RECOGNIZED_ATTACHMENT_TIERS: tuple[str, ...] = (
+    "mfn-primary",
+    "main-path",
+    "label-score",
+)
 
 
 # Guarded Cision-distribution rules shared by the scraper and the rule

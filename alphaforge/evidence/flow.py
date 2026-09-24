@@ -42,6 +42,7 @@ from alphaforge.evidence.ingest import (
 )
 from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,
+    RECOGNIZED_ATTACHMENT_TIERS,
     document_type,
     is_invitation_or_presentation,
     is_report,
@@ -195,7 +196,8 @@ def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
         except (TypeError, ValueError):
             return False
     return (
-        isinstance(raw_metadata, dict) and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
+        isinstance(raw_metadata, dict)
+        and raw_metadata.get("attachment_tier") in RECOGNIZED_ATTACHMENT_TIERS
     )
 
 
@@ -590,6 +592,7 @@ def build_frozen_evidence_packet(
           AND substr(d.published_at, 1, 10) >= CASE
               WHEN json_extract(d.raw_metadata, '$.report_kind') = 'annual'
               THEN ? ELSE ? END
+          AND json_extract(d.raw_metadata, '$.attachment_tier') IN (?,?,?)
           AND EXISTS (
               SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
           )
@@ -601,6 +604,7 @@ def build_frozen_evidence_packet(
             fingerprint,
             annual_cutoff,
             interim_cutoff,
+            *RECOGNIZED_ATTACHMENT_TIERS,
         ),
     ).fetchall()
     sources: list[dict[str, Any]] = []
@@ -1083,6 +1087,20 @@ class OneCompanyEvidenceFlow:
                             company_id=company_id,
                             as_of=as_of,
                             reason=f"failed:unhandled_error:{exc}",
+                            commit=False,
+                        )
+                        persist_evidence_diagnostic(
+                            self.conn,
+                            company_id=company_id,
+                            as_of=as_of,
+                            status="unhandled_error",
+                            diagnostic=EvidenceFlowResult(
+                                "unhandled_error",
+                                company_id,
+                                message=str(exc),
+                            ).diagnostic(),
+                            report_rules_fingerprint=report_rules_metadata()["fingerprint"],
+                            packet_hash=None,
                             commit=False,
                         )
                         record_job(

@@ -17,7 +17,6 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_HOST_MARKERS,
-    ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
     CIS_RELEASE_PATH_RE,
     NON_REPORT_ATTACHMENT_TERMS,
     REPORT_ATTACHMENT_TERMS,
@@ -271,10 +270,6 @@ def _attachment_score(url: str, label: str = "") -> int:
     if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
         return 2
     return 1
-
-
-# ATTACHMENT_TIERS is imported above from mfn_taxonomy (authoritative
-# definition) and remains available as scraper.ATTACHMENT_TIERS.
 
 
 def _label_report_score(label: str) -> int:

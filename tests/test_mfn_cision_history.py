@@ -239,6 +239,7 @@ def test_foreign_issuer_release_filtered_before_download():
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
         "attachment_url": "https://storage.mfn.test/flow/q1.pdf",
+        "attachment_tier": "mfn-primary",
         "lang": "en",
     }
     feed = [
@@ -562,6 +563,7 @@ def _quarterly_article(slug, title, published_at, attachment=None):
     }
     if attachment is not None:
         article["attachment_url"] = attachment
+        article["attachment_tier"] = "mfn-primary"
     return article
 
 
