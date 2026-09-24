@@ -1494,11 +1494,6 @@ def test_rerun_excludes_out_of_window_persisted_report_but_keeps_audit_row():
         conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
     )
     assert packet["sources"] == []
-    audit_rows = conn.execute(
-        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
-        (company_id, "https://mfn.test/a/flow/q1-2023"),
-    ).fetchone()
-    assert audit_rows[0] == 1
 
     rerun = OneCompanyEvidenceFlow(
         conn,
@@ -1507,6 +1502,16 @@ def test_rerun_excludes_out_of_window_persisted_report_but_keeps_audit_row():
     ).run(company_id, as_of="2026-09-20")
     assert rerun.completeness.get("quarterly", {}).get("expected", 0) == 0
     assert rerun.completeness.get("quarterly", {}).get("retained", 0) == 0
+    assert rerun.packet is None or rerun.packet["sources"] == []
+    audit_rows = conn.execute(
+        "SELECT COUNT(*) FROM research_documents WHERE company_id=? AND source_url=?",
+        (company_id, "https://mfn.test/a/flow/q1-2023"),
+    ).fetchone()
+    assert audit_rows[0] == 1
+    retained = build_frozen_evidence_packet(
+        conn, company_id=company_id, as_of="2026-09-20", mapping=mapping
+    )
+    assert retained["sources"] == []
 
 
 def test_feed_acquisition_failure_preserves_discovery_skips():
