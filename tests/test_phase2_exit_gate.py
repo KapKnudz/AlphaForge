@@ -492,6 +492,48 @@ class TestRankingEligibility:
 # --- Test 7: Readiness gate ---
 
 
+def _ready_packet():
+    packet = {
+        "schema_version": "evidence-packet-v1",
+        "frozen": True,
+        "evidence_rules_version": EVIDENCE_RULES_VERSION,
+        "report_rules": report_rules_metadata(),
+        "company_id": 1,
+        "as_of": "2026-05-01",
+        "sources": [
+            {
+                "source_id": "document:1",
+                "source_url": "https://mfn.test/report/1",
+                "publication_date": "2026-05-01T00:00:00Z",
+                "publication_timestamp_authoritative": True,
+                "ingestion_date": "2026-05-02T00:00:00Z",
+                "attachment": {
+                    "source_url": "https://storage.mfn.se/report/1.pdf",
+                    "sha256": "abc",
+                },
+                "extraction": {
+                    "extractor": "pypdf",
+                    "text_checksum": hashlib.sha256(b"[page 1]\nEvidence").hexdigest(),
+                    "page_count": 1,
+                },
+                "pages": [
+                    {
+                        "page_number": 1,
+                        "anchor": "document:1#page:1",
+                        "text": "Evidence",
+                        "text_checksum": hashlib.sha256(b"Evidence").hexdigest(),
+                    }
+                ],
+            }
+        ],
+        "evidence_catalog": {"canonical_source_ids": ["document:1"]},
+        "limitations": [],
+    }
+    packet["packet_hash"] = stable_packet_hash(packet)
+    assert validate_frozen_packet(packet)
+    return packet
+
+
 class TestReadinessGate:
     def test_readiness_gate_ready_status(self):
         """Readiness gate returns ready for valid candidates."""
@@ -504,7 +546,11 @@ class TestReadinessGate:
             (),
             {
                 "ranking_model": "general",
-                "research_evidence": {"documents": [{"id": 1}]},
+                "research_evidence": {
+                    "documents": [{"id": 1}],
+                    "evidence_lane": True,
+                    "evidence_packet": _ready_packet(),
+                },
                 "full_results": {
                     "reverse_dcf": {"status": "available"},
                     "valuation": {
@@ -519,6 +565,39 @@ class TestReadinessGate:
 
         assessment = gate.assess(candidate)
         assert assessment.status == "ready"
+
+    def test_readiness_gate_blocks_legacy_documents_without_packet(self):
+        """Auditable documents alone cannot satisfy readiness."""
+        from alphaforge.core.gate.readiness import AgentReadinessGate
+
+        gate = AgentReadinessGate()
+        candidate = type(
+            "Candidate",
+            (),
+            {
+                "ranking_model": "general",
+                "research_evidence": {
+                    "documents": [{"id": 1}],
+                    "evidence_lane": False,
+                    "evidence_packet": None,
+                },
+                "full_results": {
+                    "reverse_dcf": {"status": "available"},
+                    "valuation": {
+                        "ev_ebit_guardrail_low": 5.0,
+                        "ev_ebit_guardrail_high": 20.0,
+                    },
+                },
+                "company_id": 1,
+                "ticker": "TEST",
+            },
+        )()
+
+        assessment = gate.assess(candidate)
+        assert assessment.status == "evidence_blocked"
+        assert "frozen_evidence_packet_missing" in [
+            blocker.code for blocker in assessment.blockers
+        ]
 
     def test_readiness_gate_method_unsupported(self):
         """Readiness gate returns method_unsupported for property/bank."""
