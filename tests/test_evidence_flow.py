@@ -399,7 +399,9 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
         "https://mfn.test/a/flow/future",
         "https://mfn.test/a/flow/missing",
     }
-    assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 2
+    # The replayed packet has the same content identity, so the
+    # content-addressed packet row is refreshed in place, not duplicated.
+    assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
 
 
 def test_rerun_does_not_trust_evidence_without_attachment_tier():
@@ -708,6 +710,7 @@ def test_flow_uses_pdf_language_before_variant_grouping():
             "title": "Flow AB delårsrapport Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-sv.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "en",
             "provider_event_id": "flow-pdf-authority-q1",
         },
@@ -716,6 +719,7 @@ def test_flow_uses_pdf_language_before_variant_grouping():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-english.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "sv",
             "provider_event_id": "flow-pdf-authority-q1",
         },
@@ -756,6 +760,7 @@ def test_flow_keeps_no_pdf_variant_out_of_grouping():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/q1-en.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "en",
             "provider_event_id": "flow-no-pdf-q1",
         },
@@ -877,6 +882,7 @@ def _delayed_english_articles(*, with_english: bool):
         "title": "Delayed AB delårsrapport Q1 2026/2027",
         "published_at": "2026-09-09T07:30:00Z",
         "attachment_url": "https://storage.mfn.test/delayed-q1-sv.pdf",
+        "attachment_tier": "mfn-primary",
         "body": (
             "Omsättning 2847 Msek. Rörelseresultat 312 Msek. "
             "Kvartalet omfattade 1 maj – 31 juli 2026."
@@ -894,6 +900,7 @@ def _delayed_english_articles(*, with_english: bool):
         "title": "Delayed AB Interim report Q1 2026/27",
         "published_at": "2026-09-12T07:30:00Z",
         "attachment_url": "https://storage.mfn.test/delayed-q1-en.pdf",
+        "attachment_tier": "mfn-primary",
         "body": (
             "Revenue 2847 MSEK. Operating profit 312 MSEK. "
             "The quarter covered 1 May - 31 July 2026."
@@ -963,6 +970,7 @@ def test_packet_hash_stable_across_database_document_ids():
         "source_url": "https://mfn.test/a/clas-ohlson/interim-report-q1-2026-27",
         "title": "Clas Ohlson Interim report Q1 2026/27",
         "published_at": "2026-09-09T07:30:00Z",
+        "attachment_tier": "mfn-primary",
         "content_text": "Revenue 2847 MSEK. The quarter covered 1 May - 31 July 2026.",
         "ingested_lang": "en",
         "period_start": "2026-05-01",
@@ -1021,6 +1029,7 @@ def test_packet_hash_stable_across_run_timestamps():
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
         "attachment_url": "https://storage.mfn.test/stable.pdf",
+        "attachment_tier": "mfn-primary",
         "lang": "en",
     }
     response = SimpleNamespace(
@@ -1194,6 +1203,7 @@ def test_re_review_clears_ambiguous_block():
         "title": "Reviewed AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
         "attachment_url": "https://storage.mfn.test/reviewed-q1-en.pdf",
+        "attachment_tier": "mfn-primary",
         "lang": "en",
     }
     response = SimpleNamespace(
@@ -1262,6 +1272,7 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "published_at": "2026-05-01T08:00:00Z",
                 "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
                 "storage_url": "https://storage.mfn.test/q1-2026.pdf",
+                "attachment_tier": "mfn-primary",
                 "lang": "en",
                 "report_kind": "quarterly",
                 "document_type": "INTERIM_Q1",
@@ -1272,6 +1283,7 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "published_at": "2025-03-12T08:00:00Z",
                 "attachment_url": "https://storage.mfn.test/q3-2025.pdf",
                 "storage_url": "https://storage.mfn.test/q3-2025.pdf",
+                "attachment_tier": "mfn-primary",
                 "lang": "en",
                 "report_kind": "quarterly",
             },
@@ -1283,6 +1295,7 @@ def test_flow_paginated_history_retrieves_multiple_reports():
                 "published_at": "2024-07-04T08:00:00Z",
                 "attachment_url": "https://storage.mfn.test/annual-2024.pdf",
                 "storage_url": "https://storage.mfn.test/annual-2024.pdf",
+                "attachment_tier": "mfn-primary",
                 "lang": "en",
                 "report_kind": "annual",
                 "document_type": "ANNUAL_REPORT",
@@ -1322,6 +1335,7 @@ def test_flow_history_window_truncates_old_reports():
                 "published_at": "2026-05-01T08:00:00Z",
                 "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
                 "storage_url": "https://storage.mfn.test/q1-2026.pdf",
+                "attachment_tier": "mfn-primary",
                 "lang": "en",
                 "report_kind": "quarterly",
             },
@@ -1333,6 +1347,7 @@ def test_flow_history_window_truncates_old_reports():
                 "published_at": "2018-07-04T08:00:00Z",
                 "attachment_url": "https://storage.mfn.test/annual-2018.pdf",
                 "storage_url": "https://storage.mfn.test/annual-2018.pdf",
+                "attachment_tier": "mfn-primary",
                 "lang": "en",
                 "report_kind": "annual",
             },

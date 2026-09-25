@@ -116,6 +116,29 @@ post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
 gate — shortfalls return `evidence_incomplete` with no frozen packet instead
 of a green `complete`.
 
+### Evidence-selection manifest
+
+Selection is centralized in a pure, side-effect-free manifest
+(`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
+evidence-selection-manifest-v1`): `select_evidence_manifest()` derives every
+evidence role — audit history, cache, reuse, deduplication groups, packet
+inputs, typed rejections — from immutable facts plus one rule input set
+(`alphaforge/evidence/report_rules.py`, fingerprinted). Completeness, packet
+construction, cache reuse, and readiness all consume that one view, never
+raw persistence; `tools/check_evidence_manifest_boundary.py` enforces the
+boundary in CI, and `manifest_store.load_evidence_view` is the read path.
+Groups key on explicit bilingual group, then provider event id, then fiscal
+period, then source URL (attachmentless events still group by period), with
+class `annual` vs `quarterly`; completeness counts retained groups over
+expected groups and `packet_contents()` returns exactly the retained
+sources. Rejected candidates carry typed reasons (`rejection_reason`,
+`outside_history_window`, `not_selected_by_manifest`); ambiguous-selection
+blocks are recorded as typed rejections so their group stays in the coverage
+denominator. Evidence without a recognized `attachment_tier` is
+inadmissible on first run; unchanged reruns skip feed entries that already
+have complete current-fingerprint documents and rebuild the same manifest.
+Packets stamp the consumed `selection_manifest_id`.
+
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
 hash over the packet without its own `packet_hash`. Database-local document IDs

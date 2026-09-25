@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any
 
-from alphaforge.evidence.mfn_taxonomy import RECOGNIZED_ATTACHMENT_TIERS
 from alphaforge.evidence.report_rules import ReportHistoryWindow
 
 MANIFEST_VERSION = "evidence-selection-manifest-v1"
@@ -47,9 +46,7 @@ class EvidenceSelectionManifest:
 
     def packet_contents(self) -> tuple[dict[str, Any], ...]:
         """Return exactly the sources counted as retained by completeness."""
-        retained_urls = {
-            url for group in self.deduplication for url in group["packet_source_urls"]
-        }
+        retained_urls = {url for group in self.deduplication for url in group["packet_source_urls"]}
         return tuple(
             source for source in self.packet_inputs if source["source_url"] in retained_urls
         )
@@ -81,7 +78,9 @@ class EvidenceSelectionManifest:
 
 
 def _cutoff(as_of: str, window: ReportHistoryWindow, report_kind: str | None) -> str:
-    years = window.annual_lookback_years if report_kind == "annual" else window.interim_lookback_years
+    years = (
+        window.annual_lookback_years if report_kind == "annual" else window.interim_lookback_years
+    )
     value = date.fromisoformat(as_of[:10])
     try:
         return value.replace(year=value.year - years).isoformat()
@@ -158,7 +157,9 @@ def _packet_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         source_url = _source_url(row)
         if source_url:
             unique.setdefault(source_url, row)
-    return sorted(unique.values(), key=lambda row: (_source_url(row), int(row.get("document_id") or 0)))
+    return sorted(
+        unique.values(), key=lambda row: (_source_url(row), int(row.get("document_id") or 0))
+    )
 
 
 def select_evidence_manifest(
@@ -177,7 +178,9 @@ def select_evidence_manifest(
         raise ValueError("selection manifest requires active report rules")
     window = ReportHistoryWindow(**history_values)
     candidates = [dict(record) for record in (candidate_records or []) if _source_url(record)]
-    group_records = [record for record in candidates if _in_window(record, as_of=as_of, window=window)]
+    group_records = [
+        record for record in candidates if _in_window(record, as_of=as_of, window=window)
+    ]
     selected_packet_rows = _packet_rows(packet_inputs)
     packet_urls = {_source_url(row) for row in selected_packet_rows}
     if not group_records:
@@ -222,9 +225,11 @@ def select_evidence_manifest(
             "source_url": url,
             "reason": str(
                 candidate_by_url.get(url, {}).get("rejection_reason")
-                or ("outside_history_window" if not _in_window(
-                    candidate_by_url.get(url, {}), as_of=as_of, window=window
-                ) else "not_selected_by_manifest")
+                or (
+                    "outside_history_window"
+                    if not _in_window(candidate_by_url.get(url, {}), as_of=as_of, window=window)
+                    else "not_selected_by_manifest"
+                )
             ),
         }
         for url in sorted(considered_urls - selected_urls)
@@ -232,7 +237,9 @@ def select_evidence_manifest(
     audit_by_url = {_source_url(row): row for row in audit_history if _source_url(row)}
     for record in candidates:
         audit_by_url.setdefault(_source_url(record), record)
-    selected_packet_rows = [row for row in selected_packet_rows if _source_url(row) in selected_urls]
+    selected_packet_rows = [
+        row for row in selected_packet_rows if _source_url(row) in selected_urls
+    ]
     return EvidenceSelectionManifest(
         manifest_version=MANIFEST_VERSION,
         company_id=company_id,

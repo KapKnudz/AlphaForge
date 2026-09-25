@@ -28,8 +28,8 @@ from alphaforge.db.repositories import (
     mark_evidence_packets_unusable,
     persist_evidence_diagnostic,
     persist_evidence_document,
-    persist_evidence_selection_manifest,
     persist_evidence_packet,
+    persist_evidence_selection_manifest,
     persist_evidence_sibling,
     persist_mfn_issuer_candidates,
     record_job,
@@ -44,8 +44,10 @@ from alphaforge.evidence.ingest import (
 )
 from alphaforge.evidence.manifest import (
     EvidenceSelectionManifest,
-    completeness as manifest_completeness,
     packet_contents,
+)
+from alphaforge.evidence.manifest import (
+    completeness as manifest_completeness,
 )
 from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,
@@ -194,9 +196,8 @@ def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | N
     except (TypeError, ValueError):
         return None
     language = (
-        (metadata.get("pdf_language") if isinstance(metadata, dict) else None)
-        or existing.get("canonical_ingested_lang")
-    )
+        metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    ) or existing.get("canonical_ingested_lang")
     evidence = metadata.get("language_evidence") if isinstance(metadata, dict) else None
     if language in {"en", "sv"} and _is_replayable_language_evidence(evidence):
         return str(language), str(evidence)
@@ -582,7 +583,10 @@ def build_frozen_evidence_packet(
         raise ValueError("cannot build evidence packet without active report-rule provenance")
     if not isinstance(history_values, dict):
         raise ValueError("cannot build evidence packet without an active history window")
-    if selection_manifest is not None and selection_manifest.report_rules_fingerprint != fingerprint:
+    if (
+        selection_manifest is not None
+        and selection_manifest.report_rules_fingerprint != fingerprint
+    ):
         raise ValueError("selection manifest does not match active report-rule provenance")
     if selection_manifest is None:
         selection_manifest = load_evidence_selection_manifest(
@@ -713,8 +717,7 @@ def build_frozen_evidence_packet(
         if tier and tier not in {"unresolved", "none"}:
             tier_counts[str(tier)] = tier_counts.get(str(tier), 0) + 1
     limitations.update(
-        f"attachment_selection_{tier}:{count}"
-        for tier, count in sorted(tier_counts.items())
+        f"attachment_selection_{tier}:{count}" for tier, count in sorted(tier_counts.items())
     )
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
@@ -1696,7 +1699,7 @@ class OneCompanyEvidenceFlow:
         shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
-        for group_index, article in enumerate(deduped):
+        for article in deduped:
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
             downloaded = None
@@ -2014,17 +2017,13 @@ class OneCompanyEvidenceFlow:
             excluded_source_urls=unresolved_existing_source_urls,
         )
         if not dry_run:
-            persist_evidence_selection_manifest(
-                self.conn, selection_manifest, commit=False
-            )
+            persist_evidence_selection_manifest(self.conn, selection_manifest, commit=False)
         result.completeness = manifest_completeness(selection_manifest)
         expected = {
-            report_class: counts["expected"]
-            for report_class, counts in result.completeness.items()
+            report_class: counts["expected"] for report_class, counts in result.completeness.items()
         }
         retained = {
-            report_class: counts["retained"]
-            for report_class, counts in result.completeness.items()
+            report_class: counts["retained"] for report_class, counts in result.completeness.items()
         }
         missing = {
             report_class: expected[report_class] - retained.get(report_class, 0)

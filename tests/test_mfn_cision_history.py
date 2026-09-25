@@ -239,6 +239,7 @@ def test_foreign_issuer_release_filtered_before_download():
         "title": "Flow AB Interim Report Q1 2026",
         "published_at": "2026-05-01T08:00:00Z",
         "attachment_url": "https://storage.mfn.test/flow/q1.pdf",
+        "attachment_tier": "mfn-primary",
         "lang": "en",
     }
     feed = [
@@ -270,6 +271,7 @@ def test_stray_pdf_does_not_mark_lane_ready():
             "title": "Flow AB Interim Report Q1 2026",
             "published_at": "2026-05-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/flow/q1.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "en",
         },
         {
@@ -278,6 +280,7 @@ def test_stray_pdf_does_not_mark_lane_ready():
             "title": "Flow AB Interim Report Q2 2026",
             "published_at": "2026-08-01T08:00:00Z",
             "attachment_url": "https://storage.mfn.test/flow/q2.pdf",
+            "attachment_tier": "mfn-primary",
             "lang": "en",
         },
     ]

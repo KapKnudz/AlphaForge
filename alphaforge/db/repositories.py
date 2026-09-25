@@ -961,9 +961,7 @@ def load_evidence_selection_manifest(
     window = ReportHistoryWindow(**history_values)
 
     def cutoff(kind: str) -> str:
-        years = (
-            window.annual_lookback_years if kind == "annual" else window.interim_lookback_years
-        )
+        years = window.annual_lookback_years if kind == "annual" else window.interim_lookback_years
         value = date.fromisoformat(as_of[:10])
         try:
             return value.replace(year=value.year - years).isoformat()
@@ -1043,9 +1041,7 @@ def load_evidence_selection_manifest(
             ),
         ).fetchall()
     ]
-    packet_rows = [
-        row for row in packet_rows if str(row["source_url"]) not in excluded
-    ]
+    packet_rows = [row for row in packet_rows if str(row["source_url"]) not in excluded]
     for row in packet_rows:
         row["report_kind"] = metadata(row.get("raw_metadata")).get("report_kind")
         row["pages"] = [
