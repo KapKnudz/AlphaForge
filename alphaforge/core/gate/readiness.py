@@ -2,12 +2,18 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
 
-from alphaforge.core.frozen_packet import validate_frozen_packet
+from alphaforge.core.frozen_packet import (
+    EVIDENCE_RULES_VERSION,
+    is_stale_evidence_packet,
+    packet_rules_version,
+    validate_frozen_packet,
+)
 from alphaforge.core.valuation.forward_scenario import (
     ForwardScenarioEngine,
     ForwardScenarioInputs,
     ForwardScenarioReadiness,
 )
+from alphaforge.evidence.report_rules import current_report_rules_fingerprint
 
 ReadinessStatus = Literal[
     "ready",
@@ -15,7 +21,6 @@ ReadinessStatus = Literal[
     "valuation_blocked",
     "method_unsupported",
 ]
-EvidenceSubsectionStatus = Literal["available", "partial", "unavailable", "stale"]
 BlockerCategory = Literal["evidence", "valuation", "method"]
 
 
@@ -34,8 +39,6 @@ class AgentReadinessAssessment:
     blockers: tuple[ReadinessBlocker, ...] = ()
     limitations: tuple[ReadinessBlocker, ...] = ()
     forward_scenario_readiness: ForwardScenarioReadiness | None = None
-    liquidity_status: EvidenceSubsectionStatus = "unavailable"
-    ownership_status: EvidenceSubsectionStatus = "unavailable"
 
     @property
     def ready(self) -> bool:
@@ -75,7 +78,8 @@ class AgentReadinessGate:
 
         evidence = candidate.research_evidence or {}
         if getattr(candidate, "evidence_lane", evidence.get("evidence_lane", False)):
-            if not validate_frozen_packet(evidence.get("evidence_packet")):
+            packet = evidence.get("evidence_packet")
+            if not validate_frozen_packet(packet):
                 blockers.append(
                     ReadinessBlocker(
                         code="frozen_evidence_packet_missing",
@@ -83,14 +87,42 @@ class AgentReadinessGate:
                         message="a valid frozen point-in-time evidence packet is required",
                     )
                 )
-        elif not evidence.get("documents"):
-            blockers.append(
-                ReadinessBlocker(
-                    code="primary_evidence_missing",
-                    category="evidence",
-                    message="no textual company reports or releases are stored",
+            elif is_stale_evidence_packet(
+                packet, current_rules_fingerprint=current_report_rules_fingerprint()
+            ):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="stale_evidence_packet",
+                        category="evidence",
+                        message=(
+                            "frozen evidence packet was built under older evidence rules"
+                            f" (v{packet_rules_version(packet)}); rerun the evidence lane"
+                            f" for v{EVIDENCE_RULES_VERSION}"
+                        ),
+                    )
                 )
-            )
+        else:
+            manifest = evidence.get("evidence_manifest") or {}
+            fallback = manifest.get("readiness_fallback") or {}
+            if fallback.get("documents_available"):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="frozen_evidence_packet_missing",
+                        category="evidence",
+                        message=(
+                            "auditable evidence exists, but a usable current frozen "
+                            "evidence packet is required"
+                        ),
+                    )
+                )
+            elif not evidence.get("documents"):
+                blockers.append(
+                    ReadinessBlocker(
+                        code="primary_evidence_missing",
+                        category="evidence",
+                        message="no textual company reports or releases are stored",
+                    )
+                )
 
         reverse_dcf = candidate.full_results.get("reverse_dcf") or {}
         if _field(reverse_dcf, "status") != "available":
@@ -120,9 +152,6 @@ class AgentReadinessGate:
             )
 
         forward_scenario_readiness = assess_forward_scenario_readiness(candidate)
-        ownership_liquidity = candidate.research_evidence.get("ownership_liquidity", {})
-        liquidity_status = _subsection_status(ownership_liquidity.get("liquidity"))
-        ownership_status = _subsection_status(ownership_liquidity.get("ownership"))
         return AgentReadinessAssessment(
             company_id=candidate.company_id,
             ticker=candidate.ticker,
@@ -130,8 +159,6 @@ class AgentReadinessGate:
             blockers=tuple(blockers),
             limitations=tuple(limitations),
             forward_scenario_readiness=forward_scenario_readiness,
-            liquidity_status=liquidity_status,
-            ownership_status=ownership_status,
         )
 
     def require_ready(self, candidates: list) -> tuple[AgentReadinessAssessment, ...]:
@@ -190,13 +217,6 @@ def _status(blockers: list[ReadinessBlocker]) -> ReadinessStatus:
 
 def _field(value, name):
     return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
-
-
-def _subsection_status(value) -> EvidenceSubsectionStatus:
-    status = _field(value, "status")
-    if status in {"available", "partial", "unavailable", "stale"}:
-        return status
-    return "unavailable"
 
 
 def _positive(value) -> bool:

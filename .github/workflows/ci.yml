@@ -18,6 +18,8 @@ jobs:
         with: { python-version: "3.11", cache: pip }
       - run: pip install ruff import-linter deptry
       - run: ruff check . && ruff format --check .
+      - name: evidence manifest dependency boundary
+        run: python tools/check_evidence_manifest_boundary.py
       - name: importlinter (skip on docs-only tree)
         run: |
           set -eu

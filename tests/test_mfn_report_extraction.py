@@ -26,8 +26,15 @@ from alphaforge.evidence.ingest import (
     bilingual_dedupe,
     resolve_document_language,
 )
-from alphaforge.evidence.mfn_taxonomy import document_type
-from alphaforge.providers.mfn.scraper import MfnScraper
+from alphaforge.evidence.mfn_taxonomy import document_type, is_invitation_or_presentation
+from alphaforge.providers.mfn.scraper import (
+    MfnScraper,
+    _canonical_issuer,
+    _cis_release_issuer,
+    _is_mfn_release_url,
+    _issuer_token,
+    _parse_html,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mfn"
 
@@ -933,6 +940,283 @@ def test_superseded_edition_retains_metadata_only():
         assert find_complete_evidence_attachment(conn, en_attachment, company_id) is not None
     finally:
         conn.close()
+
+
+def test_cis_release_url_requires_stable_shape():
+    base = "https://mfn.test"
+    assert _is_mfn_release_url("https://mfn.test/cis/a/acme/slug-c41def1c", base)
+    assert _is_mfn_release_url("https://mfn.test/a/acme/anything", base)
+    assert _is_mfn_release_url("https://mfn.test/cision/acme/anything", base)
+    assert not _is_mfn_release_url("https://mfn.test/cis/a/acme/slug-without-hash", base)
+    assert not _is_mfn_release_url("https://mfn.test/cis/a/acme/", base)
+    assert not _is_mfn_release_url("https://mfn.test/cis/a/", base)
+    assert not _is_mfn_release_url("https://mfn.test/cis/other/acme/x-c41def1c", base)
+    assert not _is_mfn_release_url("https://other.test/cis/a/acme/slug-c41def1c", base)
+    assert not _is_mfn_release_url("https://mfn.test/about/annual-report", base)
+
+
+def test_discovery_accepts_cis_shapes_with_counted_drops():
+    payload = {
+        "items": [
+            {
+                "url": "https://mfn.test/a/acme/q1",
+                "content": {"title": "Acme Interim Report Q1 2026"},
+            },
+            {
+                "url": "https://mfn.test/cis/a/acme/acme-year-end-report-2025-c41def1c",
+                "content": {"title": "Acme Year-End Report 2025"},
+            },
+            {
+                "url": "https://mfn.test/cision/acme/annual",
+                "content": {"title": "Acme Annual Report 2025"},
+            },
+            {
+                "url": "https://mfn.test/cis/a/acme/acme-monthly-sales-77aa00bb",
+                "content": {"title": "Acme Monthly Sales April 2026"},
+            },
+            {
+                "url": "https://press.example.com/acme-year-end-report-2025",
+                "content": {"title": "Acme Year-End Report 2025"},
+            },
+            {
+                "url": "https://mfn.test/cis/a/acme/missing-hash-suffix",
+                "content": {"title": "Acme Year-End Report 2025"},
+            },
+        ]
+    }
+    scraper = MfnScraper(base_url="https://mfn.test")
+    articles = scraper._parse_json_feed_items(payload)
+    assert [article["url"] for article in articles] == [
+        "https://mfn.test/a/acme/q1",
+        "https://mfn.test/cis/a/acme/acme-year-end-report-2025-c41def1c",
+        "https://mfn.test/cision/acme/annual",
+    ]
+    assert scraper.drain_discovery_skips() == {
+        "non_report_title": 1,
+        "non_release_url": 2,
+    }
+    assert scraper.drain_discovery_skips() == {}
+
+
+def test_issuer_identity_helpers_anchor_on_resolved_slug():
+    assert _issuer_token("all/a/clas-ohlson") == "clas-ohlson"
+    assert _issuer_token("goobit") == "goobit"
+    assert _cis_release_issuer("https://mfn.se/cis/a/clas-ohlson/slug-c41def1c") == "clas-ohlson"
+    assert _cis_release_issuer("https://mfn.se/a/clas-ohlson/slug") is None
+    assert _canonical_issuer("https://mfn.se/all/a/clas-ohlson/slug-c41def1c") == "clas-ohlson"
+    assert _canonical_issuer("https://mfn.se/cis/a/clas-ohlson/slug-c41def1c") is None
+    assert _canonical_issuer(None) is None
+    assert _canonical_issuer("not a url") is None
+
+
+def test_invitation_titles_are_not_reports_despite_report_words():
+    assert is_invitation_or_presentation(
+        "Invitation to media and analyst briefing for Ericsson Q2 2026 report"
+    )
+    assert is_invitation_or_presentation("Inbjudan till presentation av bokslutskommuniké")
+    assert is_invitation_or_presentation(
+        "Media and analyst conference-call for Flow Q2 2026 report"
+    )
+    assert is_invitation_or_presentation("Teleconference on Flow Q2 2026 report")
+    assert is_invitation_or_presentation("Q1 webcast replay")
+    assert not is_invitation_or_presentation("Clas Ohlson delårsrapport Q1 2026/27")
+    assert not is_invitation_or_presentation("Clas Ohlson Annual Report 2025/26")
+    assert not is_invitation_or_presentation("Acme Interim Report Q1 2026")
+
+
+def test_multi_attachment_report_selects_primary_main_pdf():
+    html = (FIXTURES / "cis_report_multi_attachment.html").read_text(encoding="utf-8")
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == "https://mb.cision.com/Main/1116/4356813/4130290.pdf"
+    assert parsed["attachment_tier"] == "mfn-primary"
+    assert (
+        parsed["canonical_url"]
+        == "https://mfn.se/all/a/clas-ohlson/clas-ohlson-year-end-report-2025-26-c41def1c"
+    )
+
+
+def test_multi_attachment_falls_back_to_main_path_without_primary_marker():
+    html = (FIXTURES / "cis_report_multi_attachment.html").read_text(encoding="utf-8")
+    stripped = html.replace('class="mfn-primary"', 'class=""')
+    parsed = _parse_html(stripped)
+    assert parsed["storage_url"] == "https://mb.cision.com/Main/1116/4356813/4130290.pdf"
+    assert parsed["attachment_tier"] == "main-path"
+
+
+def test_single_main_pdf_on_report_page_selects_main_path():
+    html = """
+    <html>
+      <head>
+        <link rel="canonical" href="https://mfn.se/all/a/investor/investor-interim-report-january-june-2026-7c51cc12">
+        <meta property="article:published_time" content="2026-07-17T06:30:00Z">
+      </head>
+      <body>
+        <h1>Investor Interim Report January-June 2026</h1>
+        <article><div class="release-body">Net asset value increased.</div></article>
+        <a href="https://mb.cision.com/Main/1084/4375173/4194086.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == "https://mb.cision.com/Main/1084/4375173/4194086.pdf"
+    assert parsed["attachment_tier"] == "main-path"
+
+
+def test_opaque_public_only_pdf_is_unresolved_not_accepted():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-06-03T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://mb.cision.com/Public/1116/4356813/97221daf694bcc42.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
+def test_invitation_poison_page_yields_no_attachment():
+    html = (FIXTURES / "cis_invitation_poison.html").read_text(encoding="utf-8")
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.se")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details(
+            [{"url": "https://mfn.se/cis/a/ericsson/invitation-b8df98ed"}]
+        )
+    assert articles == []
+    assert scraper.drain_detail_skips() == {"invitation_or_presentation_release": 1}
+
+
+def test_hyphenated_invitation_page_yields_no_attachment():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-07-17T06:30:00Z"></head>
+      <body>
+        <h1>Media and analyst conference-call for Flow Q2 2026 report</h1>
+        <article><div class="release-body">Dial-in details.</div></article>
+        <a href="https://mb.cision.com/Main/1116/4356813/4130290.pdf">Q2 interim report</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "none"
+
+
+def test_page_without_title_cannot_authorize_attachment():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "none"
+    response = SimpleNamespace(status_code=200, text=html)
+    scraper = MfnScraper(base_url="https://mfn.test")
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", return_value=response),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        articles = scraper.scrape_details(
+            [{"url": "https://mfn.test/a/acme/annual", "title": "Acme Year-End Report 2025"}]
+        )
+    assert articles == []
+    assert scraper.drain_detail_skips() == {"non_report_title": 1}
+
+
+def test_label_score_requires_corroborating_report_title():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
+        <a href="https://storage.mfn.se/uuid/cover.jpg">File</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == "https://storage.mfn.se/uuid/id2.pdf"
+    assert parsed["attachment_tier"] == "label-score"
+
+
+def test_neutral_label_alone_is_unresolved():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/12345.pdf">Download file</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
+def test_report_like_url_with_neutral_label_is_unresolved():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/annual-report-2025.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
+def test_main_path_on_non_cision_host_is_not_main_tier():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/Main/1116/4356813/4130290.pdf">PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
+def test_tied_report_labels_are_unresolved():
+    html = """
+    <html>
+      <head><meta property="article:published_time" content="2026-05-07T06:30:00Z"></head>
+      <body>
+        <h1>Acme Year-End Report 2025</h1>
+        <article><div class="release-body">Profit grew.</div></article>
+        <a href="https://storage.mfn.se/uuid/id1.pdf">Annual report PDF</a>
+        <a href="https://storage.mfn.se/uuid/id2.pdf">Annual report PDF</a>
+      </body>
+    </html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
 
 
 def test_sibling_persistence_strips_demoted_edition_children():

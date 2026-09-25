@@ -33,7 +33,17 @@ IMPORTANCE_KEYWORDS_SE: dict[str, list[str]] = {
         "takeover",
     ],
     "medium": ["delårsrapport", "kvartalsrapport", "order", "avtal"],
-    "low": ["inbjudan", "invitation", "presentation", "webcast"],
+    "low": [
+        "inbjudan",
+        "invitation",
+        "presentation",
+        "briefing",
+        "webcast",
+        "earnings call",
+        "conference call",
+        "teleconference",
+        "webinar",
+    ],
 }
 
 REPORT_TERMS_SE: list[str] = [
@@ -131,3 +141,67 @@ def is_report(title: str) -> bool:
     if any(term in lower for term in ("report schedule", "rapportkalender", "financial calendar")):
         return False
     return report_kind(title) is not None
+
+
+# Titles that announce an invitation, presentation, or webcast about a report —
+# not the report itself. These titles can still match :func:`is_report` (e.g.
+# "invitation to ... briefing for ... Q2 2026 report"), so the evidence lane
+# must exclude them explicitly instead of absorbing their attachments.
+INVITATION_MARKERS: tuple[str, ...] = tuple(IMPORTANCE_KEYWORDS_SE["low"])
+
+
+# Confidence tier of the attachment selected from a release page. ``none``
+# means the page carried no viable PDF candidate (or the page-level report
+# guard refused it); ``unresolved`` means candidates existed but ranked
+# selection could not pick exactly one — the lane must fail visibly instead
+# of guessing. Defined here (leaf module) so both the scraper and the
+# evidence flow share one authoritative definition without a circular import.
+ATTACHMENT_TIERS: tuple[str, ...] = (
+    "mfn-primary",
+    "main-path",
+    "label-score",
+    "unresolved",
+    "none",
+)
+RECOGNIZED_ATTACHMENT_TIERS: tuple[str, ...] = ATTACHMENT_TIERS[:3]
+
+
+# Guarded Cision-distribution rules shared by the scraper and the rule
+# fingerprint. Defined here (leaf module) so the deterministic core can
+# fingerprint them without importing the provider layer (which would pull
+# in ``requests`` and break the ``deterministic core is isolated`` contract).
+REPORT_ATTACHMENT_TERMS: tuple[str, ...] = (
+    "annual",
+    "årsredovis",
+    "year-end",
+    "year_end",
+    "interim",
+    "quarter",
+    "delårs",
+    "bokslut",
+    "report",
+    "rapport",
+)
+NON_REPORT_ATTACHMENT_TERMS: tuple[str, ...] = (
+    "presentation",
+    "slides",
+    "webcast",
+    "press release",
+    "pressmeddelande",
+    "cover",
+    "kallelse",
+)
+# Cision-distribution publishing on MFN's own host: /cis/a/<issuer>/<slug>-<8hex>.
+CIS_RELEASE_PATH_PATTERN: str = r"^/cis/a/([^/]+)/([^/]+)-([0-9a-fA-F]{8})$"
+CIS_RELEASE_PATH_RE = re.compile(CIS_RELEASE_PATH_PATTERN)
+# Hosts that serve genuine report PDFs behind MFN release pages.
+ATTACHMENT_HOST_MARKERS: tuple[str, ...] = ("storage.mfn.se/", "mb.cision.com/")
+
+
+def is_invitation_or_presentation(title: str) -> bool:
+    """Return True when a release title is an invitation/presentation, not a report."""
+    lower = re.sub(r"[-_]+", " ", " ".join(title.lower().split()))
+    compact = lower.replace(" ", "")
+    return any(
+        marker in lower or marker.replace(" ", "") in compact for marker in INVITATION_MARKERS
+    )

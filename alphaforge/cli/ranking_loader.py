@@ -14,7 +14,7 @@ from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
-from alphaforge.db.repositories import load_evidence_packet
+from alphaforge.evidence.manifest_store import load_evidence_view
 
 
 def _number(value: Any) -> float | None:
@@ -89,7 +89,19 @@ def _price(row, fallback_currency: str | None) -> StockPrice:
 def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any]:
     """Load all ranking inputs visible at *as_of* (never current live rows)."""
     cutoff = date.fromisoformat(as_of[:10])
-    evidence_packet = load_evidence_packet(conn, company_id, as_of[:10])
+    evidence_packet, selection_manifest = load_evidence_view(
+        conn, company_id=company_id, as_of=as_of[:10]
+    )
+    docs = [
+        {
+            "id": row.get("document_id"),
+            "source_url": row.get("source_url"),
+            "title": row.get("title"),
+            "published_at": row.get("published_at"),
+        }
+        for row in selection_manifest.audit_history
+        if row.get("published_at") and str(row["published_at"])[:10] <= as_of[:10]
+    ]
     company = conn.execute(
         "SELECT stock_price_currency, report_currency FROM companies WHERE id=?", (company_id,)
     ).fetchone()
@@ -133,8 +145,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             "valuation": None,
             "fundamental_kpis": {},
             "research_evidence": {
-                "documents": [],
+                "documents": docs,
                 "evidence_packet": evidence_packet,
+                "evidence_manifest": selection_manifest.to_dict(),
                 "evidence_lane": bool(evidence_packet),
             },
             "dcf": {
@@ -263,13 +276,6 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             kpi_annual[int(row[0])] = float(row[1])
     kpis: dict[int, float] = {**kpi_annual, **kpi_r12}
 
-    docs = [
-        dict(row)
-        for row in conn.execute(
-            "SELECT id, source_url, title, published_at FROM research_documents WHERE company_id=? AND published_at IS NOT NULL AND substr(published_at, 1, 10) <= ?",
-            (company_id, cutoff.isoformat()),
-        ).fetchall()
-    ]
     if dcf_current_report is not None and dcf_current_report.net_debt is not None:
         current_net_debt = dcf_current_report.net_debt
         net_debt_source = "net_debt"
@@ -550,6 +556,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         research_evidence={
             "documents": docs,
             "evidence_packet": evidence_packet,
+            "evidence_manifest": selection_manifest.to_dict(),
             "evidence_lane": bool(evidence_packet),
         },
         full_results={

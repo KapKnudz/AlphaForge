@@ -12,15 +12,24 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from alphaforge.core.frozen_packet import stable_packet_hash, validate_frozen_packet
+from alphaforge.core.frozen_packet import (
+    EVIDENCE_RULES_VERSION,
+    stable_packet_hash,
+    validate_frozen_packet,
+)
 from alphaforge.db.repositories import (
     complete_evidence_identity_documents,
+    describe_evidence_state,
     find_complete_evidence_attachment,
     find_complete_evidence_document,
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
+    load_evidence_selection_manifest,
+    mark_evidence_packets_unusable,
+    persist_evidence_diagnostic,
     persist_evidence_document,
     persist_evidence_packet,
+    persist_evidence_selection_manifest,
     persist_evidence_sibling,
     persist_mfn_issuer_candidates,
     record_job,
@@ -33,7 +42,25 @@ from alphaforge.evidence.ingest import (
     bilingual_dedupe,
     resolve_document_language,
 )
-from alphaforge.evidence.mfn_taxonomy import document_type, is_report
+from alphaforge.evidence.manifest import (
+    EvidenceSelectionManifest,
+    packet_contents,
+)
+from alphaforge.evidence.manifest import (
+    completeness as manifest_completeness,
+)
+from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_TIERS,
+    document_type,
+    is_invitation_or_presentation,
+    is_report,
+    report_kind,
+)
+from alphaforge.evidence.report_rules import (
+    DEFAULT_HISTORY_WINDOW,
+    ReportHistoryWindow,
+    report_rules_metadata,
+)
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 from alphaforge.providers.mfn.issuer import MfnIssuerAcquisitionError, MfnIssuerResolver
@@ -50,28 +77,6 @@ class EvidenceResourceLimits:
 
 
 DEFAULT_RESOURCE_LIMITS = EvidenceResourceLimits()
-
-
-@dataclass(frozen=True)
-class ReportHistoryWindow:
-    """Bounded historical retrieval window for annual/quarterly reports.
-
-    Interim reports (Q1-Q3 + year-end BKS) and official annual reports
-    drive different horizons: the Hedborg credibility ledger needs
-    ~8-12 quarters, while the annual valuation history benefits from
-    a deeper annual tail.  Both windows are applied as *cutoffs*
-    relative to ``as_of`` so a deeper offset scan can stop early
-    without fetching the entire MFN sales-noise tail.
-    """
-
-    interim_lookback_years: int = 2
-    annual_lookback_years: int = 5
-    max_offsets: int = 12
-    max_detail_fetches: int = 60
-    limit_per_offset: int = 48
-
-
-DEFAULT_HISTORY_WINDOW = ReportHistoryWindow()
 
 
 class PdfAcquisitionError(ValueError):
@@ -178,6 +183,11 @@ def _is_pdf_backed_language_evidence(value: Any) -> bool:
     return evidence == "filename" or evidence.startswith("pdf_text:")
 
 
+def _is_replayable_language_evidence(value: Any) -> bool:
+    evidence = str(value or "")
+    return _is_pdf_backed_language_evidence(evidence) or evidence.startswith("release_hint:")
+
+
 def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | None:
     if existing is None or not existing.get("canonical_raw_metadata"):
         return None
@@ -185,11 +195,24 @@ def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | N
         metadata = json.loads(existing["canonical_raw_metadata"])
     except (TypeError, ValueError):
         return None
-    language = metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    language = (
+        metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    ) or existing.get("canonical_ingested_lang")
     evidence = metadata.get("language_evidence") if isinstance(metadata, dict) else None
-    if language in {"en", "sv"} and _is_pdf_backed_language_evidence(evidence):
+    if language in {"en", "sv"} and _is_replayable_language_evidence(evidence):
         return str(language), str(evidence)
     return None
+
+
+def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
+    if isinstance(raw_metadata, str):
+        try:
+            raw_metadata = json.loads(raw_metadata)
+        except (TypeError, ValueError):
+            return False
+    return (
+        isinstance(raw_metadata, dict) and raw_metadata.get("attachment_tier") in ATTACHMENT_TIERS
+    )
 
 
 def _prepare_selected_article(
@@ -545,60 +568,44 @@ def build_frozen_evidence_packet(
     additional_limitations: list[str] | None = None,
     publication_cutoff: str | None = None,
     excluded_source_urls: set[str] | None = None,
+    report_rules: dict[str, Any] | None = None,
+    evidence_diagnostic: dict[str, Any] | None = None,
+    selection_manifest: EvidenceSelectionManifest | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
     if mapping is None:
         raise ValueError("cannot build evidence packet without a verified MFN mapping")
-    cutoff = min(as_of[:10], publication_cutoff[:10]) if publication_cutoff else as_of[:10]
-    rows = conn.execute(
-        """
-        SELECT d.id AS document_id, d.source_url, d.title, d.published_at,
-               d.fetched_at, d.ingested_lang, d.raw_metadata, d.content_text AS release_body,
-               a.source_url AS attachment_url, a.content_type, a.byte_size,
-               a.sha256 AS attachment_sha256,
-               e.extractor, e.text_checksum, e.page_count, e.pages_included,
-               e.page_truncated, e.scanned, e.limitations
-        FROM research_documents d
-        JOIN research_attachments a ON a.document_id=d.id
-        JOIN document_extractions e ON e.document_id=d.id
-        WHERE d.company_id=? AND d.duplicate_of IS NULL
-          AND d.published_at IS NOT NULL AND substr(d.published_at, 1, 10) <= ?
-          AND EXISTS (
-              SELECT 1 FROM document_pages p WHERE p.extraction_id=e.id
-          )
-        ORDER BY d.source_url, a.sha256, d.id
-        """,
-        (company_id, cutoff),
-    ).fetchall()
+    active_rules = report_rules or report_rules_metadata()
+    fingerprint = active_rules.get("fingerprint") if isinstance(active_rules, dict) else None
+    history_values = active_rules.get("history_window") if isinstance(active_rules, dict) else None
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError("cannot build evidence packet without active report-rule provenance")
+    if not isinstance(history_values, dict):
+        raise ValueError("cannot build evidence packet without an active history window")
+    if (
+        selection_manifest is not None
+        and selection_manifest.report_rules_fingerprint != fingerprint
+    ):
+        raise ValueError("selection manifest does not match active report-rule provenance")
+    if selection_manifest is None:
+        selection_manifest = load_evidence_selection_manifest(
+            conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules=active_rules,
+            publication_cutoff=publication_cutoff,
+            excluded_source_urls=excluded_source_urls,
+        )
+    rows = packet_contents(selection_manifest)
     sources: list[dict[str, Any]] = []
     limitations: set[str] = set()
     fallback_source_count = 0
     excluded_source_urls = excluded_source_urls or set()
     for row in rows:
-        if str(row["source_url"]) in excluded_source_urls:
-            continue
         document_id = int(row["document_id"])
-        page_rows = conn.execute(
-            """
-            SELECT page_number, anchor, text, text_checksum
-            FROM document_pages
-            WHERE extraction_id=(SELECT id FROM document_extractions WHERE document_id=?)
-            ORDER BY page_number
-            """,
-            (document_id,),
-        ).fetchall()
-        sibling_rows = conn.execute(
-            """
-            SELECT source_url, title, published_at, ingested_lang, duplicate_of, raw_metadata
-            FROM research_documents
-            WHERE duplicate_of=?
-              AND published_at IS NOT NULL
-              AND substr(published_at, 1, 10) <= ?
-            ORDER BY source_url
-            """,
-            (document_id, cutoff),
-        ).fetchall()
+        page_rows = row.get("pages", [])
+        sibling_rows = row.get("siblings", [])
         row_limitations: list[str] = []
         if row["limitations"]:
             try:
@@ -654,6 +661,7 @@ def build_frozen_evidence_packet(
             "selection_reason": (
                 "PREFERRED_LANGUAGE" if source_language == "en" else "FALLBACK_LANGUAGE"
             ),
+            "attachment_tier": raw_metadata.get("attachment_tier"),
             "publication_date": row["published_at"],
             "publication_timestamp_authoritative": bool(
                 raw_metadata.get("authoritative_publication_timestamp")
@@ -703,9 +711,20 @@ def build_frozen_evidence_packet(
     )
     if fallback_source_count:
         limitations.add(f"pdf_language_fallback:{fallback_source_count}")
+    tier_counts: dict[str, int] = {}
+    for source in sources:
+        tier = source.get("attachment_tier")
+        if tier and tier not in {"unresolved", "none"}:
+            tier_counts[str(tier)] = tier_counts.get(str(tier), 0) + 1
+    limitations.update(
+        f"attachment_selection_{tier}:{count}" for tier, count in sorted(tier_counts.items())
+    )
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
+        "evidence_rules_version": EVIDENCE_RULES_VERSION,
+        "report_rules": active_rules,
+        "selection_manifest_id": selection_manifest.manifest_id,
         "company_id": int(company_id),
         "as_of": as_of[:10],
         "issuer": {
@@ -719,12 +738,34 @@ def build_frozen_evidence_packet(
         "evidence_catalog": {"canonical_source_ids": [source["source_id"] for source in sources]},
         "limitations": sorted(limitations | set(additional_limitations or [])),
     }
+    if evidence_diagnostic is not None:
+        base["evidence_diagnostic"] = evidence_diagnostic
     base["coverage_facts"] = _coverage_facts(
         sources,
         set(base["limitations"]),
     )
     base["packet_hash"] = stable_packet_hash(base)
     return base
+
+
+# Skip reasons that record a download/parse transport failure rather than a
+# pre-download filter decision. Everything else in ``skipped`` counts as
+# filtered before download; ``ambiguous_selection`` gets its own bucket.
+DOWNLOAD_FAILED_SKIP_REASONS = frozenset(
+    {
+        "transport_error",
+        "http_status",
+        "resource_limit",
+        "invalid_content_type",
+        "invalid_pdf_magic",
+        "pdf_extraction_failed",
+        "mfn_feed_fetch_failed",
+        "mfn_detail_fetch_failed",
+        "mfn_feed_http_status",
+        "mfn_detail_http_status",
+    }
+)
+AMBIGUOUS_SELECTION_SKIP_REASON = "ambiguous_selection"
 
 
 @dataclass
@@ -735,13 +776,37 @@ class EvidenceFlowResult:
     discovered: int = 0
     eligible: int = 0
     downloaded: int = 0
+    persisted: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
     packet_hash: str | None = None
     packet: dict[str, Any] | None = None
     no_evidence_reason: NoEvidenceReason | None = None
     message: str | None = None
+    completeness: dict[str, dict[str, int]] = field(default_factory=dict)
+    attachment_selection: dict[str, int] = field(default_factory=dict)
+    _persisted_diagnostic: dict[str, Any] | None = field(default=None, repr=False)
+
+    def filtered_before_download(self) -> int:
+        return sum(
+            count
+            for reason, count in self.skipped.items()
+            if reason != AMBIGUOUS_SELECTION_SKIP_REASON
+            and reason not in DOWNLOAD_FAILED_SKIP_REASONS
+        )
+
+    def download_failed(self) -> int:
+        return sum(
+            count
+            for reason, count in self.skipped.items()
+            if reason in DOWNLOAD_FAILED_SKIP_REASONS
+        )
+
+    def ambiguous_selection(self) -> int:
+        return self.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0)
 
     def diagnostic(self) -> dict[str, Any]:
+        if self._persisted_diagnostic is not None:
+            return dict(self._persisted_diagnostic)
         return {
             "status": self.status,
             "company_id": self.company_id,
@@ -750,12 +815,84 @@ class EvidenceFlowResult:
             "eligible": self.eligible,
             "downloaded": self.downloaded,
             "skipped": dict(sorted(self.skipped.items())),
+            "filtered_before_download": self.filtered_before_download(),
+            "download_failed": self.download_failed(),
+            "ambiguous_selection": self.ambiguous_selection(),
+            "retained": self.downloaded + self.persisted,
+            "persisted": self.persisted,
+            "completeness": {
+                report_class: dict(counts) for report_class, counts in self.completeness.items()
+            },
+            "attachment_selection": dict(sorted(self.attachment_selection.items())),
             "packet_hash": self.packet_hash,
             "no_evidence_reason": (
                 self.no_evidence_reason.value if self.no_evidence_reason is not None else None
             ),
             "message": self.message,
         }
+
+
+def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
+    """Read counted scraper drops without breaking fake scrapers in tests."""
+    drain = getattr(scraper, method, None)
+    if not callable(drain):
+        return {}
+    try:
+        drained = drain()
+    except TypeError:
+        return {}
+    return dict(drained or {})
+
+
+def _confirm_cis_issuer(
+    release_url: str, canonical_url: str | None, *, issuer_token: str
+) -> str | None:
+    """Confirm a ``/cis/a/`` release belongs to the resolved issuer.
+
+    Returns None when the release URL issuer segment and the page's MFN
+    canonical issuer segment both match the resolved mapping token.
+    Otherwise returns the ``skipped`` reason: ``issuer_mismatch`` when a
+    present issuer binding points at a different issuer, else
+    ``canonical_issuer_unconfirmed`` (missing, malformed, or off-host
+    canonical). Non-``/cis/a/`` URLs return None (legacy path unchanged).
+    """
+    from urllib.parse import urlsplit as _urlsplit
+
+    from alphaforge.providers.mfn.scraper import _canonical_issuer, _cis_release_issuer
+
+    release_issuer = _cis_release_issuer(release_url)
+    if release_issuer is None:
+        return None
+    if release_issuer.lower() != issuer_token:
+        return "issuer_mismatch"
+    canonical_issuer = _canonical_issuer(canonical_url)
+    if canonical_issuer is None or canonical_issuer.lower() != issuer_token:
+        if canonical_issuer is not None and canonical_issuer.lower() != issuer_token:
+            return "issuer_mismatch"
+        return "canonical_issuer_unconfirmed"
+    if canonical_url is not None:
+        release_host = _urlsplit(release_url).netloc.lower()
+        if _urlsplit(canonical_url).netloc.lower() != release_host:
+            return "canonical_issuer_unconfirmed"
+    return None
+
+
+def _completeness_class(article: dict[str, Any]) -> str:
+    """Return the hard-gate coverage class (annual vs quarterly) of a group."""
+    kind = article.get("report_kind") or report_kind(str(article.get("title") or ""))
+    return kind if kind in {"annual", "quarterly"} else "quarterly"
+
+
+def _persisted_anchor_in_window(
+    anchor: dict[str, Any], *, as_of: str, window: ReportHistoryWindow
+) -> bool:
+    """Mirror the discovery window filter for a persisted report candidate."""
+    published = str(anchor.get("published_at") or "")[:10]
+    if not published or published > as_of[:10]:
+        return False
+    kind = anchor.get("report_kind")
+    cutoff = _resolve_cutoff(as_of, window, kind if kind in {"annual", "quarterly"} else None)
+    return published >= cutoff
 
 
 def _discover_feed_page(scraper: Any, mfn_slug: str, page: int) -> list[dict[str, Any]]:
@@ -887,7 +1024,6 @@ class OneCompanyEvidenceFlow:
         scraper: MfnScraper | None = None,
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
-        history_window: ReportHistoryWindow | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.conn = conn
@@ -898,7 +1034,6 @@ class OneCompanyEvidenceFlow:
         self.scraper = scraper
         self.resolver = resolver or MfnIssuerResolver(base_url=self.scraper.base_url)
         self.limits = limits
-        self.history_window: ReportHistoryWindow | None = history_window
         self.now = now or (lambda: datetime.now(UTC))
 
     def run(
@@ -929,6 +1064,13 @@ class OneCompanyEvidenceFlow:
                         "SELECT borsdata_id FROM companies WHERE id=?", (company_id,)
                     ).fetchone()
                     if row is not None:
+                        mark_evidence_packets_unusable(
+                            self.conn,
+                            company_id=company_id,
+                            as_of=as_of,
+                            reason=f"failed:unhandled_error:{exc}",
+                            commit=False,
+                        )
                         record_job(
                             self.conn,
                             "evidence",
@@ -937,11 +1079,20 @@ class OneCompanyEvidenceFlow:
                                 int(row["borsdata_id"]) if row["borsdata_id"] is not None else None
                             ),
                             status="failed",
-                            error={"code": "unhandled_error", "message": str(exc)},
+                            error={
+                                "code": "unhandled_error",
+                                "message": str(exc),
+                                "as_of": as_of,
+                            },
                             begin_attempt=False,
                         )
                 except Exception:
-                    pass
+                    # Preserve the original exception.  The normal terminal
+                    # paths use the same mark-then-job transaction below.
+                    try:
+                        self.conn.rollback()
+                    except Exception:
+                        pass
             raise
 
     def _run(
@@ -972,6 +1123,8 @@ class OneCompanyEvidenceFlow:
             return result
         company = dict(row)
         borsdata_id = company.get("borsdata_id")
+        window = DEFAULT_HISTORY_WINDOW
+        active_rules = report_rules_metadata()
         if not dry_run:
             record_job(
                 self.conn,
@@ -984,6 +1137,17 @@ class OneCompanyEvidenceFlow:
         def finish(result: EvidenceFlowResult) -> EvidenceFlowResult:
             if dry_run:
                 return result
+            if result.status != "complete":
+                # Mark every prior packet for this point-in-time key before the
+                # terminal job update.  The job commit then makes the two
+                # writes one transaction while retaining packet audit rows.
+                mark_evidence_packets_unusable(
+                    self.conn,
+                    company_id=company_id,
+                    as_of=as_of,
+                    reason=f"incomplete_run:{result.status}",
+                    commit=False,
+                )
             if result.status in {"complete", "no_evidence"}:
                 job_status = "success" if result.status == "complete" else "partial"
             else:
@@ -993,6 +1157,7 @@ class OneCompanyEvidenceFlow:
                 error = {
                     "code": result.status,
                     "message": result.message,
+                    "as_of": as_of,
                     "no_evidence_reason": (
                         result.no_evidence_reason.value
                         if result.no_evidence_reason is not None
@@ -1000,6 +1165,16 @@ class OneCompanyEvidenceFlow:
                     ),
                     "diagnostic": result.diagnostic(),
                 }
+            persist_evidence_diagnostic(
+                self.conn,
+                company_id=company_id,
+                as_of=as_of,
+                status=result.status,
+                diagnostic=result.diagnostic(),
+                report_rules_fingerprint=active_rules["fingerprint"],
+                packet_hash=result.packet_hash,
+                commit=False,
+            )
             record_job(
                 self.conn,
                 "evidence",
@@ -1009,6 +1184,14 @@ class OneCompanyEvidenceFlow:
                 error=error,
                 begin_attempt=False,
             )
+            persisted = describe_evidence_state(
+                self.conn,
+                company_id=company_id,
+                as_of=as_of,
+                current_rules_fingerprint=active_rules["fingerprint"],
+            )
+            if persisted is not None:
+                result._persisted_diagnostic = persisted
             return result
 
         mapping = get_verified_mfn_mapping(self.conn, company_id)
@@ -1098,22 +1281,11 @@ class OneCompanyEvidenceFlow:
             )
         now = self.now()
         today = now.date()
-        # Bounded historical retrieval: paginated offset/limit feed when a
-        # history window is active.  Without a window we keep the single-page
-        # delta + Sunday page-2 contract so existing tests and incremental
-        # daily runs stay byte-identical.
-        window = self.history_window or DEFAULT_HISTORY_WINDOW
+        # Bounded historical retrieval: paginated offset/limit feed under
+        # the authoritative history window, with the single-page plus
+        # Sunday page-2 contract when paginated discovery is unavailable.
         try:
-            if self.history_window is not None:
-                feed = _discover_historical_feed(
-                    self.scraper,
-                    mapping["mfn_slug"],
-                    as_of=as_of,
-                    window=window,
-                    today_iso=today.isoformat(),
-                )
-            elif hasattr(self.scraper, "discover_feed_paginated"):
-                # Default historical path: bounded window with default limits.
+            if hasattr(self.scraper, "discover_feed_paginated"):
                 feed = _discover_historical_feed(
                     self.scraper,
                     mapping["mfn_slug"],
@@ -1151,6 +1323,12 @@ class OneCompanyEvidenceFlow:
                     message=str(exc),
                 )
             )
+        from alphaforge.providers.mfn.scraper import _cis_release_issuer, _issuer_token
+
+        issuer_token = _issuer_token(str(mapping["mfn_slug"]))
+        early_skips: dict[str, int] = {}
+        for reason, count in _drain_skips(self.scraper, "drain_discovery_skips").items():
+            early_skips[reason] = early_skips.get(reason, 0) + count
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
         for entry in feed:
@@ -1159,6 +1337,12 @@ class OneCompanyEvidenceFlow:
                 continue
             if url:
                 seen_feed_urls.add(url)
+            release_issuer = _cis_release_issuer(str(url or ""))
+            if release_issuer is not None and release_issuer.lower() != issuer_token:
+                # A /cis/a/ page bound to a different issuer must never enter
+                # this issuer's lane — drop it before any detail fetch.
+                early_skips["issuer_mismatch"] = early_skips.get("issuer_mismatch", 0) + 1
+                continue
             unique_feed.append(entry)
         unseen_feed = []
         future_dated_complete_release = False
@@ -1176,7 +1360,10 @@ class OneCompanyEvidenceFlow:
                         future_dated_complete_release = True
                     elif published_date > today.isoformat():
                         not_yet_published_complete_release = True
-                    continue
+                    if complete.get("report_rules_fingerprint") == active_rules[
+                        "fingerprint"
+                    ] and _has_current_attachment_provenance(complete.get("raw_metadata")):
+                        continue
             unseen_feed.append(entry)
         complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
         for document in complete_documents:
@@ -1207,23 +1394,35 @@ class OneCompanyEvidenceFlow:
                     message=str(exc),
                 )
             )
+        for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
+            early_skips[reason] = early_skips.get(reason, 0) + count
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
             mapping_status="mapped",
             discovered=len(details),
+            skipped=dict(early_skips),
         )
         if future_dated_complete_release:
             result.skipped["future_dated_release"] = 1
         if not_yet_published_complete_release:
             result.skipped["not_yet_published_release"] = 1
         eligible: list[dict[str, Any]] = []
+        blocked_candidates: list[dict[str, Any]] = []
         pre_cutoff_report = False
+        hard_blocks = 0
         for article in details:
             title = article.get("title") or ""
             if not is_report(title):
                 result.skipped["non_report_release"] = (
                     result.skipped.get("non_report_release", 0) + 1
+                )
+                continue
+            if is_invitation_or_presentation(title):
+                # Backstop for scrapers that bypass the detail-page guard:
+                # invitations about reports are never report evidence.
+                result.skipped["invitation_or_presentation_release"] = (
+                    result.skipped.get("invitation_or_presentation_release", 0) + 1
                 )
                 continue
             published_at = article.get("published_at")
@@ -1252,7 +1451,40 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("pre_cutoff_release", 0) + 1
                 )
                 continue
+            release_url = str(article.get("url") or article.get("source_url") or "")
+            issuer_failure = _confirm_cis_issuer(
+                release_url, article.get("canonical_url"), issuer_token=issuer_token
+            )
+            if issuer_failure is not None:
+                # A /cis/a/ page without MFN canonical confirmation binding
+                # it to the resolved issuer blocks the lane visibly instead
+                # of persisting possibly-foreign evidence.
+                result.skipped[issuer_failure] = result.skipped.get(issuer_failure, 0) + 1
+                hard_blocks += 1
+                continue
+            if article.get("attachment_tier") == "unresolved":
+                # Ranked selection refused to guess between attachments. The
+                # article never downloads, but the manifest must still record
+                # this considered candidate as a typed rejection so its group
+                # remains in the expected coverage denominator.
+                result.skipped[AMBIGUOUS_SELECTION_SKIP_REASON] = (
+                    result.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0) + 1
+                )
+                blocked_candidates.append(
+                    {
+                        **article,
+                        "mfn_slug": mapping["mfn_slug"],
+                        "company_id": company_id,
+                        "rejection_reason": AMBIGUOUS_SELECTION_SKIP_REASON,
+                        "_manifest_rejected": True,
+                    }
+                )
+                hard_blocks += 1
+                continue
             pre_cutoff_report = True
+            tier = article.get("attachment_tier")
+            if tier in ATTACHMENT_TIERS:
+                result.attachment_selection[tier] = result.attachment_selection.get(tier, 0) + 1
             eligible.append(
                 {
                     **article,
@@ -1293,9 +1525,13 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
+            if persisted.get("report_rules_fingerprint") != active_rules[
+                "fingerprint"
+            ] or not _has_current_attachment_provenance(metadata):
+                continue
             pdf_language = (
-                metadata.get("pdf_language")
-                if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))
+                metadata.get("pdf_language") or persisted["ingested_lang"]
+                if _is_replayable_language_evidence(metadata.get("language_evidence"))
                 else ""
             )
             persisted_identity.append(
@@ -1318,6 +1554,7 @@ class OneCompanyEvidenceFlow:
                     "provider_event_id": metadata.get("provider_event_id"),
                     "mfn_event_id": metadata.get("mfn_event_id"),
                     "pdf_language": pdf_language,
+                    "attachment_tier": metadata.get("attachment_tier"),
                     "attachment_url": persisted["attachment_url"],
                     "attachment_checksum": persisted["attachment_checksum"],
                     "pdf_checksum": persisted["attachment_checksum"],
@@ -1329,6 +1566,7 @@ class OneCompanyEvidenceFlow:
                 }
             )
         identity_candidates = persisted_identity + eligible
+        manifest_candidates = identity_candidates + blocked_candidates
         if dry_run:
             deduped = bilingual_dedupe(identity_candidates)
             result.eligible = sum(
@@ -1362,7 +1600,14 @@ class OneCompanyEvidenceFlow:
             if not attachment_url:
                 continue
             existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
-            stored_pdf_language = _stored_pdf_language(existing)
+            if (
+                existing is not None
+                and existing.get("canonical_report_rules_fingerprint")
+                != active_rules["fingerprint"]
+            ):
+                stored_pdf_language = None
+            else:
+                stored_pdf_language = _stored_pdf_language(existing)
             if stored_pdf_language is not None:
                 language, evidence = stored_pdf_language
                 identity_candidates[index] = {
@@ -1454,7 +1699,6 @@ class OneCompanyEvidenceFlow:
         shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
-        language_fallback_count = 0
         for article in deduped:
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
@@ -1604,9 +1848,6 @@ class OneCompanyEvidenceFlow:
                 candidate_extracted: Any,
                 siblings: list[dict[str, Any]],
             ) -> None:
-                nonlocal language_fallback_count
-                if article.get("_pdf_language_unresolved"):
-                    language_fallback_count += 1
                 persist_evidence_document(
                     self.conn,
                     company_id=company_id,
@@ -1632,7 +1873,9 @@ class OneCompanyEvidenceFlow:
                     },
                     pages=list(candidate_extracted.pages),
                     suppressed_variants=siblings,
+                    report_rules_fingerprint=active_rules["fingerprint"],
                 )
+                article["_persisted_evidence"] = True
 
             selected_existing = None
             if candidate_options:
@@ -1644,7 +1887,19 @@ class OneCompanyEvidenceFlow:
                     ),
                 )[0]
                 if selected_existing is not None:
+                    if not any(variant.get("_persisted_evidence") for variant in variants):
+                        result.skipped["attachment_reused_by_different_report"] = (
+                            result.skipped.get("attachment_reused_by_different_report", 0) + 1
+                        )
+                        continue
                     existing_canonical_source_url = str(selected_existing["canonical_source_url"])
+                    if selected.get("_persisted_evidence"):
+                        result.persisted += 1
+                        persisted_tier = selected.get("attachment_tier")
+                        if persisted_tier in ATTACHMENT_TIERS:
+                            result.attachment_selection[persisted_tier] = (
+                                result.attachment_selection.get(persisted_tier, 0) + 1
+                            )
                     if (
                         selected.get("_persisted_evidence")
                         and downloaded is not None
@@ -1752,26 +2007,70 @@ class OneCompanyEvidenceFlow:
                 }
                 persist_option(independent_article, candidate_download, candidate_extracted, [])
                 result.downloaded += 1
-        packet_limitations = [
-            f"evidence_flow_{code}:{count}"
-            for code, count in sorted(result.skipped.items())
-            if code
-            not in {
-                "non_report_release",
-                "future_dated_release",
-                "not_yet_published_release",
-            }
-        ]
-        if language_fallback_count:
-            packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
+        selection_manifest = load_evidence_selection_manifest(
+            self.conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules=active_rules,
+            candidate_records=manifest_candidates,
+            publication_cutoff=today.isoformat(),
+            excluded_source_urls=unresolved_existing_source_urls,
+        )
+        if not dry_run:
+            persist_evidence_selection_manifest(self.conn, selection_manifest, commit=False)
+        result.completeness = manifest_completeness(selection_manifest)
+        expected = {
+            report_class: counts["expected"] for report_class, counts in result.completeness.items()
+        }
+        retained = {
+            report_class: counts["retained"] for report_class, counts in result.completeness.items()
+        }
+        missing = {
+            report_class: expected[report_class] - retained.get(report_class, 0)
+            for report_class in expected
+            if expected[report_class] > retained.get(report_class, 0)
+        }
+        if hard_blocks or missing:
+            # Completeness is a hard gate: one stray retained PDF must not
+            # mark the lane ready when expected annual/quarterly coverage is
+            # incomplete, and a refused guess must fail visibly. No packet is
+            # frozen on this path; persisted documents remain for the next run.
+            parts = [
+                f"{report_class} expected {expected[report_class]}"
+                f" retained {retained.get(report_class, 0)}"
+                for report_class in sorted(missing)
+            ]
+            if hard_blocks:
+                parts.append(f"{hard_blocks} blocked identity/selection check(s)")
+            return finish(
+                EvidenceFlowResult(
+                    "evidence_incomplete",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=result.discovered,
+                    eligible=result.eligible,
+                    downloaded=result.downloaded,
+                    persisted=result.persisted,
+                    skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
+                    message="incomplete report history: " + "; ".join(parts),
+                )
+            )
+        # Freeze the diagnostic into the packet before hashing.  The
+        # repository can therefore reproduce the same CLI result after the
+        # in-memory flow has gone away.
+        result.status = "complete"
         packet = build_frozen_evidence_packet(
             self.conn,
             company_id=company_id,
             as_of=as_of,
             mapping=mapping,
-            additional_limitations=packet_limitations,
             publication_cutoff=today.isoformat(),
             excluded_source_urls=unresolved_existing_source_urls,
+            report_rules=active_rules,
+            evidence_diagnostic=result.diagnostic(),
+            selection_manifest=selection_manifest,
         )
         if not packet.get("sources"):
             if (
@@ -1804,7 +2103,10 @@ class OneCompanyEvidenceFlow:
                     discovered=result.discovered,
                     eligible=result.eligible,
                     downloaded=result.downloaded,
+                    persisted=result.persisted,
                     skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
                     no_evidence_reason=reason,
                     message=message,
                 )
@@ -1818,7 +2120,10 @@ class OneCompanyEvidenceFlow:
                     discovered=result.discovered,
                     eligible=result.eligible,
                     downloaded=result.downloaded,
+                    persisted=result.persisted,
                     skipped=result.skipped,
+                    completeness=result.completeness,
+                    attachment_selection=result.attachment_selection,
                     message="canonical packet failed its self-hash or contains an invalid complete source",
                 )
             )
@@ -1838,6 +2143,12 @@ class OneCompanyEvidenceFlow:
             except Exception:
                 pass
         persist_evidence_packet(self.conn, company_id=company_id, as_of=as_of, packet=packet)
+        persist_evidence_selection_manifest(
+            self.conn,
+            selection_manifest,
+            packet_hash=packet["packet_hash"],
+            commit=False,
+        )
         result.status = "complete"
         result.packet = packet
         result.packet_hash = packet["packet_hash"]

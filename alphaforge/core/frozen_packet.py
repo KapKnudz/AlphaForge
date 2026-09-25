@@ -6,6 +6,57 @@ import hashlib
 import json
 from typing import Any
 
+EVIDENCE_RULES_VERSION = 1
+"""Monotonic version of the evidence/filter/completeness rule set.
+
+Stamped on every frozen packet as ``evidence_rules_version``. Bump it when a
+deterministic rule that decides what counts as report evidence changes: the
+report/invitation taxonomy, the issuer-confirmation filter, attachment-tier
+selection, or completeness counting. Packets stamped with an older version —
+including packets built before versioning existed — are stale: they stay
+structurally valid (hash and schema still verify) but readiness must not
+trust them; rerun the evidence lane to rebuild under the current rules.
+"""
+
+
+def packet_rules_version(packet: dict[str, Any] | None) -> int | None:
+    """Return the stamped evidence rule version, or None when absent."""
+    if not isinstance(packet, dict):
+        return None
+    version = packet.get("evidence_rules_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
+def is_stale_evidence_packet(
+    packet: dict[str, Any] | None, *, current_rules_fingerprint: str | None = None
+) -> bool:
+    """Return True when a packet predates the current evidence rule set.
+
+    Fail closed: a missing version or report-rule fingerprint means the packet
+    predates rule stamping.  Callers that know the active history window pass
+    its fingerprint as well; this prevents a packet built with a different
+    coverage horizon from being reused silently.
+    """
+    if packet_rules_version(packet) != EVIDENCE_RULES_VERSION:
+        return True
+    if not isinstance(packet, dict):
+        return True
+    rules = packet.get("report_rules")
+    if not isinstance(rules, dict):
+        return True
+    fingerprint = rules.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return True
+    if current_rules_fingerprint is None:
+        # Import lazily to keep this dependency-free validator free of the
+        # evidence-flow import cycle.
+        from alphaforge.evidence.report_rules import current_report_rules_fingerprint
+
+        current_rules_fingerprint = current_report_rules_fingerprint()
+    return fingerprint != current_rules_fingerprint
+
 
 def canonical_packet_hash(packet_without_hash: dict[str, Any]) -> str:
     canonical = json.dumps(
@@ -47,7 +98,15 @@ def _replace_source_reference(value: Any, references: dict[str, str]) -> Any:
 
 
 def _legacy_packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
-    body = {key: value for key, value in packet_without_hash.items() if key != "packet_hash"}
+    # Run diagnostics are retained in packet JSON for audit/CLI replay, but
+    # they describe acquisition counters rather than evidence identity.  A
+    # rerun that reuses the same persisted PDFs must keep the same artifact
+    # hash even when discovery's unseen count changed.
+    body = {
+        key: value
+        for key, value in packet_without_hash.items()
+        if key not in {"packet_hash", "evidence_diagnostic", "selection_manifest_id"}
+    }
     issuer = body.get("issuer")
     if isinstance(issuer, dict):
         body["issuer"] = {

@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 6 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 9 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -125,6 +125,87 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
         conn.execute("PRAGMA foreign_keys=ON;")
         current = 6
+    if current < 7:
+        # Apply additively because test/operational databases can have a
+        # newer table shape while their user_version is being replayed (for
+        # example after a manual repair of an earlier migration).
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
+        }
+        additions = (
+            ("report_rules_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("report_rules_fingerprint", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("usable", "INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1))"),
+            ("usable_reason", "TEXT"),
+        )
+        for name, definition in additions:
+            if name not in columns:
+                conn.execute(f"ALTER TABLE evidence_packets ADD COLUMN {name} {definition}")
+        conn.execute(
+            """
+            UPDATE evidence_packets
+            SET report_rules_version = COALESCE(json_extract(packet_json, '$.report_rules.version'), 0),
+                report_rules_fingerprint = COALESCE(json_extract(packet_json, '$.report_rules.fingerprint'), 'legacy')
+            WHERE report_rules_fingerprint = 'legacy'
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+            ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC)
+            """
+        )
+        set_user_version(conn, 7)
+        conn.commit()
+        current = 7
+    if current < 8:
+        document_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(research_documents);").fetchall()
+        }
+        if "report_rules_fingerprint" not in document_columns:
+            conn.execute("ALTER TABLE research_documents ADD COLUMN report_rules_fingerprint TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
+                company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                as_of                   TEXT NOT NULL,
+                status                  TEXT NOT NULL,
+                diagnostic              TEXT NOT NULL CHECK (json_valid(diagnostic)),
+                packet_hash             TEXT,
+                report_rules_fingerprint TEXT NOT NULL,
+                recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY (company_id, as_of)
+            ) STRICT
+            """
+        )
+        set_user_version(conn, 8)
+        conn.commit()
+        current = 8
+    if current < 9:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evidence_selection_manifests (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                as_of               TEXT NOT NULL,
+                manifest_id         TEXT NOT NULL,
+                manifest_json       TEXT NOT NULL CHECK (json_valid(manifest_json)),
+                report_rules_fingerprint TEXT NOT NULL,
+                packet_hash         TEXT,
+                recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                UNIQUE (company_id, as_of, manifest_id)
+            ) STRICT
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_evidence_selection_manifests_current
+            ON evidence_selection_manifests(company_id, as_of, id DESC)
+            """
+        )
+        set_user_version(conn, 9)
+        conn.commit()
+        current = 9
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -219,10 +300,75 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             as_of               TEXT NOT NULL,
             packet_hash         TEXT NOT NULL,
             packet_json         TEXT NOT NULL CHECK (json_valid(packet_json)),
+            report_rules_version INTEGER NOT NULL DEFAULT 0,
+            report_rules_fingerprint TEXT NOT NULL DEFAULT 'legacy',
+            usable              INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1)),
+            usable_reason       TEXT,
             frozen_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             UNIQUE (company_id, as_of, packet_hash)
         ) STRICT;
         CREATE INDEX IF NOT EXISTS idx_evidence_packets_current ON evidence_packets(company_id, as_of, id DESC);
+
+        CREATE TABLE IF NOT EXISTS evidence_run_diagnostics (
+            company_id              INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            as_of                   TEXT NOT NULL,
+            status                  TEXT NOT NULL,
+            diagnostic              TEXT NOT NULL CHECK (json_valid(diagnostic)),
+            packet_hash             TEXT,
+            report_rules_fingerprint TEXT NOT NULL,
+            recorded_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            PRIMARY KEY (company_id, as_of)
+        ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS evidence_selection_manifests (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            as_of               TEXT NOT NULL,
+            manifest_id         TEXT NOT NULL,
+            manifest_json       TEXT NOT NULL CHECK (json_valid(manifest_json)),
+            report_rules_fingerprint TEXT NOT NULL,
+            packet_hash         TEXT,
+            recorded_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, as_of, manifest_id)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_evidence_selection_manifests_current
+            ON evidence_selection_manifests(company_id, as_of, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+            ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
+        """
+    )
+    document_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(research_documents);").fetchall()
+    }
+    if "report_rules_fingerprint" not in document_columns:
+        conn.execute("ALTER TABLE research_documents ADD COLUMN report_rules_fingerprint TEXT")
+
+    # A database may have been stamped with the current user_version by an
+    # older build whose initial schema predated packet lifecycle columns.
+    # Repair that shape additively instead of trusting the version alone.
+    packet_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(evidence_packets);").fetchall()
+    }
+    for name, definition in (
+        ("report_rules_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("report_rules_fingerprint", "TEXT NOT NULL DEFAULT 'legacy'"),
+        ("usable", "INTEGER NOT NULL DEFAULT 1 CHECK (usable IN (0,1))"),
+        ("usable_reason", "TEXT"),
+    ):
+        if name not in packet_columns:
+            conn.execute(f"ALTER TABLE evidence_packets ADD COLUMN {name} {definition}")
+    conn.execute(
+        """
+        UPDATE evidence_packets
+        SET report_rules_version = COALESCE(json_extract(packet_json, '$.report_rules.version'), 0),
+            report_rules_fingerprint = COALESCE(json_extract(packet_json, '$.report_rules.fingerprint'), 'legacy')
+        WHERE report_rules_fingerprint = 'legacy'
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_packets_usable
+        ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC)
         """
     )
 

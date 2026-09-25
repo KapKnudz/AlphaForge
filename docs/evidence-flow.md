@@ -35,7 +35,7 @@ against the same cutoffs (`pre_cutoff_release` skip). Discovery pages the MFN
 `offset`/`limit` JSON feed with an HTML-fragment fallback (up to 12 offsets of
 48, at most 60 detail fetches); a paginated-feed transport failure raises
 `mfn_feed_fetch_failed` instead of ending the scan silently. Code-level
-defaults live in `ReportHistoryWindow` (`alphaforge/evidence/flow.py`); the
+defaults live in `ReportHistoryWindow` (`alphaforge/evidence/report_rules.py`); the
 legacy single-page plus Sunday page-2 contract applies only when paginated
 discovery is unavailable (on the default paginated path the Sunday page-2
 sweep survives only as a small-page HTML-fallback backstop).
@@ -97,6 +97,48 @@ Successful runs persist a `success` job record. Job records include attempt and
 started/finished timestamps, with structured error diagnostics for non-success
 outcomes.
 
+MFN/Cision report history runs a guarded lane over the shared Nordic
+distribution network: `/cis/a/<issuer>/<slug>-<hash>` release pages on `mfn.se`
+are accepted only when the issuer segment matches the resolved mapping token
+and the page canonical link (`/all/a/<issuer>/…`) confirms the same issuer;
+missing, malformed, or mismatched confirmation blocks the page visibly
+(`canonical_issuer_unconfirmed` / `issuer_mismatch`), never silently.
+`mb.cision.com` attachments are selected by ranked identity — explicit
+`mfn-primary` marker, then Cision `Main/` path, then report-like link text
+with corroborating report title (`attachment_tier` in
+`mfn-primary` / `main-path` / `label-score`) — and ambiguous selection
+(`ambiguous_selection`) fails the lane instead of guessing.
+Invitation/presentation/webcast-titled pages never contribute evidence.
+Diagnostics split into `discovered`, `filtered_before_download`,
+`download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
+the CLI output); per-class `completeness` (annual vs quarterly over
+post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
+gate — shortfalls return `evidence_incomplete` with no frozen packet instead
+of a green `complete`.
+
+### Evidence-selection manifest
+
+Selection is centralized in a pure, side-effect-free manifest
+(`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
+evidence-selection-manifest-v1`): `select_evidence_manifest()` derives every
+evidence role — audit history, cache, reuse, deduplication groups, packet
+inputs, typed rejections — from immutable facts plus one rule input set
+(`alphaforge/evidence/report_rules.py`, fingerprinted). Completeness, packet
+construction, cache reuse, and readiness all consume that one view, never
+raw persistence; `tools/check_evidence_manifest_boundary.py` enforces the
+boundary in CI, and `manifest_store.load_evidence_view` is the read path.
+Groups key on explicit bilingual group, then provider event id, then fiscal
+period, then source URL (attachmentless events still group by period), with
+class `annual` vs `quarterly`; completeness counts retained groups over
+expected groups and `packet_contents()` returns exactly the retained
+sources. Rejected candidates carry typed reasons (`rejection_reason`,
+`outside_history_window`, `not_selected_by_manifest`); ambiguous-selection
+blocks are recorded as typed rejections so their group stays in the coverage
+denominator. Evidence without a recognized `attachment_tier` is
+inadmissible on first run; unchanged reruns skip feed entries that already
+have complete current-fingerprint documents and rebuild the same manifest.
+Packets stamp the consumed `selection_manifest_id`.
+
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
 hash over the packet without its own `packet_hash`. Database-local document IDs
@@ -106,8 +148,22 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 `ingestion_date`) stay in the stored JSON for auditability but are excluded
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
-their stored hash. Readiness for the evidence lane requires that frozen packet
-hash to validate; a stray document row is not sufficient.
+their stored hash. Every packet also stamps `evidence_rules_version` (currently
+v1 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+evidence/filter/completeness rule set (report/invitation taxonomy,
+issuer confirmation, attachment-tier selection, completeness counting). Stale
+is defined narrowly as a packet built under an older rule version — including
+pre-versioning packets without the marker. Older packets stay hash-valid but
+readiness rejects them with `stale_evidence_packet`; rerun the lane to rebuild
+under the current rules. Readiness for the evidence lane requires that frozen packet
+hash to validate; a stray document row is not sufficient. Packet rows also carry
+`report_rules_fingerprint`, `usable`, and `usable_reason`. A later non-complete
+run marks every prior packet for the same `(company_id, as_of)` unusable in the
+same transaction as its terminal job record; rows remain queryable for audit
+history, while the loader reuses only valid, current-fingerprint, usable rows.
+Run diagnostics are persisted in the packet on complete runs or the job error
+on terminal failures, and `describe_evidence_state` is the replay source for
+CLI/result diagnostics.
 
 ### Live verification
 

@@ -15,7 +15,17 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
-from alphaforge.evidence.mfn_taxonomy import document_type, is_report, report_kind
+from alphaforge.evidence.mfn_taxonomy import (
+    ATTACHMENT_HOST_MARKERS,
+    ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
+    CIS_RELEASE_PATH_RE,
+    NON_REPORT_ATTACHMENT_TERMS,
+    REPORT_ATTACHMENT_TERMS,
+    document_type,
+    is_invitation_or_presentation,
+    is_report,
+    report_kind,
+)
 from alphaforge.providers.http import MAX_RETRIES, request_with_retry
 from alphaforge.providers.mfn.errors import MfnAcquisitionError
 
@@ -41,19 +51,13 @@ _HTML_VOID_TAGS = frozenset(
         "wbr",
     }
 )
-_REPORT_ATTACHMENT_TERMS = (
-    "annual",
-    "årsredovis",
-    "year-end",
-    "year_end",
-    "interim",
-    "quarter",
-    "delårs",
-    "bokslut",
-    "report",
-    "rapport",
-)
-_NON_REPORT_ATTACHMENT_TERMS = ("presentation", "slides", "webcast")
+# Rule inputs live authoritatively in mfn_taxonomy (leaf module) so the
+# deterministic core can fingerprint them without importing providers.
+# These aliases preserve the internal uses below.
+_REPORT_ATTACHMENT_TERMS = REPORT_ATTACHMENT_TERMS
+_NON_REPORT_ATTACHMENT_TERMS = NON_REPORT_ATTACHMENT_TERMS
+_CIS_RELEASE_PATH_RE = CIS_RELEASE_PATH_RE
+_ATTACHMENT_HOST_MARKERS = ATTACHMENT_HOST_MARKERS
 _SWEDISH_MONTHS = {
     "januari": "january",
     "februari": "february",
@@ -120,6 +124,8 @@ class _MfnHtmlParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.links: list[tuple[str, str]] = []
+        self.attachment_links: list[tuple[str, str, str]] = []
+        self.canonical_url: str | None = None
         self.h1_parts: list[str] = []
         self.body_parts: list[str] = []
         self.release_body_parts: list[str] = []
@@ -130,6 +136,7 @@ class _MfnHtmlParser(HTMLParser):
         self.json_parts: list[str] = []
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
+        self._anchor_class: str = ""
         self._h1_active = False
         self._article_depth = 0
         self._release_body_depth = 0
@@ -148,8 +155,13 @@ class _MfnHtmlParser(HTMLParser):
         if lower_tag == "a" and values.get("href"):
             self._anchor_href = values["href"]
             self._anchor_parts = []
+            self._anchor_class = values.get("class", "")
         if lower_tag == "h1":
             self._h1_active = True
+        if lower_tag == "link" and values.get("href") and self.canonical_url is None:
+            rel = values.get("rel", "").lower()
+            if "canonical" in rel.split():
+                self.canonical_url = values["href"]
         classes = values.get("class", "").lower().split()
         if lower_tag == "article":
             self._article_depth = max(self._article_depth, 1)
@@ -189,8 +201,16 @@ class _MfnHtmlParser(HTMLParser):
         lower_tag = tag.lower()
         if lower_tag == "a" and self._anchor_href is not None:
             self.links.append((self._anchor_href, " ".join(self._anchor_parts).strip()))
+            self.attachment_links.append(
+                (
+                    self._anchor_href,
+                    " ".join(self._anchor_parts).strip(),
+                    self._anchor_class,
+                )
+            )
             self._anchor_href = None
             self._anchor_parts = []
+            self._anchor_class = ""
         if lower_tag == "h1":
             self._h1_active = False
         if lower_tag == "time":
@@ -253,25 +273,84 @@ def _attachment_score(url: str, label: str = "") -> int:
     return 1
 
 
+# ATTACHMENT_TIERS is imported above from mfn_taxonomy (authoritative
+# definition) and remains available as scraper.ATTACHMENT_TIERS.
+
+
+def _label_report_score(label: str) -> int:
+    name = label.lower()
+    if any(term in name for term in _NON_REPORT_ATTACHMENT_TERMS):
+        return 0
+    if any(term in name for term in _REPORT_ATTACHMENT_TERMS):
+        return 2
+    return 1
+
+
+def _is_main_path_pdf(url: str) -> bool:
+    parts = urlsplit(url)
+    return parts.netloc.lower() == "mb.cision.com" and "/main/" in parts.path.lower()
+
+
+def _select_attachment(
+    pdf_links: list[tuple[str, str, str]], *, page_is_report: bool
+) -> tuple[str | None, str]:
+    """Select exactly one PDF by ranked identity, or refuse with a tier.
+
+    Rank: explicit ``mfn-primary`` marker, then Cision ``Main/`` path on the
+    Cision attachment host, then report-like link text alone (which
+    additionally requires the corroborating page-level report title —
+    enforced by ``page_is_report``). Ties at any tier, or no positive
+    link-text signal at all, yield ``(None, "unresolved")``; an empty
+    candidate set yields ``(None, "none")``.
+    """
+    viable = [
+        (href, text, css_class)
+        for href, text, css_class in pdf_links
+        if _attachment_score(href, text) > 0
+    ]
+    if not viable:
+        return None, "none"
+    if not page_is_report:
+        return None, "none"
+    primaries = [
+        (href, text, css_class)
+        for href, text, css_class in viable
+        if "mfn-primary" in css_class.lower().split()
+    ]
+    if len(primaries) == 1:
+        return primaries[0][0], "mfn-primary"
+    if len(primaries) > 1:
+        return None, "unresolved"
+    mains = [(href, text, css_class) for href, text, css_class in viable if _is_main_path_pdf(href)]
+    if len(mains) == 1:
+        return mains[0][0], "main-path"
+    if len(mains) > 1:
+        return None, "unresolved"
+    scored = sorted(
+        ((_label_report_score(text), href) for href, text, _ in viable),
+        reverse=True,
+    )
+    if scored[0][0] == 2 and (len(scored) == 1 or scored[1][0] < 2):
+        return scored[0][1], "label-score"
+    return None, "unresolved"
+
+
 def _parse_html(html: str) -> dict[str, Any]:
     parser = _MfnHtmlParser()
     parser.feed(html)
     pdf_links = [
-        (href, text)
-        for href, text in parser.links
-        if "storage.mfn.se/" in href.lower() and ".pdf" in href.lower()
+        (href, text, css_class)
+        for href, text, css_class in parser.attachment_links
+        if any(marker in href.lower() for marker in _ATTACHMENT_HOST_MARKERS)
+        and ".pdf" in href.lower()
     ]
-    selected_attachment = max(
-        enumerate(pdf_links),
-        key=lambda item: (_attachment_score(*item[1]), -item[0]),
-        default=None,
-    )
-    storage_url = (
-        selected_attachment[1][0]
-        if selected_attachment is not None and _attachment_score(*selected_attachment[1])
-        else None
-    )
     title = " ".join(" ".join(parser.h1_parts).split())
+    page_is_report = bool(title) and is_report(title)
+    page_is_invitation = bool(title) and is_invitation_or_presentation(title)
+    if page_is_invitation:
+        storage_url, tier = None, "none"
+    else:
+        storage_url, tier = _select_attachment(pdf_links, page_is_report=page_is_report)
     body_parts = parser.release_body_parts if parser.release_body_seen else parser.body_parts
     body = " ".join(" ".join(body_parts).split())
     published_at = next(
@@ -301,6 +380,8 @@ def _parse_html(html: str) -> dict[str, Any]:
         "body": body,
         "published_at": published_at,
         "storage_url": storage_url,
+        "canonical_url": parser.canonical_url,
+        "attachment_tier": tier,
     }
 
 
@@ -309,7 +390,43 @@ def _is_mfn_release_url(url: str, base_url: str) -> bool:
     base = urlsplit(base_url)
     if candidate.scheme != base.scheme or candidate.netloc.lower() != base.netloc.lower():
         return False
-    return candidate.path.startswith(("/a/", "/cision/"))
+    path = candidate.path
+    if path.startswith("/cis/a/"):
+        # Cision-distribution publishing: only the stable
+        # /cis/a/<issuer>/<slug>-<8hex> shape, never a bare prefix.
+        return _CIS_RELEASE_PATH_RE.match(path) is not None
+    return path.startswith(("/a/", "/cision/"))
+
+
+def _cis_release_issuer(url: str) -> str | None:
+    """Return the issuer segment of a ``/cis/a/`` release URL, else None."""
+    match = _CIS_RELEASE_PATH_RE.match(urlsplit(url).path)
+    return match.group(1) if match else None
+
+
+def _canonical_issuer(canonical_url: str | None) -> str | None:
+    """Return the issuer segment of an MFN canonical link, else None.
+
+    MFN declares release identity as ``/all/a/<issuer>/...`` on every
+    rendered page, legacy and Cision-distribution alike.
+    """
+    if not canonical_url:
+        return None
+    segments = [segment for segment in urlsplit(canonical_url).path.split("/") if segment]
+    if len(segments) >= 3 and segments[0].lower() == "all" and segments[1].lower() == "a":
+        return segments[2]
+    return None
+
+
+def _issuer_token(mfn_slug: str) -> str:
+    """Return the stable issuer token of a resolved mapping slug.
+
+    The mapping slug is exact-identifier resolved (never a fuzzy company
+    name); its last path segment (e.g. ``clas-ohlson`` in
+    ``all/a/clas-ohlson``) is the identity the release and canonical
+    issuer segments must match.
+    """
+    return mfn_slug.strip().strip("/").split("/")[-1].lower()
 
 
 def _report_identity_seed(article: dict[str, Any]) -> dict[str, Any]:
@@ -325,6 +442,26 @@ class MfnScraper:
     def __init__(self, *, base_url: str = BASE_URL, max_articles: int = MAX_ARTICLES) -> None:
         self.base_url = base_url.rstrip("/")
         self.max_articles = max_articles
+        self._discovery_skips: dict[str, int] = {}
+        self._detail_skips: dict[str, int] = {}
+
+    def _count_discovery(self, reason: str) -> None:
+        self._discovery_skips[reason] = self._discovery_skips.get(reason, 0) + 1
+
+    def _count_detail(self, reason: str) -> None:
+        self._detail_skips[reason] = self._detail_skips.get(reason, 0) + 1
+
+    def drain_discovery_skips(self) -> dict[str, int]:
+        """Return discovery drop counts since the last drain and clear them."""
+        drained = dict(self._discovery_skips)
+        self._discovery_skips = {}
+        return drained
+
+    def drain_detail_skips(self) -> dict[str, int]:
+        """Return detail drop counts since the last drain and clear them."""
+        drained = dict(self._detail_skips)
+        self._detail_skips = {}
+        return drained
 
     def _parse_json_feed_items(
         self, payload: Any, *, reports_only: bool = True
@@ -350,9 +487,13 @@ class MfnScraper:
             if not url or not title:
                 continue
             absolute = urljoin(f"{self.base_url}/", url)
-            if absolute in seen or not _is_mfn_release_url(absolute, self.base_url):
+            if absolute in seen:
+                continue
+            if not _is_mfn_release_url(absolute, self.base_url):
+                self._count_discovery("non_release_url")
                 continue
             if reports_only and not is_report(title):
+                self._count_discovery("non_report_title")
                 continue
             seen.add(absolute)
             article: dict[str, Any] = {
@@ -415,14 +556,13 @@ class MfnScraper:
         for href, raw_title in parser.links:
             title = " ".join(raw_title.split())
             absolute = urljoin(f"{self.base_url}/", href)
-            if (
-                not absolute
-                or not title
-                or absolute in seen
-                or not _is_mfn_release_url(absolute, self.base_url)
-            ):
+            if not absolute or not title or absolute in seen:
+                continue
+            if not _is_mfn_release_url(absolute, self.base_url):
+                self._count_discovery("non_release_url")
                 continue
             if reports_only and not is_report(title):
+                self._count_discovery("non_report_title")
                 continue
             seen.add(absolute)
             article = {
@@ -536,14 +676,13 @@ class MfnScraper:
             for href, raw_title in parser.links:
                 title = " ".join(raw_title.split())
                 absolute = urljoin(f"{self.base_url}/", href)
-                if (
-                    not absolute
-                    or not title
-                    or absolute in seen
-                    or not _is_mfn_release_url(absolute, self.base_url)
-                ):
+                if not absolute or not title or absolute in seen:
+                    continue
+                if not _is_mfn_release_url(absolute, self.base_url):
+                    self._count_discovery("non_release_url")
                     continue
                 if reports_only and not is_report(title):
+                    self._count_discovery("non_report_title")
                     continue
                 seen.add(absolute)
                 article = {
@@ -598,8 +737,14 @@ class MfnScraper:
                     "mfn_detail_http_status", f"MFN detail request returned HTTP {resp.status_code}"
                 )
             parsed = _parse_html(resp.text)
-            title = parsed["title"] or seed.get("title") or ""
+            title = parsed["title"] or ""
             if reports_only and not is_report(title):
+                self._count_detail("non_report_title")
+                continue
+            if is_invitation_or_presentation(title):
+                # An invitation/presentation about a report is not the report:
+                # its attachments must never become report evidence.
+                self._count_detail("invitation_or_presentation_release")
                 continue
             body = parsed["body"]
             article = {
@@ -611,6 +756,8 @@ class MfnScraper:
                 "content_text": body,
                 "storage_url": parsed["storage_url"],
                 "attachment_url": parsed["storage_url"],
+                "canonical_url": parsed["canonical_url"],
+                "attachment_tier": parsed["attachment_tier"],
                 # Feed-card dates are not a stable publication authority; only
                 # the detail page's timestamp metadata may enter the frozen
                 # evidence lane.
