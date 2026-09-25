@@ -504,11 +504,11 @@ def test_clas_ohlson_history_recovers_full_window():
     assert diagnostic["ambiguous_selection"] == 0
     assert diagnostic["download_failed"] == 0
     assert diagnostic["retained"] == 8
-    # The sv bokslutskommuniké maps to quarterly under the frozen taxonomy
-    # (report_kind), while its en year-end twin maps to annual.
+    # Completeness is period-level after bilingual deduplication: the eight
+    # source editions cover one annual event and three interim events.
     assert diagnostic["completeness"] == {
-        "annual": {"expected": 3, "retained": 3},
-        "quarterly": {"expected": 5, "retained": 5},
+        "annual": {"expected": 1, "retained": 1},
+        "quarterly": {"expected": 3, "retained": 3},
     }
     assert diagnostic["attachment_selection"] == {
         "label-score": 2,
@@ -558,6 +558,7 @@ def _quarterly_article(slug, title, published_at, attachment=None):
         "source_url": f"https://mfn.test/a/flow/{slug}",
         "title": title,
         "published_at": published_at,
+        "attachment_tier": "mfn-primary",
         "lang": "en",
     }
     if attachment is not None:

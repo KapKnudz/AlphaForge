@@ -5,6 +5,7 @@ from alphaforge.evidence.manifest import EvidenceSelectionManifest, completeness
 
 def test_manifest_completeness_and_packet_contents_share_retained_groups():
     source = {"source_url": "https://mfn.test/a/q1", "document_id": 1}
+    sibling = {"source_url": "https://mfn.test/cis/q1", "document_id": 2}
     manifest = EvidenceSelectionManifest(
         manifest_version="evidence-selection-manifest-v1",
         company_id=1,
@@ -18,23 +19,25 @@ def test_manifest_completeness_and_packet_contents_share_retained_groups():
             "limit_per_offset": 48,
         },
         audit_history=(source,),
-        cache=(source,),
-        reuse=({"attachment_sha256": "sha", "valid_as_of": "2026-09-20"},),
+        cache=(source, sibling),
+        reuse=(
+            {"attachment_sha256": "sha", "valid_as_of": "2026-09-20"},
+            {"attachment_sha256": "sha2", "valid_as_of": "2026-09-20"},
+        ),
         deduplication=(
             {
                 "group_id": "period:quarterly:2026-07-31",
                 "report_class": "quarterly",
-                "candidate_source_urls": [source["source_url"]],
-                "packet_source_urls": [source["source_url"]],
+                "candidate_source_urls": [source["source_url"], sibling["source_url"]],
+                "packet_source_urls": [source["source_url"], sibling["source_url"]],
             },
         ),
-        packet_inputs=(source,),
+        packet_inputs=(source, sibling),
         rejected=(),
         readiness_fallback={"documents_available": True, "current_packet_available": True},
     )
 
     assert completeness(manifest) == {"quarterly": {"expected": 1, "retained": 1}}
-    assert packet_contents(manifest) == (source,)
-    assert sum(counts["retained"] for counts in completeness(manifest).values()) == len(
-        packet_contents(manifest)
-    )
+    assert packet_contents(manifest) == (source, sibling)
+    assert sum(counts["retained"] for counts in completeness(manifest).values()) == 1
+    assert len(packet_contents(manifest)) == 2

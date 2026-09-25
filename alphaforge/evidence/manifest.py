@@ -125,6 +125,14 @@ def _group_id(record: dict[str, Any]) -> str:
     explicit = metadata.get("bilingual_group_id")
     if explicit:
         return f"variant:{explicit}"
+    event_id = (
+        record.get("provider_event_id")
+        or record.get("mfn_event_id")
+        or metadata.get("provider_event_id")
+        or metadata.get("mfn_event_id")
+    )
+    if event_id:
+        return f"event:{event_id}"
     period = (
         record.get("observation_date")
         or record.get("period_end")
@@ -143,23 +151,14 @@ def _report_class(record: dict[str, Any]) -> str:
     return "annual" if _kind(record) == "annual" else "quarterly"
 
 
-def _select_one_per_group(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
+def _packet_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep every usable edition; deduplicate only repeated source identities."""
+    unique: dict[str, dict[str, Any]] = {}
     for row in rows:
-        groups.setdefault(_group_id(row), []).append(row)
-    selected: list[dict[str, Any]] = []
-    for group in groups.values():
-        selected.append(
-            sorted(
-                group,
-                key=lambda row: (
-                    0 if str(row.get("ingested_lang") or "") == "en" else 1,
-                    _source_url(row),
-                    int(row.get("document_id") or 0),
-                ),
-            )[0]
-        )
-    return sorted(selected, key=lambda row: (_source_url(row), int(row.get("document_id") or 0)))
+        source_url = _source_url(row)
+        if source_url:
+            unique.setdefault(source_url, row)
+    return sorted(unique.values(), key=lambda row: (_source_url(row), int(row.get("document_id") or 0)))
 
 
 def select_evidence_manifest(
@@ -179,7 +178,7 @@ def select_evidence_manifest(
     window = ReportHistoryWindow(**history_values)
     candidates = [dict(record) for record in (candidate_records or []) if _source_url(record)]
     group_records = [record for record in candidates if _in_window(record, as_of=as_of, window=window)]
-    selected_packet_rows = _select_one_per_group(packet_inputs)
+    selected_packet_rows = _packet_rows(packet_inputs)
     packet_urls = {_source_url(row) for row in selected_packet_rows}
     if not group_records:
         group_records = selected_packet_rows

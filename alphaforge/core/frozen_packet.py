@@ -105,7 +105,7 @@ def _legacy_packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, A
     body = {
         key: value
         for key, value in packet_without_hash.items()
-        if key not in {"packet_hash", "evidence_diagnostic"}
+        if key not in {"packet_hash", "evidence_diagnostic", "selection_manifest_id"}
     }
     issuer = body.get("issuer")
     if isinstance(issuer, dict):

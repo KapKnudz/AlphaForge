@@ -181,6 +181,11 @@ def _is_pdf_backed_language_evidence(value: Any) -> bool:
     return evidence == "filename" or evidence.startswith("pdf_text:")
 
 
+def _is_replayable_language_evidence(value: Any) -> bool:
+    evidence = str(value or "")
+    return _is_pdf_backed_language_evidence(evidence) or evidence.startswith("release_hint:")
+
+
 def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | None:
     if existing is None or not existing.get("canonical_raw_metadata"):
         return None
@@ -188,9 +193,12 @@ def _stored_pdf_language(existing: dict[str, Any] | None) -> tuple[str, str] | N
         metadata = json.loads(existing["canonical_raw_metadata"])
     except (TypeError, ValueError):
         return None
-    language = metadata.get("pdf_language") if isinstance(metadata, dict) else None
+    language = (
+        (metadata.get("pdf_language") if isinstance(metadata, dict) else None)
+        or existing.get("canonical_ingested_lang")
+    )
     evidence = metadata.get("language_evidence") if isinstance(metadata, dict) else None
-    if language in {"en", "sv"} and _is_pdf_backed_language_evidence(evidence):
+    if language in {"en", "sv"} and _is_replayable_language_evidence(evidence):
         return str(language), str(evidence)
     return None
 
@@ -699,6 +707,15 @@ def build_frozen_evidence_packet(
     )
     if fallback_source_count:
         limitations.add(f"pdf_language_fallback:{fallback_source_count}")
+    tier_counts: dict[str, int] = {}
+    for source in sources:
+        tier = source.get("attachment_tier")
+        if tier and tier not in {"unresolved", "none"}:
+            tier_counts[str(tier)] = tier_counts.get(str(tier), 0) + 1
+    limitations.update(
+        f"attachment_selection_{tier}:{count}"
+        for tier, count in sorted(tier_counts.items())
+    )
     base: dict[str, Any] = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
@@ -1388,6 +1405,7 @@ class OneCompanyEvidenceFlow:
         if not_yet_published_complete_release:
             result.skipped["not_yet_published_release"] = 1
         eligible: list[dict[str, Any]] = []
+        blocked_candidates: list[dict[str, Any]] = []
         pre_cutoff_report = False
         hard_blocks = 0
         for article in details:
@@ -1443,10 +1461,20 @@ class OneCompanyEvidenceFlow:
                 continue
             if article.get("attachment_tier") == "unresolved":
                 # Ranked selection refused to guess between attachments. The
-                # article never downloads, but its in-window report group
-                # stays in the expected coverage denominator as unretained.
+                # article never downloads, but the manifest must still record
+                # this considered candidate as a typed rejection so its group
+                # remains in the expected coverage denominator.
                 result.skipped[AMBIGUOUS_SELECTION_SKIP_REASON] = (
                     result.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0) + 1
+                )
+                blocked_candidates.append(
+                    {
+                        **article,
+                        "mfn_slug": mapping["mfn_slug"],
+                        "company_id": company_id,
+                        "rejection_reason": AMBIGUOUS_SELECTION_SKIP_REASON,
+                        "_manifest_rejected": True,
+                    }
                 )
                 hard_blocks += 1
                 continue
@@ -1499,8 +1527,8 @@ class OneCompanyEvidenceFlow:
             ] or not _has_current_attachment_provenance(metadata):
                 continue
             pdf_language = (
-                metadata.get("pdf_language")
-                if _is_pdf_backed_language_evidence(metadata.get("language_evidence"))
+                metadata.get("pdf_language") or persisted["ingested_lang"]
+                if _is_replayable_language_evidence(metadata.get("language_evidence"))
                 else ""
             )
             persisted_identity.append(
@@ -1535,6 +1563,7 @@ class OneCompanyEvidenceFlow:
                 }
             )
         identity_candidates = persisted_identity + eligible
+        manifest_candidates = identity_candidates + blocked_candidates
         if dry_run:
             deduped = bilingual_dedupe(identity_candidates)
             result.eligible = sum(
@@ -1667,7 +1696,6 @@ class OneCompanyEvidenceFlow:
         shadow_variant_pairs = ambiguous_variant_pairs(identity_candidates)
         deduped = bilingual_dedupe(identity_candidates)
         result.eligible = sum(1 for article in deduped if not article.get("_persisted_evidence"))
-        language_fallback_count = 0
         for group_index, article in enumerate(deduped):
             variants = [article, *article.get("_suppressed_variants", [])]
             selected = None
@@ -1817,9 +1845,6 @@ class OneCompanyEvidenceFlow:
                 candidate_extracted: Any,
                 siblings: list[dict[str, Any]],
             ) -> None:
-                nonlocal language_fallback_count
-                if article.get("_pdf_language_unresolved"):
-                    language_fallback_count += 1
                 persist_evidence_document(
                     self.conn,
                     company_id=company_id,
@@ -1984,7 +2009,7 @@ class OneCompanyEvidenceFlow:
             company_id=company_id,
             as_of=as_of,
             report_rules=active_rules,
-            candidate_records=identity_candidates,
+            candidate_records=manifest_candidates,
             publication_cutoff=today.isoformat(),
             excluded_source_urls=unresolved_existing_source_urls,
         )
@@ -2033,24 +2058,6 @@ class OneCompanyEvidenceFlow:
                     message="incomplete report history: " + "; ".join(parts),
                 )
             )
-        packet_limitations = [
-            f"evidence_flow_{code}:{count}"
-            for code, count in sorted(result.skipped.items())
-            if code
-            not in {
-                "non_report_release",
-                "future_dated_release",
-                "not_yet_published_release",
-            }
-        ]
-        if language_fallback_count:
-            packet_limitations.append(f"pdf_language_fallback:{language_fallback_count}")
-        for tier in ATTACHMENT_TIERS:
-            if tier in ("unresolved", "none"):
-                continue
-            tier_count = result.attachment_selection.get(tier, 0)
-            if tier_count:
-                packet_limitations.append(f"attachment_selection_{tier}:{tier_count}")
         # Freeze the diagnostic into the packet before hashing.  The
         # repository can therefore reproduce the same CLI result after the
         # in-memory flow has gone away.
@@ -2060,7 +2067,6 @@ class OneCompanyEvidenceFlow:
             company_id=company_id,
             as_of=as_of,
             mapping=mapping,
-            additional_limitations=packet_limitations,
             publication_cutoff=today.isoformat(),
             excluded_source_urls=unresolved_existing_source_urls,
             report_rules=active_rules,

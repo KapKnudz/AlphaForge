@@ -389,16 +389,17 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert evidence_job[4] is not None
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         second = flow.run(company_id, as_of="2026-09-20")
-    assert second.status == "no_evidence"
+    assert second.status == "complete"
     assert second.downloaded == 0
-    assert second.packet is None
+    assert second.packet is not None
+    assert second.packet_hash == first.packet_hash
     second_scrape_urls = {entry["url"] for entry in scraper.scrape_calls[-1]}
     assert "https://mfn.test/a/flow/q1" not in second_scrape_urls
     assert second_scrape_urls == {
         "https://mfn.test/a/flow/future",
         "https://mfn.test/a/flow/missing",
     }
-    assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 2
 
 
 def test_rerun_does_not_trust_evidence_without_attachment_tier():
@@ -420,7 +421,8 @@ def test_rerun_does_not_trust_evidence_without_attachment_tier():
         first = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
             company_id, as_of="2026-09-20"
         )
-    assert first.status == "complete"
+    assert first.status == "evidence_incomplete"
+    assert first.packet is None
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         second = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([article])).run(
             company_id, as_of="2026-09-20"
