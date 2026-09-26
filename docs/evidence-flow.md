@@ -103,12 +103,13 @@ are accepted only when the issuer segment matches the resolved mapping token
 and the page canonical link (`/all/a/<issuer>/…`) confirms the same issuer;
 missing, malformed, or mismatched confirmation blocks the page visibly
 (`canonical_issuer_unconfirmed` / `issuer_mismatch`), never silently.
-`mb.cision.com` attachments are selected by ranked identity — explicit
-`mfn-primary` marker, then Cision `Main/` path, then report-like link text
+`storage.mfn.se` and `mb.cision.com` attachments are selected by ranked
+identity — explicit `mfn-primary` marker, then Cision `Main/` path, then
+report-like link text
 with corroborating report title (`attachment_tier` in
 `mfn-primary` / `main-path` / `label-score`) — and ambiguous selection
 (`ambiguous_selection`) fails the lane instead of guessing. Repeated
-anchors with a byte-identical PDF href count as one attachment before
+anchors with exactly the same PDF href string count as one attachment before
 ranking; distinct target URLs still refuse as ambiguous.
 Invitation/presentation/webcast-titled pages never contribute evidence.
 Diagnostics split into `discovered`, `filtered_before_download`,

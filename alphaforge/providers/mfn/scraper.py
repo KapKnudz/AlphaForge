@@ -294,11 +294,11 @@ def _is_main_path_pdf(url: str) -> bool:
 def _dedupe_identical_targets(
     pdf_links: list[tuple[str, str, str]],
 ) -> list[tuple[str, str, str]]:
-    """Collapse repeated anchors pointing at the byte-identical href.
+    """Collapse repeated anchors with exactly the same href string.
 
     A release page may print the same PDF link twice (body copy plus
     attachment list); those duplicates are one attachment, not two
-    candidates. Only byte-identical href strings collapse — genuinely
+    candidates. Only identical href strings collapse — genuinely
     distinct target URLs are preserved so multi-attachment ambiguity
     still refuses. No URL canonicalization is applied.
     """
