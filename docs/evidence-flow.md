@@ -103,11 +103,15 @@ are accepted only when the issuer segment matches the resolved mapping token
 and the page canonical link (`/all/a/<issuer>/…`) confirms the same issuer;
 missing, malformed, or mismatched confirmation blocks the page visibly
 (`canonical_issuer_unconfirmed` / `issuer_mismatch`), never silently.
-`mb.cision.com` attachments are selected by ranked identity — explicit
-`mfn-primary` marker, then Cision `Main/` path, then report-like link text
+`storage.mfn.se` and `mb.cision.com` attachments are selected by ranked
+identity — explicit `mfn-primary` marker, then Cision `Main/` path, then
+report-like link text
 with corroborating report title (`attachment_tier` in
 `mfn-primary` / `main-path` / `label-score`) — and ambiguous selection
-(`ambiguous_selection`) fails the lane instead of guessing.
+(`ambiguous_selection`) fails the lane instead of guessing. Repeated
+anchors with exactly the same PDF href string count as one attachment before
+ranking. Distinct target URLs remain separate candidates; unresolved ties at
+the highest applicable tier refuse as ambiguous.
 Invitation/presentation/webcast-titled pages never contribute evidence.
 Diagnostics split into `discovered`, `filtered_before_download`,
 `download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
@@ -169,7 +173,7 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
 their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v2 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v3 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including

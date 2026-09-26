@@ -291,6 +291,37 @@ def _is_main_path_pdf(url: str) -> bool:
     return parts.netloc.lower() == "mb.cision.com" and "/main/" in parts.path.lower()
 
 
+def _dedupe_identical_targets(
+    pdf_links: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Collapse repeated anchors with exactly the same href string.
+
+    A release page may print the same PDF link twice (body copy plus
+    attachment list); those duplicates are one attachment, not two
+    candidates. Only identical href strings collapse — genuinely
+    distinct target URLs are preserved so multi-attachment ambiguity
+    still refuses. No URL canonicalization is applied.
+    """
+    grouped: dict[str, list[tuple[str, str, str]]] = {}
+    for entry in pdf_links:
+        grouped.setdefault(entry[0], []).append(entry)
+    deduped: list[tuple[str, str, str]] = []
+    for entries in grouped.values():
+        # Stable sort: keep the strongest same-target signal (explicit
+        # primary marker, then report-like link text), first anchor
+        # winning any remaining tie.
+        best = sorted(
+            entries,
+            key=lambda entry: (
+                "mfn-primary" in entry[2].lower().split(),
+                _label_report_score(entry[1]),
+            ),
+            reverse=True,
+        )[0]
+        deduped.append(best)
+    return deduped
+
+
 def _select_attachment(
     pdf_links: list[tuple[str, str, str]], *, page_is_report: bool
 ) -> tuple[str | None, str]:
@@ -299,15 +330,18 @@ def _select_attachment(
     Rank: explicit ``mfn-primary`` marker, then Cision ``Main/`` path on the
     Cision attachment host, then report-like link text alone (which
     additionally requires the corroborating page-level report title —
-    enforced by ``page_is_report``). Ties at any tier, or no positive
-    link-text signal at all, yield ``(None, "unresolved")``; an empty
-    candidate set yields ``(None, "none")``.
+    enforced by ``page_is_report``). Repeated anchors with an identical
+    target href count as one attachment before ranking. Ties at any tier,
+    or no positive link-text signal at all, yield ``(None, "unresolved")``;
+    an empty candidate set yields ``(None, "none")``.
     """
-    viable = [
-        (href, text, css_class)
-        for href, text, css_class in pdf_links
-        if _attachment_score(href, text) > 0
-    ]
+    viable = _dedupe_identical_targets(
+        [
+            (href, text, css_class)
+            for href, text, css_class in pdf_links
+            if _attachment_score(href, text) > 0
+        ]
+    )
     if not viable:
         return None, "none"
     if not page_is_report:

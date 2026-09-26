@@ -20,7 +20,7 @@ from alphaforge.evidence.mfn_taxonomy import (
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 1
+REPORT_RULES_VERSION = 2
 
 
 @dataclass(frozen=True)
