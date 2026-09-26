@@ -136,8 +136,28 @@ sources. Rejected candidates carry typed reasons (`rejection_reason`,
 blocks are recorded as typed rejections so their group stays in the coverage
 denominator. Evidence without a recognized `attachment_tier` is
 inadmissible on first run; unchanged reruns skip feed entries that already
-have complete current-fingerprint documents and rebuild the same manifest.
-Packets stamp the consumed `selection_manifest_id`.
+have complete current-fingerprint documents and rebuild the manifest with
+prior considered candidates and typed dispositions when the persisted feed
+fingerprint matches and the candidate remains in that feed. The normalized feed
+fingerprint is part of the manifest identity. A refetched detail that disappears
+cannot erase a previously blocked candidate; changed feed inputs do not inherit
+prior dispositions. The shared ranking/readiness view reconstructs candidate
+accounting from that persisted manifest. Re-recording
+a recurring manifest identity moves it to the current end of the run chronology,
+so A→B→A input transitions expose A to replay and readiness. Persisted demoted
+siblings join their selected parent's group only when stored PDF checksum, explicit
+translation/revision relationship and matching variant group corroborate the
+link; unresolved editions remain independent expected groups. Both candidate
+URLs and report-class counts therefore remain stable across cache replay.
+Packets stamp the consumed `selection_manifest_id`. The bounded AQ inventory
+and defective-run provenance live authoritatively in
+`tests/fixtures/mfn/aq_replay_inventory.json`; repository/cache replay coverage
+is in `tests/test_aq_replay_inventory.py`. The fixture contains public
+release/PDF identity metadata but no raw PDFs or extracted page text; tests seed
+a schema-valid title placeholder page and do not assess PDF extraction fidelity.
+The regression requires corrected first-run and unchanged-replay completeness
+when every stored link remains corroborated. An uncorroborated link must instead
+leave an independent incomplete group.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
@@ -149,7 +169,7 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
 their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v1 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v2 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including

@@ -24,6 +24,7 @@ from alphaforge.db.repositories import (
     find_complete_evidence_document,
     get_mfn_mapping_review,
     get_verified_mfn_mapping,
+    load_current_evidence_selection_manifest_payload,
     load_evidence_selection_manifest,
     mark_evidence_packets_unusable,
     persist_evidence_diagnostic,
@@ -1344,6 +1345,36 @@ class OneCompanyEvidenceFlow:
                 early_skips["issuer_mismatch"] = early_skips.get("issuer_mismatch", 0) + 1
                 continue
             unique_feed.append(entry)
+        feed_identity_fields = (
+            "source_url",
+            "url",
+            "title",
+            "published_at",
+            "provider_event_id",
+            "mfn_event_id",
+            "pdf_checksum",
+            "attachment_checksum",
+            "lang",
+        )
+        normalized_feed = []
+        for entry in unique_feed:
+            if isinstance(entry, str):
+                normalized_feed.append({"source_url": entry})
+            else:
+                normalized_feed.append(
+                    {key: entry[key] for key in feed_identity_fields if entry.get(key) is not None}
+                )
+        normalized_feed.sort(
+            key=lambda entry: str(entry.get("source_url") or entry.get("url") or "")
+        )
+        source_input_fingerprint = hashlib.sha256(
+            json.dumps(
+                normalized_feed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         unseen_feed = []
         future_dated_complete_release = False
         not_yet_published_complete_release = False
@@ -1567,6 +1598,34 @@ class OneCompanyEvidenceFlow:
             )
         identity_candidates = persisted_identity + eligible
         manifest_candidates = identity_candidates + blocked_candidates
+        previous_manifest = load_current_evidence_selection_manifest_payload(
+            self.conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules_fingerprint=active_rules["fingerprint"],
+        )
+        if previous_manifest is not None:
+            if previous_manifest.get("source_input_fingerprint") == source_input_fingerprint:
+                previous_rejections = {
+                    row["source_url"]: row["reason"]
+                    for row in previous_manifest.get("rejected", [])
+                }
+                current_urls = {
+                    str(row.get("source_url") or row.get("url") or "")
+                    for row in manifest_candidates
+                }
+                for record in previous_manifest.get("audit_history", []):
+                    source_url = str(record.get("source_url") or "")
+                    if (
+                        source_url
+                        and source_url in seen_feed_urls
+                        and source_url not in current_urls
+                    ):
+                        candidate = dict(record)
+                        if source_url in previous_rejections:
+                            candidate["rejection_reason"] = previous_rejections[source_url]
+                        manifest_candidates.append(candidate)
+                        current_urls.add(source_url)
         if dry_run:
             deduped = bilingual_dedupe(identity_candidates)
             result.eligible = sum(
@@ -2015,6 +2074,7 @@ class OneCompanyEvidenceFlow:
             candidate_records=manifest_candidates,
             publication_cutoff=today.isoformat(),
             excluded_source_urls=unresolved_existing_source_urls,
+            source_input_fingerprint=source_input_fingerprint,
         )
         if not dry_run:
             persist_evidence_selection_manifest(self.conn, selection_manifest, commit=False)

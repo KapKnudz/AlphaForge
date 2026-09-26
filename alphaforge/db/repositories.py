@@ -592,6 +592,28 @@ def record_job(
     conn.commit()
 
 
+def load_current_evidence_selection_manifest_payload(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    report_rules_fingerprint: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """SELECT manifest_json FROM evidence_selection_manifests
+           WHERE company_id=? AND as_of=? AND report_rules_fingerprint=?
+           ORDER BY id DESC LIMIT 1""",
+        (company_id, as_of[:10], report_rules_fingerprint),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def persist_evidence_selection_manifest(
     conn: Any,
     manifest: Any,
@@ -601,14 +623,24 @@ def persist_evidence_selection_manifest(
 ) -> None:
     """Persist one immutable selection decision for audit and replay."""
     payload = manifest.to_dict()
+    existing = conn.execute(
+        """SELECT packet_hash FROM evidence_selection_manifests
+           WHERE company_id=? AND as_of=? AND manifest_id=?""",
+        (manifest.company_id, manifest.as_of, manifest.manifest_id),
+    ).fetchone()
+    if packet_hash is None and existing is not None:
+        packet_hash = existing[0]
+    conn.execute(
+        """DELETE FROM evidence_selection_manifests
+           WHERE company_id=? AND as_of=? AND manifest_id=?""",
+        (manifest.company_id, manifest.as_of, manifest.manifest_id),
+    )
     conn.execute(
         """
         INSERT INTO evidence_selection_manifests
             (company_id, as_of, manifest_id, manifest_json,
              report_rules_fingerprint, packet_hash)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(company_id, as_of, manifest_id) DO UPDATE SET
-            packet_hash=COALESCE(excluded.packet_hash, evidence_selection_manifests.packet_hash)
         """,
         (
             manifest.company_id,
@@ -947,6 +979,7 @@ def load_evidence_selection_manifest(
     candidate_records: list[dict[str, Any]] | None = None,
     publication_cutoff: str | None = None,
     excluded_source_urls: set[str] | None = None,
+    source_input_fingerprint: str | None = None,
 ) -> Any:
     """Read immutable evidence facts and derive the shared selection manifest."""
     from datetime import date
@@ -979,6 +1012,41 @@ def load_evidence_selection_manifest(
             return parsed if isinstance(parsed, dict) else {}
         return {}
 
+    if candidate_records is None:
+        persisted_manifest = load_current_evidence_selection_manifest_payload(
+            conn,
+            company_id=company_id,
+            as_of=as_of,
+            report_rules_fingerprint=str(report_rules.get("fingerprint") or ""),
+        )
+        if persisted_manifest is not None:
+            persisted_audit = {
+                str(row.get("source_url") or ""): dict(row)
+                for row in persisted_manifest.get("audit_history", [])
+                if isinstance(row, dict) and row.get("source_url")
+            }
+            candidate_urls = {
+                str(url)
+                for group in persisted_manifest.get("deduplication", [])
+                if isinstance(group, dict)
+                for url in group.get("candidate_source_urls", [])
+                if url
+            }
+            persisted_rejections = {
+                str(row.get("source_url") or ""): str(row.get("reason") or "")
+                for row in persisted_manifest.get("rejected", [])
+                if isinstance(row, dict) and row.get("source_url")
+            }
+            candidate_urls.update(persisted_rejections)
+            candidate_records = []
+            for source_url in sorted(candidate_urls):
+                candidate = dict(persisted_audit.get(source_url, {"source_url": source_url}))
+                if source_url in persisted_rejections:
+                    candidate["rejection_reason"] = persisted_rejections[source_url]
+                candidate_records.append(candidate)
+            if source_input_fingerprint is None:
+                source_input_fingerprint = persisted_manifest.get("source_input_fingerprint")
+
     audit_rows = [
         dict(row)
         for row in conn.execute(
@@ -986,7 +1054,7 @@ def load_evidence_selection_manifest(
             SELECT id AS document_id, source_url, title, published_at, ingested_lang,
                    raw_metadata, report_rules_fingerprint, duplicate_of
             FROM research_documents
-            WHERE company_id=? AND duplicate_of IS NULL
+            WHERE company_id=?
             ORDER BY source_url, id
             """,
             (company_id,),
@@ -1067,13 +1135,58 @@ def load_evidence_selection_manifest(
                 (row["document_id"], effective_cutoff),
             ).fetchall()
         ]
+    # Only a persisted, checksum-backed sibling of a currently selected PDF
+    # can share its verified variant identity. Release titles/dates alone do
+    # not establish a translation or a revision.
+    packet_by_id = {row["document_id"]: row for row in packet_rows}
+    verified_siblings: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = {}
+    for row in audit_rows:
+        parent = packet_by_id.get(row["duplicate_of"])
+        sibling_metadata = metadata(row["raw_metadata"])
+        parent_metadata = metadata(parent["raw_metadata"]) if parent else {}
+        if (
+            parent
+            and sibling_metadata.get("relationship") in {"TRANSLATION", "REVISION"}
+            and sibling_metadata.get("pdf_checksum")
+            and sibling_metadata.get("bilingual_group_id")
+            and sibling_metadata["bilingual_group_id"] == parent_metadata.get("bilingual_group_id")
+        ):
+            verified_siblings[row["source_url"]] = (row, sibling_metadata, parent)
+    candidates = []
+    packet_urls = {row["source_url"] for row in packet_rows}
+    for candidate in candidate_records or []:
+        candidate = dict(candidate)
+        source_url = str(candidate.get("source_url") or candidate.get("url") or "")
+        if source_url in verified_siblings:
+            sibling, sibling_metadata, parent = verified_siblings[source_url]
+            candidate["raw_metadata"] = sibling["raw_metadata"]
+            candidate["report_kind"] = parent["report_kind"]
+            candidate["bilingual_group_id"] = sibling_metadata["bilingual_group_id"]
+            candidate["rejection_reason"] = (
+                "corroborated_" + sibling_metadata["relationship"].lower()
+            )
+        elif source_url not in packet_urls:
+            # Old manifest candidates may carry a once-verified group even
+            # after the sibling relation changed. Never inherit that identity
+            # without current checksum-backed sibling/parent corroboration.
+            candidate.pop("bilingual_group_id", None)
+            candidate.pop("_bilingual_group_id", None)
+            raw = metadata(candidate.get("raw_metadata"))
+            if "bilingual_group_id" in raw:
+                candidate["raw_metadata"] = {
+                    k: v for k, v in raw.items() if k != "bilingual_group_id"
+                }
+            if str(candidate.get("rejection_reason") or "").startswith("corroborated_"):
+                candidate["rejection_reason"] = "relationship_unresolved"
+        candidates.append(candidate)
     return select_evidence_manifest(
         company_id=company_id,
         as_of=as_of,
         report_rules=report_rules,
         audit_history=audit_rows,
-        candidate_records=candidate_records,
+        candidate_records=candidates,
         packet_inputs=packet_rows,
+        source_input_fingerprint=source_input_fingerprint,
     )
 
 

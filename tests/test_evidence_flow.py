@@ -404,7 +404,158 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
 
 
+def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": f"https://mfn.test/a/flow/{language}",
+            "title": title,
+            "published_at": "2026-02-12T08:00:00Z",
+            "report_kind": "quarterly",
+            "document_type": "YEAR_END_REPORT",
+            "fiscal_period": "2025",
+            "provider_event_id": "flow-year-end-2025",
+            "attachment_url": f"https://storage.mfn.test/flow/{language}.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": language,
+        }
+        for language, title in (
+            ("en", "Flow AB Year-end report 2025"),
+            ("sv", "Flow AB Bokslutskommuniké 2025"),
+        )
+    ]
+    scraper = _FakeScraper(articles)
+    flow = OneCompanyEvidenceFlow(conn, scraper=scraper)
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = flow.run(company_id, as_of="2026-09-20")
+        first_manifest = json.loads(
+            conn.execute(
+                "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+        second = flow.run(company_id, as_of="2026-09-20")
+    assert first.status == second.status == "complete"
+    assert second.downloaded == 0
+    second_manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    manifests = [first_manifest, second_manifest]
+    assert first_manifest["manifest_id"] == second_manifest["manifest_id"]
+    for manifest in manifests:
+        assert {row["source_url"] for row in manifest["audit_history"]} == {
+            article["source_url"] for article in articles
+        }
+        assert manifest["completeness"] == {"quarterly": {"expected": 1, "retained": 1}}
+        assert len(manifest["deduplication"]) == 1
+        assert len(manifest["rejected"]) == 1
+        assert manifest["rejected"][0]["reason"] == "corroborated_translation"
+    assert first.packet_hash == second.packet_hash
+    assert all(not entries for entries in scraper.scrape_calls[-1:])
+
+
+def test_missing_refetched_detail_cannot_lose_unresolved_candidate():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    selected = {
+        "source_url": "https://mfn.test/a/flow/annual-2025",
+        "title": "Flow AB Annual Report 2025",
+        "report_kind": "annual",
+        "published_at": "2026-03-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/flow/en.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    unresolved = {
+        "source_url": "https://mfn.test/a/flow/annual-2024",
+        "title": "Flow AB Annual Report 2024",
+        "report_kind": "annual",
+        "published_at": "2025-03-01T08:00:00Z",
+        "attachment_tier": "unresolved",
+        "lang": "sv",
+    }
+
+    class _MissingDetailOnReplay(_FakeScraper):
+        def scrape_details(self, entries, *, reports_only=True):
+            details = super().scrape_details(entries, reports_only=reports_only)
+            return details if len(self.scrape_calls) == 1 else []
+
+    scraper = _MissingDetailOnReplay([selected, unresolved])
+    flow = OneCompanyEvidenceFlow(conn, scraper=scraper)
+    response = SimpleNamespace(
+        status_code=200, headers={"Content-Type": "application/pdf"}, content=_pdf()
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = flow.run(company_id, as_of="2026-09-20")
+        second = flow.run(company_id, as_of="2026-09-20")
+    assert first.status == "evidence_incomplete"
+    assert first.completeness == {"annual": {"expected": 2, "retained": 1}}
+    # The feed is unchanged, even though a refetched detail disappeared.
+    # Losing that detail must not silently turn incomplete coverage complete.
+    assert second.status == "evidence_incomplete"
+    assert second.downloaded == 0
+    assert second.completeness == first.completeness == {"annual": {"expected": 2, "retained": 1}}
+    manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    assert {row["source_url"] for row in manifest["audit_history"]} == {
+        selected["source_url"],
+        unresolved["source_url"],
+    }
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
+
+
+def test_unchanged_unresolved_candidate_remains_blocked_on_replay():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    selected = {
+        "source_url": "https://mfn.test/a/flow/annual-2025",
+        "title": "Flow AB Annual Report 2025",
+        "report_kind": "annual",
+        "published_at": "2026-03-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/flow/en.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    unresolved = {
+        "source_url": "https://mfn.test/a/flow/annual-2024",
+        "title": "Flow AB Annual Report 2024",
+        "report_kind": "annual",
+        "published_at": "2025-03-01T08:00:00Z",
+        "attachment_tier": "unresolved",
+        "lang": "sv",
+    }
+    flow = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([selected, unresolved]))
+    response = SimpleNamespace(
+        status_code=200, headers={"Content-Type": "application/pdf"}, content=_pdf()
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = flow.run(company_id, as_of="2026-09-20")
+        second = flow.run(company_id, as_of="2026-09-20")
+    assert first.status == second.status == "evidence_incomplete"
+    assert first.completeness == second.completeness == {"annual": {"expected": 2, "retained": 1}}
+    manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    assert manifest["rejected"] == [
+        {"reason": "ambiguous_selection", "source_url": unresolved["source_url"]}
+    ]
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
+
+
 def test_rerun_does_not_trust_evidence_without_attachment_tier():
+
     conn = _connection()
     company_id = _mapped_company(conn)
     article = {
