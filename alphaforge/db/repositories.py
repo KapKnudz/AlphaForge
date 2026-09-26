@@ -986,7 +986,7 @@ def load_evidence_selection_manifest(
             SELECT id AS document_id, source_url, title, published_at, ingested_lang,
                    raw_metadata, report_rules_fingerprint, duplicate_of
             FROM research_documents
-            WHERE company_id=? AND duplicate_of IS NULL
+            WHERE company_id=?
             ORDER BY source_url, id
             """,
             (company_id,),
@@ -1067,12 +1067,40 @@ def load_evidence_selection_manifest(
                 (row["document_id"], effective_cutoff),
             ).fetchall()
         ]
+    # Only a persisted, checksum-backed sibling of a currently selected PDF
+    # can share its verified variant identity. Release titles/dates alone do
+    # not establish a translation or a revision.
+    packet_by_id = {row["document_id"]: row for row in packet_rows}
+    verified_siblings: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = {}
+    for row in audit_rows:
+        parent = packet_by_id.get(row["duplicate_of"])
+        sibling_metadata = metadata(row["raw_metadata"])
+        parent_metadata = metadata(parent["raw_metadata"]) if parent else {}
+        if (
+            parent
+            and sibling_metadata.get("relationship") in {"TRANSLATION", "REVISION"}
+            and sibling_metadata.get("pdf_checksum")
+            and sibling_metadata.get("bilingual_group_id")
+            and sibling_metadata["bilingual_group_id"] == parent_metadata.get("bilingual_group_id")
+        ):
+            verified_siblings[row["source_url"]] = (row, sibling_metadata, parent)
+    candidates = []
+    for candidate in candidate_records or []:
+        candidate = dict(candidate)
+        source_url = str(candidate.get("source_url") or candidate.get("url") or "")
+        if source_url in verified_siblings:
+            sibling, sibling_metadata, parent = verified_siblings[source_url]
+            candidate["raw_metadata"] = sibling["raw_metadata"]
+            candidate["report_kind"] = parent["report_kind"]
+            candidate["bilingual_group_id"] = sibling_metadata["bilingual_group_id"]
+            candidate["rejection_reason"] = "corroborated_" + sibling_metadata["relationship"].lower()
+        candidates.append(candidate)
     return select_evidence_manifest(
         company_id=company_id,
         as_of=as_of,
         report_rules=report_rules,
         audit_history=audit_rows,
-        candidate_records=candidate_records,
+        candidate_records=candidates,
         packet_inputs=packet_rows,
     )
 

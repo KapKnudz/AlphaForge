@@ -183,16 +183,23 @@ def select_evidence_manifest(
     ]
     selected_packet_rows = _packet_rows(packet_inputs)
     packet_urls = {_source_url(row) for row in selected_packet_rows}
+    # A persisted selected variant may gain a bilingual group id after the
+    # discovery candidate was assembled. Its URL still denotes one edition,
+    # not an additional expected group with no candidate.
+    packet_groups_by_url = {_source_url(row): _group_id(row) for row in selected_packet_rows}
+    packet_classes_by_group = {
+        _group_id(row): _report_class(row) for row in selected_packet_rows
+    }
     if not group_records:
         group_records = selected_packet_rows
     groups: dict[str, dict[str, Any]] = {}
     for record in group_records:
-        group_id = _group_id(record)
+        group_id = packet_groups_by_url.get(_source_url(record), _group_id(record))
         group = groups.setdefault(
             group_id,
             {
                 "group_id": group_id,
-                "report_class": _report_class(record),
+                "report_class": packet_classes_by_group.get(group_id, _report_class(record)),
                 "candidate_source_urls": [],
                 "packet_source_urls": [],
             },
@@ -217,6 +224,9 @@ def select_evidence_manifest(
         if source_url not in group["packet_source_urls"]:
             group["packet_source_urls"].append(source_url)
 
+    for group in groups.values():
+        group["candidate_source_urls"].sort()
+        group["packet_source_urls"].sort()
     selected_urls = {url for group in groups.values() for url in group["packet_source_urls"]}
     considered_urls = {_source_url(record) for record in candidates}
     candidate_by_url = {_source_url(record): record for record in candidates}

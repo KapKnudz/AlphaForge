@@ -1567,6 +1567,33 @@ class OneCompanyEvidenceFlow:
             )
         identity_candidates = persisted_identity + eligible
         manifest_candidates = identity_candidates + blocked_candidates
+        # Complete cached feed entries bypass detail scraping. Their earlier
+        # considered-but-unselected editions must remain in the denominator;
+        # document persistence alone cannot reconstruct those candidates.
+        previous_manifest_row = self.conn.execute(
+            """SELECT manifest_json FROM evidence_selection_manifests
+               WHERE company_id=? AND as_of=? AND report_rules_fingerprint=?
+               ORDER BY id DESC LIMIT 1""",
+            (company_id, as_of[:10], active_rules["fingerprint"]),
+        ).fetchone()
+        if previous_manifest_row is not None:
+            previous_manifest = json.loads(previous_manifest_row[0])
+            previous_rejections = {
+                row["source_url"]: row["reason"]
+                for row in previous_manifest.get("rejected", [])
+            }
+            current_urls = {
+                str(row.get("source_url") or row.get("url") or "")
+                for row in manifest_candidates
+            }
+            for record in previous_manifest.get("audit_history", []):
+                source_url = str(record.get("source_url") or "")
+                if source_url and source_url not in current_urls:
+                    candidate = dict(record)
+                    if source_url in previous_rejections:
+                        candidate["rejection_reason"] = previous_rejections[source_url]
+                    manifest_candidates.append(candidate)
+                    current_urls.add(source_url)
         if dry_run:
             deduped = bilingual_dedupe(identity_candidates)
             result.eligible = sum(

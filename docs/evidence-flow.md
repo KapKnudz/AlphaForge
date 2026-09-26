@@ -136,7 +136,12 @@ sources. Rejected candidates carry typed reasons (`rejection_reason`,
 blocks are recorded as typed rejections so their group stays in the coverage
 denominator. Evidence without a recognized `attachment_tier` is
 inadmissible on first run; unchanged reruns skip feed entries that already
-have complete current-fingerprint documents and rebuild the same manifest.
+have complete current-fingerprint documents and rebuild the manifest with
+prior considered candidates and typed dispositions. Persisted demoted siblings
+join their selected parent's group only when stored PDF checksum, explicit
+translation/revision relationship and matching variant group corroborate the
+link; unresolved editions remain independent expected groups. Both candidate
+URLs and report-class counts therefore remain stable across cache replay.
 Packets stamp the consumed `selection_manifest_id`.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
