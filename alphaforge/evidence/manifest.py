@@ -33,6 +33,7 @@ class EvidenceSelectionManifest:
     packet_inputs: tuple[dict[str, Any], ...]
     rejected: tuple[dict[str, Any], ...]
     readiness_fallback: dict[str, Any]
+    source_input_fingerprint: str | None = None
 
     @property
     def completeness(self) -> dict[str, dict[str, int]]:
@@ -60,6 +61,7 @@ class EvidenceSelectionManifest:
                 "as_of": self.as_of,
                 "report_rules_fingerprint": self.report_rules_fingerprint,
                 "history_window": self.history_window,
+                "source_input_fingerprint": self.source_input_fingerprint,
                 "deduplication": self.deduplication,
                 "rejected": self.rejected,
             },
@@ -170,6 +172,7 @@ def select_evidence_manifest(
     audit_history: list[dict[str, Any]],
     candidate_records: list[dict[str, Any]] | None,
     packet_inputs: list[dict[str, Any]],
+    source_input_fingerprint: str | None = None,
 ) -> EvidenceSelectionManifest:
     """Derive every evidence role from immutable facts and one rule input set."""
     fingerprint = report_rules.get("fingerprint") if isinstance(report_rules, dict) else None
@@ -187,9 +190,7 @@ def select_evidence_manifest(
     # discovery candidate was assembled. Its URL still denotes one edition,
     # not an additional expected group with no candidate.
     packet_groups_by_url = {_source_url(row): _group_id(row) for row in selected_packet_rows}
-    packet_classes_by_group = {
-        _group_id(row): _report_class(row) for row in selected_packet_rows
-    }
+    packet_classes_by_group = {_group_id(row): _report_class(row) for row in selected_packet_rows}
     if not group_records:
         group_records = selected_packet_rows
     groups: dict[str, dict[str, Any]] = {}
@@ -275,6 +276,7 @@ def select_evidence_manifest(
             "current_packet_available": bool(selected_packet_rows),
             "requires_current_packet": True,
         },
+        source_input_fingerprint=source_input_fingerprint,
     )
 
 

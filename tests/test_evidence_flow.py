@@ -434,15 +434,19 @@ def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
     )
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         first = flow.run(company_id, as_of="2026-09-20")
-        first_manifest = json.loads(conn.execute(
-            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
-        ).fetchone()[0])
+        first_manifest = json.loads(
+            conn.execute(
+                "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        )
         second = flow.run(company_id, as_of="2026-09-20")
     assert first.status == second.status == "complete"
     assert second.downloaded == 0
-    second_manifest = json.loads(conn.execute(
-        "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
-    ).fetchone()[0])
+    second_manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
     manifests = [first_manifest, second_manifest]
     assert first_manifest["manifest_id"] == second_manifest["manifest_id"]
     for manifest in manifests:
@@ -457,7 +461,7 @@ def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
     assert all(not entries for entries in scraper.scrape_calls[-1:])
 
 
-def test_cached_replay_cannot_lose_unresolved_candidate_and_become_complete():
+def test_missing_refetched_detail_does_not_inherit_stale_candidate():
     conn = _connection()
     company_id = _mapped_company(conn)
     selected = {
@@ -491,17 +495,56 @@ def test_cached_replay_cannot_lose_unresolved_candidate_and_become_complete():
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         first = flow.run(company_id, as_of="2026-09-20")
         second = flow.run(company_id, as_of="2026-09-20")
-    assert first.status == second.status == "evidence_incomplete"
+    assert first.status == "evidence_incomplete"
+    assert first.completeness == {"annual": {"expected": 2, "retained": 1}}
+    # The unresolved entry was refetched, but its detail disappeared. This
+    # changed source input must not inherit yesterday's rejection.
+    assert second.status == "complete"
     assert second.downloaded == 0
-    assert second.completeness == first.completeness == {
-        "annual": {"expected": 2, "retained": 1}
+    assert second.completeness == {"annual": {"expected": 1, "retained": 1}}
+    manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    assert manifest["rejected"] == []
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is not None
+
+
+def test_unchanged_unresolved_candidate_remains_blocked_on_replay():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    selected = {
+        "source_url": "https://mfn.test/a/flow/annual-2025",
+        "title": "Flow AB Annual Report 2025",
+        "report_kind": "annual",
+        "published_at": "2026-03-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/flow/en.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
     }
-    manifest = json.loads(conn.execute(
-        "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
-    ).fetchone()[0])
-    assert {row["source_url"] for row in manifest["audit_history"]} == {
-        selected["source_url"], unresolved["source_url"]
+    unresolved = {
+        "source_url": "https://mfn.test/a/flow/annual-2024",
+        "title": "Flow AB Annual Report 2024",
+        "report_kind": "annual",
+        "published_at": "2025-03-01T08:00:00Z",
+        "attachment_tier": "unresolved",
+        "lang": "sv",
     }
+    flow = OneCompanyEvidenceFlow(conn, scraper=_FakeScraper([selected, unresolved]))
+    response = SimpleNamespace(
+        status_code=200, headers={"Content-Type": "application/pdf"}, content=_pdf()
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = flow.run(company_id, as_of="2026-09-20")
+        second = flow.run(company_id, as_of="2026-09-20")
+    assert first.status == second.status == "evidence_incomplete"
+    assert first.completeness == second.completeness == {"annual": {"expected": 2, "retained": 1}}
+    manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
     assert manifest["rejected"] == [
         {"reason": "ambiguous_selection", "source_url": unresolved["source_url"]}
     ]
