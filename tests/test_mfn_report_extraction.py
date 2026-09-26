@@ -1283,6 +1283,22 @@ def test_duplicate_identical_primary_pdf_counts_as_one_attachment():
     assert parsed["attachment_tier"] == "mfn-primary"
 
 
+def test_duplicate_href_keeps_viable_report_signal_before_deduplication():
+    pdf_url = "https://storage.mfn.se/11111111-2222-4333-8444-555555555555/document.pdf"
+    html = f"""
+    <html><body>
+      <h1>Acme's Annual Report 2025 published</h1>
+      <div class="release-body">
+        <a class="mfn-primary" href="{pdf_url}">Presentation</a>
+        <a href="{pdf_url}">Annual report PDF</a>
+      </div>
+    </body></html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == pdf_url
+    assert parsed["attachment_tier"] == "label-score"
+
+
 def test_duplicate_identical_primary_pdf_swedish_counts_as_one_attachment():
     """Inwido 2025 annual SV shape: same duplicate-href structure, Swedish title."""
     pdf_url = "https://storage.mfn.se/66666666-7777-4888-8999-000000000000/acme-se-annual-report-2025.pdf"

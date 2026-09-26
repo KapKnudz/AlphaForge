@@ -335,12 +335,13 @@ def _select_attachment(
     or no positive link-text signal at all, yield ``(None, "unresolved")``;
     an empty candidate set yields ``(None, "none")``.
     """
-    pdf_links = _dedupe_identical_targets(pdf_links)
-    viable = [
-        (href, text, css_class)
-        for href, text, css_class in pdf_links
-        if _attachment_score(href, text) > 0
-    ]
+    viable = _dedupe_identical_targets(
+        [
+            (href, text, css_class)
+            for href, text, css_class in pdf_links
+            if _attachment_score(href, text) > 0
+        ]
+    )
     if not viable:
         return None, "none"
     if not page_is_report:
