@@ -107,7 +107,9 @@ missing, malformed, or mismatched confirmation blocks the page visibly
 `mfn-primary` marker, then Cision `Main/` path, then report-like link text
 with corroborating report title (`attachment_tier` in
 `mfn-primary` / `main-path` / `label-score`) — and ambiguous selection
-(`ambiguous_selection`) fails the lane instead of guessing.
+(`ambiguous_selection`) fails the lane instead of guessing. Repeated
+anchors with a byte-identical PDF href count as one attachment before
+ranking; distinct target URLs still refuse as ambiguous.
 Invitation/presentation/webcast-titled pages never contribute evidence.
 Diagnostics split into `discovered`, `filtered_before_download`,
 `download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and

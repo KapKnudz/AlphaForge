@@ -1259,3 +1259,58 @@ def test_sibling_persistence_strips_demoted_edition_children():
         assert find_complete_evidence_attachment(conn, sv_attachment, company_id) is None
     finally:
         conn.close()
+
+
+def test_duplicate_identical_primary_pdf_counts_as_one_attachment():
+    """Inwido 2025 annual EN shape: the same mfn-primary href printed twice.
+
+    Structure mirrors the captured 2026-09-26 annual-report release pages
+    (one PDF URL in two anchors, one with padded class whitespace); only
+    the issuer-specific URL path is synthetic.
+    """
+    pdf_url = "https://storage.mfn.se/11111111-2222-4333-8444-555555555555/acme-en-annual-report-2025.pdf"
+    html = f"""
+    <html><body>
+      <h1>Acme's Annual Report 2025 published</h1>
+      <div class="release-body"><p>Annual report text.</p>
+        <a class=" mfn-primary " href="{pdf_url}">Acme EN Annual Report 2025</a>
+        <a class="mfn-primary" href="{pdf_url}">Acme EN Annual Report 2025</a>
+      </div>
+    </body></html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == pdf_url
+    assert parsed["attachment_tier"] == "mfn-primary"
+
+
+def test_duplicate_identical_primary_pdf_swedish_counts_as_one_attachment():
+    """Inwido 2025 annual SV shape: same duplicate-href structure, Swedish title."""
+    pdf_url = "https://storage.mfn.se/66666666-7777-4888-8999-000000000000/acme-se-annual-report-2025.pdf"
+    html = f"""
+    <html><body>
+      <h1>Acmes årsredovisning för 2025 publicerad</h1>
+      <div class="release-body"><p>Årsredovisningstext.</p>
+        <a class=" mfn-primary " href="{pdf_url}">Acme SE Annual Report 2025</a>
+        <a class="mfn-primary" href="{pdf_url}">Acme SE Annual Report 2025</a>
+      </div>
+    </body></html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] == pdf_url
+    assert parsed["attachment_tier"] == "mfn-primary"
+
+
+def test_distinct_primary_pdfs_remain_unresolved():
+    """Negative control: two genuinely different mfn-primary targets stay ambiguous."""
+    html = """
+    <html><body>
+      <h1>Acme's Annual Report 2025 published</h1>
+      <div class="release-body"><p>Annual report text.</p>
+        <a class="mfn-primary" href="https://storage.mfn.se/11111111-2222-4333-8444-555555555555/acme-en-annual-report-2025.pdf">Acme EN Annual Report 2025</a>
+        <a class="mfn-primary" href="https://storage.mfn.se/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/acme-en-appendix-2025.pdf">Acme EN Appendix 2025</a>
+      </div>
+    </body></html>
+    """
+    parsed = _parse_html(html)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
