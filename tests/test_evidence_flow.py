@@ -461,7 +461,7 @@ def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
     assert all(not entries for entries in scraper.scrape_calls[-1:])
 
 
-def test_missing_refetched_detail_does_not_inherit_stale_candidate():
+def test_missing_refetched_detail_cannot_lose_unresolved_candidate():
     conn = _connection()
     company_id = _mapped_company(conn)
     selected = {
@@ -497,18 +497,21 @@ def test_missing_refetched_detail_does_not_inherit_stale_candidate():
         second = flow.run(company_id, as_of="2026-09-20")
     assert first.status == "evidence_incomplete"
     assert first.completeness == {"annual": {"expected": 2, "retained": 1}}
-    # The unresolved entry was refetched, but its detail disappeared. This
-    # changed source input must not inherit yesterday's rejection.
-    assert second.status == "complete"
+    # The feed is unchanged, even though a refetched detail disappeared.
+    # Losing that detail must not silently turn incomplete coverage complete.
+    assert second.status == "evidence_incomplete"
     assert second.downloaded == 0
-    assert second.completeness == {"annual": {"expected": 1, "retained": 1}}
+    assert second.completeness == first.completeness == {"annual": {"expected": 2, "retained": 1}}
     manifest = json.loads(
         conn.execute(
             "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
         ).fetchone()[0]
     )
-    assert manifest["rejected"] == []
-    assert load_evidence_packet(conn, company_id, "2026-09-20") is not None
+    assert {row["source_url"] for row in manifest["audit_history"]} == {
+        selected["source_url"],
+        unresolved["source_url"],
+    }
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
 
 
 def test_unchanged_unresolved_candidate_remains_blocked_on_replay():

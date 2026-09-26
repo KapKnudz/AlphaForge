@@ -137,9 +137,10 @@ blocks are recorded as typed rejections so their group stays in the coverage
 denominator. Evidence without a recognized `attachment_tier` is
 inadmissible on first run; unchanged reruns skip feed entries that already
 have complete current-fingerprint documents and rebuild the manifest with
-prior considered candidates and typed dispositions only when the persisted feed
-fingerprint matches and the candidate itself was cache-skipped. Refetched or
-changed inputs do not inherit prior dispositions. The shared ranking/readiness
+prior considered candidates and typed dispositions when the persisted feed
+fingerprint matches and the candidate remains in that feed. A refetched detail
+that disappears cannot erase a previously blocked candidate; changed feed inputs
+do not inherit prior dispositions. The shared ranking/readiness
 view reconstructs candidate accounting from that persisted manifest. Re-recording
 a recurring manifest identity moves it to the current end of the run chronology,
 so A→B→A input transitions expose A to replay and readiness. Persisted demoted

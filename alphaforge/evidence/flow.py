@@ -1605,12 +1605,6 @@ class OneCompanyEvidenceFlow:
             report_rules_fingerprint=active_rules["fingerprint"],
         )
         if previous_manifest is not None:
-            cache_skipped_urls = seen_feed_urls - {
-                str(
-                    entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
-                )
-                for entry in unseen_feed
-            }
             if previous_manifest.get("source_input_fingerprint") == source_input_fingerprint:
                 previous_rejections = {
                     row["source_url"]: row["reason"]
@@ -1624,7 +1618,7 @@ class OneCompanyEvidenceFlow:
                     source_url = str(record.get("source_url") or "")
                     if (
                         source_url
-                        and source_url in cache_skipped_urls
+                        and source_url in seen_feed_urls
                         and source_url not in current_urls
                     ):
                         candidate = dict(record)
