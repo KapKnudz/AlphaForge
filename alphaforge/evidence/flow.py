@@ -1543,6 +1543,12 @@ class OneCompanyEvidenceFlow:
                 result.skipped["mfn_report_attachment_mismatch"] = (
                     result.skipped.get("mfn_report_attachment_mismatch", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason="mfn_report_attachment_mismatch",
+                    )
                 hard_blocks += 1
                 continue
             if is_invitation_or_presentation(title) or is_invitation_or_presentation(
@@ -1589,6 +1595,12 @@ class OneCompanyEvidenceFlow:
                 # it to the resolved issuer blocks the lane visibly instead
                 # of persisting possibly-foreign evidence.
                 result.skipped[issuer_failure] = result.skipped.get(issuer_failure, 0) + 1
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason=issuer_failure,
+                    )
                 hard_blocks += 1
                 continue
             if article.get("attachment_tier") == "unresolved":
@@ -1599,15 +1611,20 @@ class OneCompanyEvidenceFlow:
                 result.skipped[AMBIGUOUS_SELECTION_SKIP_REASON] = (
                     result.skipped.get(AMBIGUOUS_SELECTION_SKIP_REASON, 0) + 1
                 )
-                blocked_candidates.append(
-                    {
-                        **article,
-                        "mfn_slug": mapping["mfn_slug"],
-                        "company_id": company_id,
-                        "rejection_reason": AMBIGUOUS_SELECTION_SKIP_REASON,
-                        "_manifest_rejected": True,
-                    }
-                )
+                blocked = {
+                    **article,
+                    "mfn_slug": mapping["mfn_slug"],
+                    "company_id": company_id,
+                    "rejection_reason": AMBIGUOUS_SELECTION_SKIP_REASON,
+                    "_manifest_rejected": True,
+                }
+                blocked_candidates.append(blocked)
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        blocked,
+                        eligibility="rejected",
+                        eligibility_reason=AMBIGUOUS_SELECTION_SKIP_REASON,
+                    )
                 hard_blocks += 1
                 continue
             pre_cutoff_report = True
@@ -1768,6 +1785,11 @@ class OneCompanyEvidenceFlow:
                 stored_pdf_language = None
             else:
                 stored_pdf_language = _stored_pdf_language(existing)
+            if revision_recorder is not None and not candidate.get("_persisted_evidence"):
+                # A changed current-feed observation must bind verified bytes
+                # to its own immutable revision, even when a legacy row can
+                # supply a language hint for the same attachment URL.
+                stored_pdf_language = None
             if stored_pdf_language is not None:
                 language, evidence = stored_pdf_language
                 identity_candidates[index] = {
