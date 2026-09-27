@@ -90,6 +90,25 @@ Scanned or near-empty PDFs are retained with a `*_no_ocr` limitation. OCR,
 semantic retrieval, general news, and model-assisted identity linking are not
 part of this lane.
 
+### Immutable PDF object storage
+
+`alphaforge.evidence.artifact_store.LocalPdfArtifactStore` is the standalone
+local persistence boundary for newly retained PDF bytes. By default it stores
+objects at
+`data/evidence/objects/sha256/<first-two-hex>/<sha256>.pdf` and returns a URI
+relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`). It
+streams writes through a same-filesystem temporary file, validates the byte
+limit and PDF magic, fsyncs, and atomically installs without replacing an
+existing object. Existing objects are reused only after full checksum and size
+verification.
+
+Call `read_pdf(sha256, expected_size=...)` before use. It returns bytes only
+after streaming verification and raises `artifact_unavailable` or
+`artifact_checksum_mismatch` typed errors rather than falling back to a URL or
+another object. The store performs no database writes or deletion. Historical
+hash metadata without a retained, verified object therefore does not establish
+replayable evidence.
+
 A run with no model-ready source returns `no_evidence` with one of
 `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source`;
 it persists a partial evidence job audit record and does not create a packet.
