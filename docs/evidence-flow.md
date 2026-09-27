@@ -130,7 +130,10 @@ of a green `complete`.
 
 Selection is centralized in a pure, side-effect-free manifest
 (`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
-evidence-selection-manifest-v1`): `select_evidence_manifest()` derives every
+evidence-selection-manifest-v1`). Immutable observation batches use canonical
+`YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; candidate and
+relation observations may reuse older facts but cannot reference a later batch,
+and candidate rules must match their batch. `select_evidence_manifest()` derives every
 evidence role — audit history, cache, reuse, deduplication groups, packet
 inputs, typed rejections — from immutable facts plus one rule input set
 (`alphaforge/evidence/report_rules.py`, fingerprinted). Completeness, packet

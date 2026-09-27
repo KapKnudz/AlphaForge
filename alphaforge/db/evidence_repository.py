@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -132,7 +132,32 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _require_canonical_date(value: str, *, field: str) -> None:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a canonical date") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{field} must be a canonical date")
+
+
+def _require_canonical_batch(value: ObservationBatchInput) -> None:
+    _require_canonical_date(value.as_of, field="observation batch as_of")
+    for field, timestamp in (
+        ("effective_at", value.effective_at),
+        ("first_recorded_at", value.first_recorded_at),
+    ):
+        try:
+            parsed = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise ValueError(f"observation batch {field} must be canonical UTC") from exc
+        canonical = parsed.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        if canonical != timestamp:
+            raise ValueError(f"observation batch {field} must be canonical UTC")
+
+
 def make_batch_id(value: ObservationBatchInput) -> str:
+    _require_canonical_batch(value)
     return _stable_hash(
         {
             "provider": "mfn",
@@ -472,6 +497,15 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
         )
         if attachment is None or attachment["candidate_id"] != candidate["id"]:
             raise ValueError("candidate observation attachment belongs to another candidate")
+        attachment_batch = conn.execute(
+            "SELECT as_of, effective_at FROM evidence_observation_batches WHERE id=?",
+            (attachment["batch_id"],),
+        ).fetchone()
+        if attachment_batch is None or (
+            str(attachment_batch[0]) > str(batch["as_of"])
+            or str(attachment_batch[1]) > str(batch["effective_at"])
+        ):
+            raise ValueError("candidate observation attachment postdates its batch")
     extraction = None
     if value.extraction_id is not None:
         extraction = _row(
@@ -481,6 +515,8 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
             raise ValueError("candidate observation references an unknown extraction")
         if attachment is None or extraction["artifact_id"] != attachment["artifact_id"]:
             raise ValueError("candidate observation extraction and attachment artifacts differ")
+    if value.report_rules_fingerprint != batch["report_rules_fingerprint"]:
+        raise ValueError("candidate observation rules fingerprint differs from its batch")
     metadata = _canonical_json(value.raw_metadata)
     identity_payload = asdict(value)
     identity_payload["invitation_veto"] = bool(value.invitation_veto)
@@ -672,6 +708,17 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
     batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
     if left is None or right is None or batch is None:
         raise ValueError("relation observation references an unknown identity")
+    source_batches = conn.execute(
+        """SELECT as_of, effective_at FROM evidence_observation_batches
+           WHERE id IN (?, ?)""",
+        (left["batch_id"], right["batch_id"]),
+    ).fetchall()
+    if len(source_batches) != len({left["batch_id"], right["batch_id"]}) or any(
+        str(source_batch[0]) > str(batch["as_of"])
+        or str(source_batch[1]) > str(batch["effective_at"])
+        for source_batch in source_batches
+    ):
+        raise ValueError("relation candidate observation postdates its batch")
     if value.disposition == "asserted":
         _require_assertion_corroboration(
             conn, value.relation_type, value.corroboration, left, right
@@ -759,6 +806,7 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
 def current_candidate_observations(
     conn: Any, *, company_id: int, as_of: str
 ) -> list[dict[str, Any]]:
+    _require_canonical_date(as_of, field="candidate observation as_of")
     rows = conn.execute(
         """WITH ranked AS (
                SELECT o.*, c.candidate_key, c.release_source_url,
@@ -781,6 +829,7 @@ def current_candidate_observations(
 def current_relation_observations(
     conn: Any, *, company_id: int, as_of: str
 ) -> list[dict[str, Any]]:
+    _require_canonical_date(as_of, field="relation observation as_of")
     rows = conn.execute(
         """WITH ranked AS (
                SELECT r.*, b.batch_id AS stable_batch_id, b.effective_at,

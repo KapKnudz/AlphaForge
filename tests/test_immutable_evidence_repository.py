@@ -61,6 +61,8 @@ def conn():
 
 
 def _batch(company_id: int, suffix: str, effective_at: str) -> ObservationBatchInput:
+    if effective_at.endswith("Z") and "." not in effective_at:
+        effective_at = f"{effective_at[:-1]}.000000Z"
     return ObservationBatchInput(
         company_id=company_id,
         as_of="2026-09-24",
@@ -129,6 +131,28 @@ def test_migration_adds_exact_nine_tables_and_append_only_guards(tmp_path):
             "UPDATE evidence_observation_batches SET as_of='2020-01-01' WHERE id=?",
             (batch["id"],),
         )
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+        connection.execute(
+            """INSERT INTO evidence_observation_batches
+               (batch_id, company_id, provider, as_of, source_input_fingerprint,
+                report_rules_fingerprint, effective_at, first_recorded_at)
+               VALUES ('invalid', 1, 'mfn', '2026-9-24', 'source', 'rules',
+                       '2026-09-24T10:00:00Z', '2026-09-24T10:00:00Z')"""
+        )
+
+
+def test_batch_chronology_requires_canonical_utc_and_date(conn):
+    canonical = _batch(1, "canonical", "2026-09-24T10:00:00Z")
+    with pytest.raises(ValueError, match="effective_at must be canonical UTC"):
+        append_observation_batch(
+            conn,
+            replace(canonical, effective_at="2026-09-24T11:00:00+02:00"),
+        )
+    with pytest.raises(ValueError, match="first_recorded_at must be canonical UTC"):
+        append_observation_batch(conn, replace(canonical, first_recorded_at="not-a-time"))
+    with pytest.raises(ValueError, match="as_of must be a canonical date"):
+        append_observation_batch(conn, replace(canonical, as_of="2026-9-24"))
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == 0
 
 
 def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
@@ -261,6 +285,113 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     assert object1["verified_sha256"] == digest1
     with pytest.raises(ImmutableEvidenceConflict):
         append_artifact(conn, ArtifactInput(digest1, 99, "application/pdf", "later"))
+
+
+def test_batch_children_cannot_reference_future_facts(conn):
+    batch1 = append_observation_batch(conn, _batch(1, "one", "2026-09-24T10:00:00Z"))
+    first = append_candidate(
+        conn, CandidateInput(1, "https://example.test/first", "2026-09-24T10:00:00Z")
+    )
+    artifact = append_artifact(conn, ArtifactInput("a" * 64, 1, "application/pdf", "now"))
+    old_attachment = append_attachment_observation(
+        conn,
+        AttachmentObservationInput(
+            first["candidate_key"],
+            artifact["artifact_id"],
+            batch1["batch_id"],
+            "https://example.test/old.pdf",
+            "application/pdf",
+            200,
+            True,
+        ),
+    )
+    first_observation = append_candidate_observation(
+        conn,
+        _observation(
+            first["candidate_key"],
+            batch1["batch_id"],
+            attachment_id=old_attachment["attachment_observation_id"],
+        ),
+    )
+    batch2 = append_observation_batch(conn, _batch(1, "two", "2026-09-24T11:00:00Z"))
+    second = append_candidate(
+        conn, CandidateInput(1, "https://example.test/second", "2026-09-24T11:00:00Z")
+    )
+    reused = append_candidate_observation(
+        conn,
+        _observation(
+            first["candidate_key"],
+            batch2["batch_id"],
+            attachment_id=old_attachment["attachment_observation_id"],
+        ),
+    )
+    with pytest.raises(ValueError, match="rules fingerprint"):
+        append_candidate_observation(
+            conn,
+            replace(
+                _observation(second["candidate_key"], batch2["batch_id"]),
+                report_rules_fingerprint="other-rules",
+            ),
+        )
+    second_observation = append_candidate_observation(
+        conn, _observation(second["candidate_key"], batch2["batch_id"])
+    )
+    batch3 = append_observation_batch(conn, _batch(1, "three", "2026-09-24T12:00:00Z"))
+    future_attachment = append_attachment_observation(
+        conn,
+        AttachmentObservationInput(
+            second["candidate_key"],
+            artifact["artifact_id"],
+            batch3["batch_id"],
+            "https://example.test/future.pdf",
+            "application/pdf",
+            200,
+            True,
+        ),
+    )
+    third = append_candidate(
+        conn, CandidateInput(1, "https://example.test/third", "2026-09-24T12:00:00Z")
+    )
+    third_observation = append_candidate_observation(
+        conn, _observation(third["candidate_key"], batch3["batch_id"])
+    )
+
+    with pytest.raises(ValueError, match="attachment postdates"):
+        append_candidate_observation(
+            conn,
+            _observation(
+                second["candidate_key"],
+                batch2["batch_id"],
+                attachment_id=future_attachment["attachment_observation_id"],
+            ),
+        )
+    with pytest.raises(ValueError, match="postdates"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch2["batch_id"],
+                second_observation["candidate_observation_id"],
+                third_observation["candidate_observation_id"],
+                "TRANSLATION",
+                "withdrawn",
+                {"reason": "future"},
+                "relation-rules-1",
+            ),
+        )
+    withdrawal = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            batch3["batch_id"],
+            first_observation["candidate_observation_id"],
+            second_observation["candidate_observation_id"],
+            "TRANSLATION",
+            "withdrawn",
+            {"reason": "later-review"},
+            "relation-rules-1",
+        ),
+    )
+    assert reused["attachment_observation_id"] == old_attachment["id"]
+    assert withdrawal["disposition"] == "withdrawn"
 
 
 def test_independent_candidates_and_explicit_relation_withdrawal(conn):
@@ -680,7 +811,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
         == manifest_before
     )
     assert make_candidate_key(1, "https://example.test/en")
-    assert make_batch_id(_batch(1, "one", "ignored"))
+    assert make_batch_id(_batch(1, "one", "2026-09-24T10:00:00Z"))
 
     batch_count = conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0]
     conn.execute(

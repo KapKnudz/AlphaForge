@@ -506,8 +506,17 @@ CREATE TABLE IF NOT EXISTS evidence_observation_batches (
     as_of TEXT NOT NULL,
     source_input_fingerprint TEXT NOT NULL,
     report_rules_fingerprint TEXT NOT NULL,
-    effective_at TEXT NOT NULL,
-    first_recorded_at TEXT NOT NULL
+    effective_at TEXT NOT NULL CHECK (
+        length(effective_at) = 27 AND substr(effective_at, 11, 1) = 'T'
+        AND substr(effective_at, 20, 1) = '.' AND substr(effective_at, -1) = 'Z'
+        AND datetime(effective_at) IS NOT NULL
+    ),
+    first_recorded_at TEXT NOT NULL CHECK (
+        length(first_recorded_at) = 27 AND substr(first_recorded_at, 11, 1) = 'T'
+        AND substr(first_recorded_at, 20, 1) = '.' AND substr(first_recorded_at, -1) = 'Z'
+        AND datetime(first_recorded_at) IS NOT NULL
+    ),
+    CHECK (length(as_of) = 10 AND date(as_of) IS NOT NULL AND date(as_of) = as_of)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_batches_precedence
     ON evidence_observation_batches(company_id, provider, effective_at, batch_id);
