@@ -845,6 +845,22 @@ def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
     return dict(drained or {})
 
 
+def _drain_dispositions(scraper: Any) -> dict[str, dict[str, Any]]:
+    """Read current feed classifications without coupling test scrapers."""
+    drain = getattr(scraper, "drain_discovery_dispositions", None)
+    if not callable(drain):
+        return {}
+    try:
+        values = drain()
+    except TypeError:
+        return {}
+    return {
+        str(url): dict(value)
+        for url, value in dict(values or {}).items()
+        if isinstance(value, dict)
+    }
+
+
 def _confirm_cis_issuer(
     release_url: str, canonical_url: str | None, *, issuer_token: str
 ) -> str | None:
@@ -1330,6 +1346,15 @@ class OneCompanyEvidenceFlow:
         early_skips: dict[str, int] = {}
         for reason, count in _drain_skips(self.scraper, "drain_discovery_skips").items():
             early_skips[reason] = early_skips.get(reason, 0) + count
+        feed_dispositions = _drain_dispositions(self.scraper)
+        revoked_feed_urls = {
+            url
+            for url, disposition in feed_dispositions.items()
+            if not (
+                disposition.get("title_admitted")
+                or disposition.get("feed_report_identity")
+            )
+        }
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
         for entry in feed:
@@ -1355,8 +1380,15 @@ class OneCompanyEvidenceFlow:
             "pdf_checksum",
             "attachment_checksum",
             "lang",
+            "report_kind",
+            "document_type",
+            "feed_report_identity",
+            "feed_report_attachment_url",
         )
-        normalized_feed = []
+        normalized_feed = [
+            {"source_url": source_url, "feed_report_disposition": "rejected"}
+            for source_url in revoked_feed_urls
+        ]
         for entry in unique_feed:
             if isinstance(entry, str):
                 normalized_feed.append({"source_url": entry})
@@ -1391,9 +1423,31 @@ class OneCompanyEvidenceFlow:
                         future_dated_complete_release = True
                     elif published_date > today.isoformat():
                         not_yet_published_complete_release = True
-                    if complete.get("report_rules_fingerprint") == active_rules[
-                        "fingerprint"
-                    ] and _has_current_attachment_provenance(complete.get("raw_metadata")):
+                    metadata: dict[str, Any] = {}
+                    try:
+                        loaded_metadata = json.loads(complete.get("raw_metadata") or "{}")
+                        if isinstance(loaded_metadata, dict):
+                            metadata = loaded_metadata
+                    except (TypeError, ValueError):
+                        metadata = {}
+                    disposition = feed_dispositions.get(str(entry_url))
+                    disposition_matches = disposition is None or (
+                        str(complete.get("title") or "")
+                        == str(disposition.get("title") or "")
+                        and metadata.get("report_kind") == disposition.get("report_kind")
+                        and metadata.get("document_type") == disposition.get("document_type")
+                        and metadata.get("feed_report_identity")
+                        == disposition.get("feed_report_identity")
+                        and metadata.get("feed_report_attachment_url")
+                        == disposition.get("feed_report_attachment_url")
+                    )
+                    if (
+                        disposition_matches
+                        and complete.get("report_rules_fingerprint") == active_rules[
+                            "fingerprint"
+                        ]
+                        and _has_current_attachment_provenance(complete.get("raw_metadata"))
+                    ):
                         continue
             unseen_feed.append(entry)
         complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
@@ -1452,7 +1506,19 @@ class OneCompanyEvidenceFlow:
                     result.skipped.get("non_report_release", 0) + 1
                 )
                 continue
-            if is_invitation_or_presentation(title):
+            if corroborated_feed_report and (
+                not article.get("feed_report_attachment_url")
+                or (article.get("attachment_url") or article.get("storage_url"))
+                != article.get("feed_report_attachment_url")
+            ):
+                result.skipped["mfn_report_attachment_mismatch"] = (
+                    result.skipped.get("mfn_report_attachment_mismatch", 0) + 1
+                )
+                hard_blocks += 1
+                continue
+            if is_invitation_or_presentation(title) or is_invitation_or_presentation(
+                str(article.get("detail_title") or "")
+            ):
                 # Backstop for scrapers that bypass the detail-page guard:
                 # invitations about reports are never report evidence.
                 result.skipped["invitation_or_presentation_release"] = (
@@ -1559,6 +1625,8 @@ class OneCompanyEvidenceFlow:
                         metadata = loaded
                 except (TypeError, ValueError):
                     metadata = {}
+            if str(persisted.get("source_url") or "") in revoked_feed_urls:
+                continue
             if persisted.get("report_rules_fingerprint") != active_rules[
                 "fingerprint"
             ] or not _has_current_attachment_provenance(metadata):
@@ -1641,7 +1709,7 @@ class OneCompanyEvidenceFlow:
         resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
         indeterminate_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
         stored_pdf_language_cache: dict[str, tuple[str, str]] = {}
-        unresolved_existing_source_urls: set[str] = set()
+        unresolved_existing_source_urls: set[str] = set(revoked_feed_urls)
 
         def mark_pdf_language_unresolved(
             index: int, candidate: dict[str, Any], existing: dict[str, Any] | None

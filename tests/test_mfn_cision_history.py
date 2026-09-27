@@ -67,9 +67,10 @@ def _mapped_company(conn, *, ins_id=8001, slug="all/a/flow"):
 class _FakeCisionScraper:
     base_url = "https://mfn.test"
 
-    def __init__(self, feed, details):
+    def __init__(self, feed, details, dispositions=None):
         self.feed = feed
         self.details = details
+        self.dispositions = dict(dispositions or {})
 
     def discover_feed(self, mfn_slug, *, reports_only=True):
         return list(self.feed)
@@ -84,6 +85,11 @@ class _FakeCisionScraper:
             for article in self.details
             if (article.get("url") or article.get("source_url")) in urls
         ]
+
+    def drain_discovery_dispositions(self):
+        dispositions = self.dispositions
+        self.dispositions = {}
+        return dispositions
 
 
 def _report_article(slug_path, title, *, canonical_issuer="flow", tier=None, attachment=True):
@@ -241,6 +247,41 @@ def test_ambiguous_attachment_fails_lane_visibly():
     assert "blocked identity/selection check" in (result.message or "")
     rows = conn.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0]
     assert rows == 0
+
+
+def test_corroborated_feed_pdf_mismatch_fails_lane_before_download():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    source_url = "https://mfn.test/a/flow/q2"
+    article = {
+        "url": source_url,
+        "source_url": source_url,
+        "title": "Narrative second-quarter results",
+        "detail_title": "Narrative second-quarter results",
+        "published_at": "2026-07-15T05:45:00Z",
+        "lang": "en",
+        "report_kind": "quarterly",
+        "document_type": "INTERIM_Q2",
+        "feed_report_identity": "mfn-report-tag+archive-report-pdf",
+        "feed_report_attachment_url": "https://storage.mfn.test/flow/attested.pdf",
+        "attachment_url": "https://storage.mfn.test/flow/other.pdf",
+        "attachment_tier": "mfn-primary",
+    }
+    requested = []
+
+    def transport(method, url, **kwargs):
+        requested.append(url)
+        return _pdf_response(_pdf())
+
+    with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
+        result = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeCisionScraper([article], [article])
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "evidence_incomplete"
+    assert result.skipped == {"mfn_report_attachment_mismatch": 1}
+    assert requested == []
+    assert conn.execute("SELECT COUNT(*) FROM research_documents").fetchone()[0] == 0
 
 
 def test_canonical_mismatch_fails_lane():
@@ -423,6 +464,51 @@ def test_invitation_only_feed_stays_no_evidence():
     assert result.status == "no_evidence"
     assert result.no_evidence_reason == NoEvidenceReason.NO_PUBLISHED_RELEASE
     assert result.skipped.get("invitation_or_presentation_release") == 1
+
+
+def test_current_feed_revocation_never_falls_back_to_old_complete_evidence():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = _quarterly_article(
+        "interim-report-q1-2026",
+        "Flow AB Interim Report Q1 2026",
+        "2026-05-01T08:00:00Z",
+        "https://storage.mfn.test/flow/q1.pdf",
+    )
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=_pdf_response(_pdf()),
+    ):
+        first = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeCisionScraper([article], [article])
+        ).run(company_id, as_of="2026-09-20")
+
+    revoked = {
+        article["source_url"]: {
+            "source_url": article["source_url"],
+            "title": "General company update",
+            "title_admitted": False,
+            "report_kind": None,
+            "document_type": None,
+            "feed_report_identity": None,
+            "feed_report_attachment_url": None,
+            "invitation_veto": False,
+        }
+    }
+    second = OneCompanyEvidenceFlow(
+        conn, scraper=_FakeCisionScraper([], [], revoked)
+    ).run(company_id, as_of="2026-09-20")
+
+    assert first.status == "complete"
+    assert second.status == "no_evidence"
+    assert second.packet is None
+    assert load_evidence_packet(conn, company_id, "2026-09-20") is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM research_attachments a "
+        "JOIN research_documents d ON d.id=a.document_id "
+        "WHERE d.company_id=? AND d.source_url=?",
+        (company_id, article["source_url"]),
+    ).fetchone()[0] == 1
 
 
 def test_empty_feed_stays_no_published_release():
