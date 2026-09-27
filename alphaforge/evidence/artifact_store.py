@@ -210,9 +210,7 @@ class LocalPdfArtifactStore:
             )
         return bytes(content) if content is not None else None
 
-    def _open_regular_file(
-        self, path: Path, *, directory_fd: int | None = None
-    ) -> BinaryIO:
+    def _open_regular_file(self, path: Path, *, directory_fd: int | None = None) -> BinaryIO:
         owns_directory_fd = directory_fd is None
         if directory_fd is None:
             directory_fd = self._open_store_directory(path.parent.name)
@@ -263,9 +261,7 @@ class LocalPdfArtifactStore:
             os.close(sha256_fd)
 
     @staticmethod
-    def _open_directory(
-        path: Path | str, *, flags: int, dir_fd: int | None = None
-    ) -> int:
+    def _open_directory(path: Path | str, *, flags: int, dir_fd: int | None = None) -> int:
         try:
             return os.open(path, flags, dir_fd=dir_fd)
         except OSError as exc:

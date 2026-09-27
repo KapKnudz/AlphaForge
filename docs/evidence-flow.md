@@ -101,9 +101,11 @@ default the standalone store writes objects at
 `data/evidence/objects/sha256/<first-two-hex>/<sha256>.pdf` and returns a URI
 relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`). It
 streams writes through a same-filesystem temporary file, validates the byte
-limit and PDF magic, fsyncs, and atomically installs without replacing an
-existing object. Existing objects are reused only after full checksum and size
-verification.
+limit and PDF magic, fsyncs the file and directory hierarchy, and atomically
+installs without replacing an existing object. Existing objects are reused only
+after full checksum and size verification. Store operations reject symlinked or
+otherwise non-directory internal path components and non-regular object paths
+rather than following them outside the configured root.
 
 Call `read_pdf(sha256, expected_size=...)` before use. It returns bytes only
 after streaming verification and raises `artifact_unavailable` or

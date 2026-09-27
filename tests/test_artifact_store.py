@@ -275,9 +275,7 @@ def test_existing_corrupt_destination_fails_without_overwrite(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("object_kind", ["symlink", "directory"])
-def test_read_and_put_reject_non_regular_object_paths(
-    tmp_path: Path, object_kind: str
-) -> None:
+def test_read_and_put_reject_non_regular_object_paths(tmp_path: Path, object_kind: str) -> None:
     root = tmp_path / "objects"
     store = LocalPdfArtifactStore(root)
     digest = hashlib.sha256(PDF_A).hexdigest()
