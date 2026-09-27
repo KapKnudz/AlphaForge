@@ -22,6 +22,14 @@ def object_path(root: Path, content: bytes) -> Path:
     return root / "sha256" / sha256[:2] / f"{sha256}.pdf"
 
 
+def seed_object(root: Path, content: bytes) -> Path:
+    path = object_path(root, content)
+    path.parent.mkdir(parents=True)
+    (root / "sha256" / ".tmp").mkdir()
+    path.write_bytes(content)
+    return path
+
+
 def test_put_streams_pdf_to_content_addressed_path_and_reads_verified_bytes(
     tmp_path: Path,
 ) -> None:
@@ -50,16 +58,15 @@ def test_put_durably_creates_each_directory_and_parent(
     sha256_directory = root / "sha256"
     prefix_directory = sha256_directory / artifact.sha256[:2]
     assert synced == [
-        tmp_path / "store",
-        tmp_path,
-        root,
-        tmp_path / "store",
-        sha256_directory,
-        root,
         sha256_directory / ".tmp",
         sha256_directory,
+        root,
+        tmp_path / "store",
+        tmp_path,
         prefix_directory,
         sha256_directory,
+        root,
+        tmp_path / "store",
         prefix_directory,
     ]
 
@@ -92,12 +99,43 @@ def test_put_syncs_directories_created_by_concurrent_writer(
     assert artifact.sha256 == digest
     assert raced == race_directories
     assert synced == [
-        sha256_directory,
-        tmp_path,
         staging_directory,
         sha256_directory,
+        tmp_path,
+        tmp_path.parent,
         prefix_directory,
         sha256_directory,
+        tmp_path,
+        tmp_path.parent,
+        prefix_directory,
+    ]
+
+
+def test_put_syncs_directories_already_visible_during_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalPdfArtifactStore(tmp_path)
+    sha256_directory = tmp_path / "sha256"
+    staging_directory = sha256_directory / ".tmp"
+    digest = hashlib.sha256(PDF_A).hexdigest()
+    prefix_directory = sha256_directory / digest[:2]
+    staging_directory.mkdir(parents=True)
+    prefix_directory.mkdir()
+    synced: list[Path] = []
+    monkeypatch.setattr(store, "_fsync_directory", synced.append)
+
+    artifact = store.put_pdf(io.BytesIO(PDF_A))
+
+    assert artifact.sha256 == digest
+    assert synced == [
+        staging_directory,
+        sha256_directory,
+        tmp_path,
+        tmp_path.parent,
+        prefix_directory,
+        sha256_directory,
+        tmp_path,
+        tmp_path.parent,
         prefix_directory,
     ]
 
@@ -113,6 +151,76 @@ def test_repeated_put_reuses_verified_object_without_overwrite(tmp_path: Path) -
     assert second == first
     assert path.stat().st_ino == initial_stat.st_ino
     assert path.read_bytes() == PDF_A
+
+
+def test_put_makes_verified_concurrent_object_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = seed_object(tmp_path, PDF_A)
+    store = LocalPdfArtifactStore(tmp_path)
+    synced_files: list[Path] = []
+    synced_directories: list[Path] = []
+    monkeypatch.setattr(store, "_fsync_file", synced_files.append)
+    monkeypatch.setattr(store, "_fsync_directory", synced_directories.append)
+
+    artifact = store.put_pdf(io.BytesIO(PDF_A))
+
+    assert artifact.sha256 == hashlib.sha256(PDF_A).hexdigest()
+    assert synced_files == [path]
+    assert synced_directories[-1] == path.parent
+    assert path.read_bytes() == PDF_A
+
+
+def test_put_propagates_hierarchy_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalPdfArtifactStore(tmp_path)
+
+    def fail_fsync(directory: Path) -> None:
+        if directory == tmp_path / "sha256":
+            raise OSError("hierarchy fsync failed")
+
+    monkeypatch.setattr(store, "_fsync_directory", fail_fsync)
+
+    with pytest.raises(OSError, match="hierarchy fsync failed"):
+        store.put_pdf(io.BytesIO(PDF_A))
+    assert not list(tmp_path.rglob("*.pdf"))
+
+
+def test_put_propagates_reused_file_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_object(tmp_path, PDF_A)
+    store = LocalPdfArtifactStore(tmp_path)
+
+    def fail_fsync(_path: Path) -> None:
+        raise OSError("file fsync failed")
+
+    monkeypatch.setattr(store, "_fsync_file", fail_fsync)
+
+    with pytest.raises(OSError, match="file fsync failed"):
+        store.put_pdf(io.BytesIO(PDF_A))
+
+
+def test_put_propagates_reused_link_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = seed_object(tmp_path, PDF_A)
+    store = LocalPdfArtifactStore(tmp_path)
+    destination_syncs = 0
+
+    def fail_final_destination_sync(directory: Path) -> None:
+        nonlocal destination_syncs
+        if directory == path.parent:
+            destination_syncs += 1
+            if destination_syncs == 2:
+                raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(store, "_fsync_directory", fail_final_destination_sync)
+
+    with pytest.raises(OSError, match="directory fsync failed"):
+        store.put_pdf(io.BytesIO(PDF_A))
+    assert destination_syncs == 2
 
 
 def test_changed_bytes_create_new_object_and_preserve_original(tmp_path: Path) -> None:

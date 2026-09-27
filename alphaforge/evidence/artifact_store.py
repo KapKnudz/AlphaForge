@@ -100,8 +100,8 @@ class LocalPdfArtifactStore:
                 os.link(temporary_path, destination)
             except FileExistsError:
                 self._verify_file(destination, sha256, byte_size, return_bytes=False)
-            else:
-                self._fsync_directory(destination.parent)
+                self._fsync_file(destination)
+            self._fsync_directory(destination.parent)
 
             return StoredPdfArtifact(
                 sha256=sha256,
@@ -203,8 +203,23 @@ class LocalPdfArtifactStore:
             except FileExistsError:
                 if not directory.is_dir():
                     raise
-            self._fsync_directory(directory)
-            self._fsync_directory(directory.parent)
+
+        durability_root = missing[-1] if self.root in missing else self.root
+        current = path
+        while True:
+            self._fsync_directory(current)
+            if current == durability_root:
+                self._fsync_directory(current.parent)
+                break
+            current = current.parent
+
+    @staticmethod
+    def _fsync_file(path: Path) -> None:
+        file_fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
