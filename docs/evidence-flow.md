@@ -223,11 +223,33 @@ cannot erase a previously blocked candidate; changed feed inputs do not inherit
 prior dispositions. The shared ranking/readiness view reconstructs candidate
 accounting from that persisted manifest. Re-recording
 a recurring manifest identity moves it to the current end of the run chronology,
-so A→B→A input transitions expose A to replay and readiness. Persisted demoted
-siblings join their selected parent's group only when stored PDF checksum, explicit
-translation/revision relationship and matching variant group corroborate the
-link; unresolved editions remain independent expected groups. Both candidate
-URLs and report-class counts therefore remain stable across cache replay.
+so A→B→A input transitions expose A to replay and readiness. For new v2 evidence, Swedish and English release URLs are independent candidate
+identities with independently retained artifacts and extractions. An append-only
+asserted relation may group their observations only after deterministic
+corroboration; a later explicit withdrawn relation separates them. Suppression
+is a manifest decision and never deletes either candidate's children. Legacy
+demoted siblings join their selected parent's group only when stored provenance,
+explicit translation/revision relationship and matching variant group
+corroborate the link; unresolved editions remain independent expected groups.
+Both candidate URLs and report-class counts therefore remain stable across
+cache replay.
+Manifest v2 groups also carry a deterministic fiscal `slot_key` and, for new
+immutable observations, bind the exact `candidate_observation_id`,
+`attachment_observation_id`, content-addressed `artifact_id`, and
+`extraction_id`. A later observation at the same release or PDF URL therefore
+cannot change what an older manifest selected. Historical v1 manifests remain
+readable as historical records; packet construction never combines v1-selected
+rows with a v2 manifest.
+
+New PDF bytes are retained by `LocalPdfArtifactStore` below
+`data/evidence/objects/sha256/` under their lowercase SHA-256. Writes use a
+same-filesystem temporary file and install without replacement; reads verify
+hash, size, PDF magic, and resource limits. Missing or corrupt retained objects
+fail with typed `artifact_unavailable` / `artifact_checksum_mismatch` outcomes
+and never trigger URL or cross-release substitution. The immutable DB record
+stores a relative `file:` object URI; legacy attachment hashes without retained
+bytes remain audit-only until exact bytes are reacquired and verified.
+
 Packets stamp the consumed `selection_manifest_id`. The bounded AQ inventory
 and defective-run provenance live authoritatively in
 `tests/fixtures/mfn/aq_replay_inventory.json`; repository/cache replay coverage
