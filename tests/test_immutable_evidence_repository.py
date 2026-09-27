@@ -386,6 +386,164 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
     assert asserted["relation_key"] == withdrawn["relation_key"]
 
 
+def test_asserted_relation_type_compatibility_uses_persisted_observations(conn):
+    batch = append_observation_batch(conn, _batch(1, "relations", "2026-09-24T10:00:00Z"))
+
+    def observed(url: str, *, language: str, kind: str, title: str):
+        candidate = append_candidate(conn, CandidateInput(1, url, "2026-09-24T10:00:00Z"))
+        return append_candidate_observation(
+            conn,
+            replace(
+                _observation(candidate["candidate_key"], batch["batch_id"], title=title),
+                language=language,
+                report_kind=kind,
+            ),
+        )
+
+    en = observed("https://example.test/base-en", language="en", kind="quarterly", title="Q2")
+    sv = observed("https://example.test/base-sv", language="sv", kind="quarterly", title="Q2")
+    annual = observed(
+        "https://example.test/annual-sv", language="sv", kind="annual", title="Annual"
+    )
+    same_language = observed(
+        "https://example.test/other-en", language="en", kind="quarterly", title="Q2"
+    )
+    corrected = observed(
+        "https://example.test/corrected-en",
+        language="en",
+        kind="quarterly",
+        title="Corrected Q2 report",
+    )
+    proof = {
+        "strong_corroborator": {"kind": "shared_provider_event_id", "value": "event-1"},
+        "compatible_signals": ["fiscal_period", "publication_date"],
+    }
+
+    with pytest.raises(ValueError, match="matching report kinds"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch["batch_id"],
+                en["candidate_observation_id"],
+                annual["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                proof,
+                "relation-rules-1",
+            ),
+        )
+    with pytest.raises(ValueError, match="opposite languages"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch["batch_id"],
+                en["candidate_observation_id"],
+                same_language["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                proof,
+                "relation-rules-1",
+            ),
+        )
+    with pytest.raises(ValueError, match="revision evidence"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch["batch_id"],
+                en["candidate_observation_id"],
+                sv["candidate_observation_id"],
+                "REVISION",
+                "asserted",
+                proof,
+                "relation-rules-1",
+            ),
+        )
+
+    revision = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            batch["batch_id"],
+            en["candidate_observation_id"],
+            corrected["candidate_observation_id"],
+            "REVISION",
+            "asserted",
+            proof,
+            "relation-rules-1",
+        ),
+    )
+    assert revision["disposition"] == "asserted"
+
+
+def test_numeric_relation_corroboration_is_recomputed_from_persisted_pages(conn):
+    batch = append_observation_batch(conn, _batch(1, "numeric", "2026-09-24T10:00:00Z"))
+
+    def extracted(url: str, language: str, text: str):
+        candidate = append_candidate(conn, CandidateInput(1, url, "2026-09-24T10:00:00Z"))
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        artifact = append_artifact(conn, ArtifactInput(digest, len(text), "application/pdf", "now"))
+        attachment = append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                candidate["candidate_key"],
+                artifact["artifact_id"],
+                batch["batch_id"],
+                f"{url}.pdf",
+                "application/pdf",
+                200,
+                True,
+            ),
+        )
+        extraction = append_extraction(
+            conn,
+            ExtractionInput(
+                artifact["artifact_id"],
+                "fixture",
+                "1",
+                "cfg",
+                digest,
+                1,
+                "1",
+                False,
+                False,
+                (),
+                "2026-09-24T10:00:00Z",
+                (ExtractionPage(1, "p1", text, digest),),
+            ),
+        )
+        return append_candidate_observation(
+            conn,
+            replace(
+                _observation(candidate["candidate_key"], batch["batch_id"]),
+                language=language,
+                feed_report_identity=None,
+                attachment_observation_id=attachment["attachment_observation_id"],
+                extraction_id=extraction["extraction_id"],
+            ),
+        )
+
+    en = extracted("https://example.test/numeric-en", "en", "Revenue 100 MSEK; EBIT 10 MSEK")
+    sv = extracted("https://example.test/numeric-sv", "sv", "Omsättning 999 MSEK; EBIT 88 MSEK")
+    with pytest.raises(ValueError, match="strong corroborator"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch["batch_id"],
+                en["candidate_observation_id"],
+                sv["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {
+                    "strong_corroborator": {
+                        "kind": "numeric_key_figure_jaccard",
+                        "value": 0.9,
+                    },
+                    "compatible_signals": ["fiscal_period", "publication_date"],
+                },
+                "relation-rules-1",
+            ),
+        )
+
+
 def test_extraction_insert_is_atomic_when_a_page_is_invalid(conn):
     artifact = append_artifact(
         conn,

@@ -530,12 +530,70 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
     return _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity) or {}
 
 
+def _relation_document(conn: Any, observation: Mapping[str, Any]) -> dict[str, Any]:
+    attachment = conn.execute(
+        "SELECT attachment_source_url FROM evidence_attachment_observations WHERE id=?",
+        (observation["attachment_observation_id"],),
+    ).fetchone()
+    return {
+        "title": " ".join(
+            filter(
+                None,
+                (observation["authoritative_feed_title"], observation["detail_title"]),
+            )
+        ),
+        "attachment_url": attachment[0] if attachment is not None else None,
+        "raw_metadata": _json_object(observation["raw_metadata"]),
+    }
+
+
+def _extraction_text(conn: Any, extraction_id: int | None) -> str:
+    if extraction_id is None:
+        return ""
+    return "\n".join(
+        str(row[0])
+        for row in conn.execute(
+            "SELECT text FROM evidence_artifact_pages WHERE extraction_id=? ORDER BY page_number",
+            (extraction_id,),
+        ).fetchall()
+    )
+
+
 def _require_assertion_corroboration(
     conn: Any,
+    relation_type: str,
     corroboration: Mapping[str, Any],
     left: Mapping[str, Any],
     right: Mapping[str, Any],
 ) -> None:
+    from alphaforge.evidence.ingest import (
+        _has_revision_markers,
+        _numeric_key_figure_fingerprint,
+        _numeric_similarity,
+    )
+
+    if (
+        not left["report_kind"]
+        or left["report_kind"] != right["report_kind"]
+        or (
+            left["document_type"]
+            and right["document_type"]
+            and left["document_type"] != right["document_type"]
+        )
+    ):
+        raise ValueError("asserted relation requires matching report kinds")
+    languages = {str(left["language"] or "").lower(), str(right["language"] or "").lower()}
+    if not languages <= {"en", "sv"} or "" in languages:
+        raise ValueError("asserted relation requires resolved English or Swedish languages")
+    has_revision = any(
+        _has_revision_markers(_relation_document(conn, observation))
+        for observation in (left, right)
+    )
+    if relation_type == "TRANSLATION" and (len(languages) != 2 or has_revision):
+        raise ValueError("translation relation requires opposite languages without revision markers")
+    if relation_type == "REVISION" and not has_revision:
+        raise ValueError("revision relation requires persisted revision evidence")
+
     strong = corroboration.get("strong_corroborator")
     compatible = corroboration.get("compatible_signals")
     if (
@@ -563,12 +621,19 @@ def _require_assertion_corroboration(
             checksum is not None and checksum[0] == str(value).lower() for checksum in checksums
         )
     else:
+        numeric_fingerprints = [
+            _numeric_key_figure_fingerprint(
+                _extraction_text(conn, observation["extraction_id"])
+            )
+            for observation in (left, right)
+        ]
+        numeric_similarity = _numeric_similarity(*numeric_fingerprints)
         valid_strong = (
             kind == "numeric_key_figure_jaccard"
             and isinstance(value, (int, float))
             and not isinstance(value, bool)
-            and 0.5 <= value <= 1.0
-            and all(observation["extraction_id"] is not None for observation in (left, right))
+            and numeric_similarity >= 0.5
+            and abs(float(value) - numeric_similarity) < 1e-12
         )
     actual_signals = {
         "fiscal_period": bool(left["fiscal_period"])
@@ -608,7 +673,9 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
     if left is None or right is None or batch is None:
         raise ValueError("relation observation references an unknown identity")
     if value.disposition == "asserted":
-        _require_assertion_corroboration(conn, value.corroboration, left, right)
+        _require_assertion_corroboration(
+            conn, value.relation_type, value.corroboration, left, right
+        )
     left_candidate = conn.execute(
         "SELECT candidate_key, company_id FROM evidence_candidates WHERE id=?",
         (left["candidate_id"],),

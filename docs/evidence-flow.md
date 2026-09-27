@@ -53,9 +53,11 @@ key-figure tokens — similarity below threshold is neutral, never a veto) plus
 at least two compatible derived signals (fiscal period, resolved observation
 date, publication date, or translation-neutral title). Immutable asserted
 relations persist that proof as `strong_corroborator` (`kind` and `value`) plus
-a `compatible_signals` list; the repository checks the proof against both
-candidate observations, while withdrawals need only record their reason.
-Either side carrying a
+a `compatible_signals` list; the repository checks identity claims and signals
+against both candidate observations and recomputes numeric similarity from the
+persisted extraction pages. It also enforces matching report kinds,
+opposite-language translations, and revision-marker evidence for revisions;
+withdrawals need only record their reason. Either side carrying a
 revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) produces
 a `REVISION` relation rather than a translation; other grouped cross-language
 pairs are labelled `TRANSLATION`. Same-language documents merge only when a
