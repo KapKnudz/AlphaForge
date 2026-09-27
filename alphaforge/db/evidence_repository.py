@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -140,6 +140,7 @@ def make_batch_id(value: ObservationBatchInput) -> str:
             "as_of": value.as_of,
             "source_input_fingerprint": value.source_input_fingerprint,
             "report_rules_fingerprint": value.report_rules_fingerprint,
+            "effective_at": value.effective_at,
         }
     )
 
@@ -182,6 +183,8 @@ def append_observation_batch(conn: Any, value: ObservationBatchInput) -> dict[st
         "as_of": value.as_of,
         "source_input_fingerprint": value.source_input_fingerprint,
         "report_rules_fingerprint": value.report_rules_fingerprint,
+        "effective_at": value.effective_at,
+        "first_recorded_at": value.first_recorded_at,
     }
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
@@ -221,6 +224,8 @@ def _append_legacy_observation_batch(conn: Any, value: ObservationBatchInput) ->
         "as_of": value.as_of,
         "source_input_fingerprint": value.source_input_fingerprint,
         "report_rules_fingerprint": value.report_rules_fingerprint,
+        "effective_at": value.effective_at,
+        "first_recorded_at": value.first_recorded_at,
     }
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
@@ -525,6 +530,67 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
     return _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity) or {}
 
 
+def _require_assertion_corroboration(
+    conn: Any,
+    corroboration: Mapping[str, Any],
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+) -> None:
+    strong = corroboration.get("strong_corroborator")
+    compatible = corroboration.get("compatible_signals")
+    if (
+        not isinstance(strong, Mapping)
+        or not isinstance(compatible, Sequence)
+        or isinstance(compatible, (str, bytes))
+    ):
+        raise ValueError("asserted relation requires structured corroboration")
+    kind = strong.get("kind")
+    value = strong.get("value")
+    if kind == "shared_provider_event_id":
+        valid_strong = bool(value) and all(
+            observation["feed_report_identity"] == value for observation in (left, right)
+        )
+    elif kind == "shared_attachment_checksum":
+        checksums = [
+            conn.execute(
+                """SELECT a.sha256 FROM evidence_attachment_observations ao
+                   JOIN evidence_artifacts a ON a.id=ao.artifact_id WHERE ao.id=?""",
+                (observation["attachment_observation_id"],),
+            ).fetchone()
+            for observation in (left, right)
+        ]
+        valid_strong = bool(value) and all(
+            checksum is not None and checksum[0] == str(value).lower() for checksum in checksums
+        )
+    else:
+        valid_strong = (
+            kind == "numeric_key_figure_jaccard"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0.5 <= value <= 1.0
+            and all(observation["extraction_id"] is not None for observation in (left, right))
+        )
+    actual_signals = {
+        "fiscal_period": bool(left["fiscal_period"])
+        and left["fiscal_period"] == right["fiscal_period"],
+        "resolved_observation_date": bool(left["period_end"])
+        and left["period_end"] == right["period_end"],
+        "publication_date": bool(left["published_at"])
+        and str(left["published_at"])[:10] == str(right["published_at"])[:10],
+        "translation_neutral_title": bool(left["detail_title"])
+        and str(left["detail_title"]).casefold() == str(right["detail_title"]).casefold(),
+    }
+    distinct_signals = {
+        signal
+        for signal in compatible
+        if isinstance(signal, str) and actual_signals.get(signal, False)
+    }
+    if not valid_strong or len(distinct_signals) < 2:
+        raise ValueError(
+            "asserted relation requires a strong corroborator and two compatible signals"
+        )
+
+
 def append_relation_observation(conn: Any, value: RelationObservationInput) -> dict[str, Any]:
     left = _row(
         conn,
@@ -541,6 +607,8 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
     batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
     if left is None or right is None or batch is None:
         raise ValueError("relation observation references an unknown identity")
+    if value.disposition == "asserted":
+        _require_assertion_corroboration(conn, value.corroboration, left, right)
     left_candidate = conn.execute(
         "SELECT candidate_key, company_id FROM evidence_candidates WHERE id=?",
         (left["candidate_id"],),
@@ -663,43 +731,6 @@ def current_relation_observations(
     return [dict(row) for row in rows]
 
 
-def append_evidence_bundle(
-    conn: Any,
-    *,
-    batch: ObservationBatchInput,
-    candidate: CandidateInput,
-    observation: CandidateObservationInput,
-    artifact: ArtifactInput | None = None,
-    object_record: ArtifactObjectInput | None = None,
-    attachment: AttachmentObservationInput | None = None,
-    extraction: ExtractionInput | None = None,
-    relations: Iterable[RelationObservationInput] = (),
-) -> dict[str, Any]:
-    """Append one coherent bundle atomically; stable references remain caller-visible."""
-    conn.execute("SAVEPOINT append_evidence_bundle")
-    try:
-        result: dict[str, Any] = {
-            "batch": append_observation_batch(conn, batch),
-            "candidate": append_candidate(conn, candidate),
-        }
-        if artifact is not None:
-            result["artifact"] = append_artifact(conn, artifact)
-        if object_record is not None:
-            result["object_record"] = append_artifact_object(conn, object_record)
-        if attachment is not None:
-            result["attachment"] = append_attachment_observation(conn, attachment)
-        if extraction is not None:
-            result["extraction"] = append_extraction(conn, extraction)
-        result["observation"] = append_candidate_observation(conn, observation)
-        result["relations"] = [append_relation_observation(conn, item) for item in relations]
-    except Exception:
-        conn.execute("ROLLBACK TO append_evidence_bundle")
-        conn.execute("RELEASE append_evidence_bundle")
-        raise
-    conn.execute("RELEASE append_evidence_bundle")
-    return result
-
-
 def _json_object(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -809,14 +840,8 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 document.get("published_at") or document.get("fetched_at") or "1970-01-01"
             )[:10]
             candidate_key = make_candidate_key(company_id, str(document["source_url"]))
-            batch_identity = make_batch_id(
-                ObservationBatchInput(company_id, as_of, source_fingerprint, rules, "", "")
-            )
-            existing_batch = _row(
-                conn, "evidence_observation_batches", "batch_id", batch_identity
-            )
             prior_import = conn.execute(
-                """SELECT b.effective_at
+                """SELECT b.*
                    FROM evidence_candidate_observations o
                    JOIN evidence_candidates c ON c.id=o.candidate_id
                    JOIN evidence_observation_batches b ON b.id=o.batch_id
@@ -828,12 +853,19 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             previous = company_previous.get(company_id)
             if prior_import is not None and (
                 previous is None
-                or _legacy_datetime(str(prior_import[0])) > _legacy_datetime(previous)
+                or _legacy_datetime(str(prior_import["effective_at"]))
+                > _legacy_datetime(previous)
             ):
-                previous = str(prior_import[0])
+                previous = str(prior_import["effective_at"])
+            same_occurrence = (
+                prior_import is not None
+                and str(prior_import["source_input_fingerprint"]) == source_fingerprint
+                and str(prior_import["report_rules_fingerprint"]) == rules
+                and str(prior_import["as_of"]) == as_of
+            )
             effective_at = (
-                str(existing_batch["effective_at"])
-                if existing_batch is not None
+                str(prior_import["effective_at"])
+                if same_occurrence
                 else _legacy_effective_at(document.get("fetched_at"), previous)
             )
             company_previous[company_id] = effective_at

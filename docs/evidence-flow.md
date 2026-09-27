@@ -51,7 +51,11 @@ A match requires one strong corroborator (a shared provider event ID, shared
 PDF/attachment checksum, or ≥ 0.5 Jaccard similarity over normalized numeric
 key-figure tokens — similarity below threshold is neutral, never a veto) plus
 at least two compatible derived signals (fiscal period, resolved observation
-date, publication date, or translation-neutral title). Either side carrying a
+date, publication date, or translation-neutral title). Immutable asserted
+relations persist that proof as `strong_corroborator` (`kind` and `value`) plus
+a `compatible_signals` list; the repository checks the proof against both
+candidate observations, while withdrawals need only record their reason.
+Either side carrying a
 revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) produces
 a `REVISION` relation rather than a translation; other grouped cross-language
 pairs are labelled `TRANSLATION`. Same-language documents merge only when a

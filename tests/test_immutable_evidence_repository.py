@@ -134,10 +134,7 @@ def test_migration_adds_exact_nine_tables_and_append_only_guards(tmp_path):
 def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     batch1_value = _batch(1, "one", "2026-09-24T10:00:00Z")
     batch1 = append_observation_batch(conn, batch1_value)
-    assert (
-        append_observation_batch(conn, replace(batch1_value, effective_at="2099-01-01"))["id"]
-        == batch1["id"]
-    )
+    assert append_observation_batch(conn, batch1_value)["id"] == batch1["id"]
     candidate = append_candidate(
         conn, CandidateInput(1, "https://example.test/releases/q2", "2026-09-24T10:00:00Z")
     )
@@ -231,8 +228,35 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
         observation2["candidate_observation_id"]
     ]
     assert current[0]["eligibility"] == "revoked"
+
+    batch3 = append_observation_batch(conn, _batch(1, "one", "2026-09-24T12:00:00Z"))
+    attachment3 = append_attachment_observation(
+        conn,
+        AttachmentObservationInput(
+            candidate["candidate_key"],
+            artifact1["artifact_id"],
+            batch3["batch_id"],
+            "https://example.test/report.pdf",
+            "application/pdf",
+            200,
+            True,
+            {"etag": "one-again"},
+        ),
+    )
+    observation3 = append_candidate_observation(
+        conn,
+        replace(
+            observation1_value,
+            batch_id=batch3["batch_id"],
+            attachment_observation_id=attachment3["attachment_observation_id"],
+        ),
+    )
+    assert append_observation_batch(conn, batch1_value)["id"] == batch1["id"]
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-09-24")
+    assert current[0]["candidate_observation_id"] == observation3["candidate_observation_id"]
+    assert current[0]["eligibility"] == "eligible"
     assert conn.execute("SELECT count(*) FROM evidence_artifacts").fetchone()[0] == 2
-    assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 3
     assert conn.execute("SELECT count(*) FROM evidence_artifact_objects").fetchone()[0] == 1
     assert object1["verified_sha256"] == digest1
     with pytest.raises(ImmutableEvidenceConflict):
@@ -255,6 +279,57 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
         conn,
         replace(_observation(sv["candidate_key"], batch1["batch_id"]), language="sv"),
     )
+    with pytest.raises(ValueError, match="structured corroboration"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch1["batch_id"],
+                en_obs["candidate_observation_id"],
+                sv_obs["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {"same_period": True},
+                "relation-rules-1",
+            ),
+        )
+    with pytest.raises(ValueError, match="two compatible signals"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch1["batch_id"],
+                en_obs["candidate_observation_id"],
+                sv_obs["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {
+                    "strong_corroborator": {
+                        "kind": "shared_provider_event_id",
+                        "value": "event-1",
+                    },
+                    "compatible_signals": ["fiscal_period"],
+                },
+                "relation-rules-1",
+            ),
+        )
+    with pytest.raises(ValueError, match="strong corroborator"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch1["batch_id"],
+                en_obs["candidate_observation_id"],
+                sv_obs["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {
+                    "strong_corroborator": {
+                        "kind": "shared_provider_event_id",
+                        "value": "invented-event",
+                    },
+                    "compatible_signals": ["fiscal_period", "publication_date"],
+                },
+                "relation-rules-1",
+            ),
+        )
     asserted = append_relation_observation(
         conn,
         RelationObservationInput(
@@ -263,7 +338,13 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
             sv_obs["candidate_observation_id"],
             "TRANSLATION",
             "asserted",
-            {"same_period": True},
+            {
+                "strong_corroborator": {
+                    "kind": "shared_provider_event_id",
+                    "value": "event-1",
+                },
+                "compatible_signals": ["fiscal_period", "publication_date"],
+            },
             "relation-rules-1",
         ),
     )
@@ -465,3 +546,28 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
         (en_current["extraction_id"],),
     ).fetchone()
     assert page[0] == "corrected"
+
+    conn.execute(
+        "UPDATE document_pages SET text='hello', text_checksum='page-a' WHERE extraction_id=?",
+        (extraction_id,),
+    )
+    conn.commit()
+    reverted = backfill_legacy_evidence(conn)
+    reverted_counts = {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in NEW_TABLES
+    }
+    assert backfill_legacy_evidence(conn) == reverted
+    assert {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in NEW_TABLES
+    } == reverted_counts
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == (
+        batch_count + 2
+    )
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    en_current = next(row for row in current if row["release_source_url"].endswith("/en"))
+    page = conn.execute(
+        "SELECT text FROM evidence_artifact_pages WHERE extraction_id=?",
+        (en_current["extraction_id"],),
+    ).fetchone()
+    assert page[0] == "hello"
