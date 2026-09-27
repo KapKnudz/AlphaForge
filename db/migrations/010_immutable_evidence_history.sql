@@ -117,7 +117,8 @@ CREATE TABLE IF NOT EXISTS evidence_candidate_observations (
     attachment_observation_id INTEGER REFERENCES evidence_attachment_observations(id),
     extraction_id INTEGER REFERENCES evidence_artifact_extractions(id),
     report_rules_fingerprint TEXT NOT NULL,
-    raw_metadata TEXT NOT NULL CHECK (json_valid(raw_metadata))
+    raw_metadata TEXT NOT NULL CHECK (json_valid(raw_metadata)),
+    UNIQUE(candidate_id, batch_id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_candidate_observations_current
     ON evidence_candidate_observations(candidate_id, batch_id, candidate_observation_id);
@@ -133,7 +134,8 @@ CREATE TABLE IF NOT EXISTS evidence_candidate_relation_observations (
     disposition TEXT NOT NULL CHECK (disposition IN ('asserted','withdrawn')),
     corroboration TEXT NOT NULL CHECK (json_valid(corroboration)),
     rules_fingerprint TEXT NOT NULL,
-    CHECK (left_candidate_observation_id <> right_candidate_observation_id)
+    CHECK (left_candidate_observation_id <> right_candidate_observation_id),
+    UNIQUE(relation_key, batch_id)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_relations_current
     ON evidence_candidate_relation_observations(relation_key, batch_id, relation_observation_id);

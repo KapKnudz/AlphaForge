@@ -194,6 +194,8 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     )
     observation1 = append_candidate_observation(conn, observation1_value)
     assert append_candidate_observation(conn, observation1_value)["id"] == observation1["id"]
+    with pytest.raises(ImmutableEvidenceConflict, match="different state"):
+        append_candidate_observation(conn, replace(observation1_value, detail_title="conflict"))
 
     batch2 = append_observation_batch(conn, _batch(1, "two", "2026-09-24T11:00:00Z"))
     digest2 = hashlib.sha256(b"second PDF").hexdigest()
@@ -265,6 +267,19 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
             "relation-rules-1",
         ),
     )
+    with pytest.raises(ImmutableEvidenceConflict, match="different state"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch1["batch_id"],
+                en_obs["candidate_observation_id"],
+                sv_obs["candidate_observation_id"],
+                "TRANSLATION",
+                "withdrawn",
+                {"reason": "conflict"},
+                "relation-rules-1",
+            ),
+        )
     batch2 = append_observation_batch(conn, _batch(1, "two", "2026-09-24T11:00:00Z"))
     withdrawn = append_relation_observation(
         conn,
@@ -325,7 +340,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
            (company_id, source_url, source_type, title, published_at, fetched_at,
             ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
            VALUES (1, 'https://example.test/en', 'mfn', 'Q2 report', '2026-07-15',
-                   '2026-07-15T10:00:00Z', 'en', ?, ?, 'legacy-rules')""",
+                   '2026-07-15T10:00:00.123Z', 'en', ?, ?, 'legacy-rules')""",
         (
             "a" * 64,
             json.dumps({"report_kind": "quarterly", "bilingual_group_id": "q2"}),
@@ -404,7 +419,18 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     assert first == second
     assert first_path.read_bytes() == second_path.read_bytes()
     assert first["metadata_only_artifacts"] == 1
-    assert first["asserted_relations"] == 1
+    assert first["asserted_relations"] == 0
+    assert first["unresolved_relations"] == [
+        {"document_id": parent_id + 1, "duplicate_of": parent_id}
+    ]
+    assert conn.execute(
+        "SELECT count(*) FROM evidence_candidate_relation_observations"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        """SELECT effective_at FROM evidence_observation_batches
+           WHERE source_input_fingerprint != 'source-staged-v2'
+           ORDER BY effective_at LIMIT 1"""
+    ).fetchone()[0] == "2026-07-15T10:00:00.123000Z"
     assert conn.execute("SELECT count(*) FROM evidence_artifact_objects").fetchone()[0] == 0
     assert {
         row[0] for row in conn.execute("SELECT eligibility FROM evidence_candidate_observations")
@@ -416,3 +442,26 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     )
     assert make_candidate_key(1, "https://example.test/en")
     assert make_batch_id(_batch(1, "one", "ignored"))
+
+    batch_count = conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0]
+    conn.execute(
+        "UPDATE document_pages SET text='corrected', text_checksum='page-corrected' WHERE extraction_id=?",
+        (extraction_id,),
+    )
+    conn.commit()
+    corrected = backfill_legacy_evidence(conn)
+    corrected_again = backfill_legacy_evidence(conn)
+
+    assert corrected == corrected_again
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == (
+        batch_count + 1
+    )
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    en_current = next(row for row in current if row["release_source_url"].endswith("/en"))
+    page = conn.execute(
+        """SELECT p.text FROM evidence_artifact_pages p
+           JOIN evidence_artifact_extractions e ON e.id=p.extraction_id
+           WHERE e.id=?""",
+        (en_current["extraction_id"],),
+    ).fetchone()
+    assert page[0] == "corrected"

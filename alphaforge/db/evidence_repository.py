@@ -10,6 +10,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -503,6 +504,13 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
     existing = _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity)
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
+    if conn.execute(
+        "SELECT 1 FROM evidence_candidate_observations WHERE candidate_id=? AND batch_id=?",
+        (candidate["id"], batch["id"]),
+    ).fetchone() is not None:
+        raise ImmutableEvidenceConflict(
+            "observation batch already contains a different state for this candidate"
+        )
     placeholders = ", ".join("?" for _ in range(19))
     conn.execute(
         f"""INSERT INTO evidence_candidate_observations
@@ -586,6 +594,14 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
     )
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
+    if conn.execute(
+        """SELECT 1 FROM evidence_candidate_relation_observations
+           WHERE relation_key=? AND batch_id=?""",
+        (relation_key, batch["id"]),
+    ).fetchone() is not None:
+        raise ImmutableEvidenceConflict(
+            "observation batch already contains a different state for this relation"
+        )
     conn.execute(
         """INSERT INTO evidence_candidate_relation_observations
            (relation_observation_id, relation_key, batch_id,
@@ -614,8 +630,7 @@ def current_candidate_observations(
                       b.batch_id AS stable_batch_id, b.effective_at,
                       ROW_NUMBER() OVER (
                           PARTITION BY o.candidate_id
-                          ORDER BY b.effective_at DESC, b.batch_id DESC,
-                                   o.candidate_observation_id DESC
+                          ORDER BY b.effective_at DESC, b.batch_id DESC
                       ) AS precedence_rank
                FROM evidence_candidate_observations o
                JOIN evidence_candidates c ON c.id=o.candidate_id
@@ -636,8 +651,7 @@ def current_relation_observations(
                SELECT r.*, b.batch_id AS stable_batch_id, b.effective_at,
                       ROW_NUMBER() OVER (
                           PARTITION BY r.relation_key
-                          ORDER BY b.effective_at DESC, b.batch_id DESC,
-                                   r.relation_observation_id DESC
+                          ORDER BY b.effective_at DESC, b.batch_id DESC
                       ) AS precedence_rank
                FROM evidence_candidate_relation_observations r
                JOIN evidence_observation_batches b ON b.id=r.batch_id
@@ -698,10 +712,23 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _legacy_effective_at(raw: str | None, ordinal: int) -> str:
-    # The suffix gives deterministic strict precedence when legacy timestamps collide.
-    base = (raw or "1970-01-01T00:00:00").rstrip("Z")
-    return f"{base}.{ordinal:09d}Z"
+def _legacy_datetime(raw: str | None) -> datetime:
+    try:
+        parsed = datetime.fromisoformat((raw or "1970-01-01T00:00:00Z").replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime(1970, 1, 1, tzinfo=UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _legacy_effective_at(raw: str | None, previous: str | None = None) -> str:
+    effective = _legacy_datetime(raw)
+    if previous is not None:
+        prior = _legacy_datetime(previous)
+        if effective <= prior:
+            effective = prior + timedelta(microseconds=1)
+    return effective.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _table_digest(conn: Any, table: str, columns: str) -> str:
@@ -741,51 +768,11 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
         "packet_digest": _table_digest(conn, "evidence_packets", "id, packet_json"),
         "manifest_digest": _table_digest(conn, "evidence_selection_manifests", "id, manifest_json"),
     }
-    observation_by_document: dict[int, dict[str, Any]] = {}
-    batch_by_document: dict[int, str] = {}
     with conn:
-        company_ordinals: dict[int, int] = {}
+        company_previous: dict[int, str] = {}
         for document in documents:
             company_id = int(document["company_id"])
-            ordinal = company_ordinals.get(company_id, 0) + 1
-            company_ordinals[company_id] = ordinal
             metadata = _json_object(document.get("raw_metadata"))
-            snapshot = {
-                key: document.get(key)
-                for key in (
-                    "id",
-                    "company_id",
-                    "source_url",
-                    "title",
-                    "published_at",
-                    "fetched_at",
-                    "duplicate_of",
-                    "ingested_lang",
-                    "checksum",
-                    "report_rules_fingerprint",
-                    "raw_metadata",
-                )
-            }
-            source_fingerprint = _stable_hash({"legacy_current_row": snapshot})
-            rules = str(document.get("report_rules_fingerprint") or "legacy")
-            effective_at = _legacy_effective_at(document.get("fetched_at"), ordinal)
-            batch_value = ObservationBatchInput(
-                company_id=company_id,
-                as_of=str(
-                    document.get("published_at") or document.get("fetched_at") or "1970-01-01"
-                )[:10],
-                source_input_fingerprint=source_fingerprint,
-                report_rules_fingerprint=rules,
-                effective_at=effective_at,
-                first_recorded_at=effective_at,
-            )
-            batch = _append_legacy_observation_batch(conn, batch_value)
-            batch_by_document[int(document["id"])] = str(batch["batch_id"])
-            candidate = append_candidate(
-                conn,
-                CandidateInput(company_id, str(document["source_url"]), effective_at),
-            )
-            audit["candidates"] += 1
             attachments = [
                 dict(row)
                 for row in conn.execute(
@@ -793,6 +780,77 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                     (document["id"],),
                 ).fetchall()
             ]
+            legacy_extraction_row = conn.execute(
+                "SELECT * FROM document_extractions WHERE document_id=?", (document["id"],)
+            ).fetchone()
+            legacy_extraction = (
+                dict(legacy_extraction_row) if legacy_extraction_row is not None else None
+            )
+            legacy_pages = (
+                [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM document_pages WHERE extraction_id=? ORDER BY page_number",
+                        (legacy_extraction["id"],),
+                    ).fetchall()
+                ]
+                if legacy_extraction is not None
+                else []
+            )
+            snapshot = {
+                "document": document,
+                "attachments": attachments,
+                "extraction": legacy_extraction,
+                "pages": legacy_pages,
+            }
+            source_fingerprint = _stable_hash({"legacy_current_state": snapshot})
+            rules = str(document.get("report_rules_fingerprint") or "legacy")
+            as_of = str(
+                document.get("published_at") or document.get("fetched_at") or "1970-01-01"
+            )[:10]
+            candidate_key = make_candidate_key(company_id, str(document["source_url"]))
+            batch_identity = make_batch_id(
+                ObservationBatchInput(company_id, as_of, source_fingerprint, rules, "", "")
+            )
+            existing_batch = _row(
+                conn, "evidence_observation_batches", "batch_id", batch_identity
+            )
+            prior_import = conn.execute(
+                """SELECT b.effective_at
+                   FROM evidence_candidate_observations o
+                   JOIN evidence_candidates c ON c.id=o.candidate_id
+                   JOIN evidence_observation_batches b ON b.id=o.batch_id
+                   WHERE c.candidate_key=?
+                     AND json_extract(o.raw_metadata, '$.legacy_import')=1
+                   ORDER BY b.effective_at DESC, b.batch_id DESC LIMIT 1""",
+                (candidate_key,),
+            ).fetchone()
+            previous = company_previous.get(company_id)
+            if prior_import is not None and (
+                previous is None
+                or _legacy_datetime(str(prior_import[0])) > _legacy_datetime(previous)
+            ):
+                previous = str(prior_import[0])
+            effective_at = (
+                str(existing_batch["effective_at"])
+                if existing_batch is not None
+                else _legacy_effective_at(document.get("fetched_at"), previous)
+            )
+            company_previous[company_id] = effective_at
+            batch_value = ObservationBatchInput(
+                company_id=company_id,
+                as_of=as_of,
+                source_input_fingerprint=source_fingerprint,
+                report_rules_fingerprint=rules,
+                effective_at=effective_at,
+                first_recorded_at=effective_at,
+            )
+            batch = _append_legacy_observation_batch(conn, batch_value)
+            candidate = append_candidate(
+                conn,
+                CandidateInput(company_id, str(document["source_url"]), effective_at),
+            )
+            audit["candidates"] += 1
             current_attachment = None
             for legacy_attachment in attachments:
                 digest = str(legacy_attachment.get("sha256") or "").lower()
@@ -831,11 +889,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 )
                 audit["attachment_observations"] += 1
             extraction_record = None
-            legacy_extraction = conn.execute(
-                "SELECT * FROM document_extractions WHERE document_id=?", (document["id"],)
-            ).fetchone()
             if legacy_extraction is not None and current_attachment is not None:
-                legacy_extraction = dict(legacy_extraction)
                 artifact_row = conn.execute(
                     "SELECT artifact_id FROM evidence_artifacts WHERE id=?",
                     (current_attachment["artifact_id"],),
@@ -847,10 +901,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                         text=str(page["text"]),
                         text_checksum=str(page["text_checksum"]),
                     )
-                    for page in conn.execute(
-                        "SELECT * FROM document_pages WHERE extraction_id=? ORDER BY page_number",
-                        (legacy_extraction["id"],),
-                    ).fetchall()
+                    for page in legacy_pages
                 )
                 limitations = list(json.loads(legacy_extraction.get("limitations") or "[]"))
                 if "legacy_source_without_retained_bytes" not in limitations:
@@ -875,7 +926,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 audit["extraction_snapshots"] += 1
             elif legacy_extraction is not None:
                 audit["unbound_extractions"].append(int(document["id"]))
-            observation = append_candidate_observation(
+            append_candidate_observation(
                 conn,
                 CandidateObservationInput(
                     candidate_key=str(candidate["candidate_key"]),
@@ -908,56 +959,14 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                     raw_metadata={"legacy_import": True, "legacy_metadata": metadata},
                 ),
             )
-            observation_by_document[int(document["id"])] = observation
             audit["candidate_observations"] += 1
 
-        by_id = {int(document["id"]): document for document in documents}
-        for child_id, child_observation in sorted(observation_by_document.items()):
-            child = by_id[child_id]
-            parent_id = child.get("duplicate_of")
-            if parent_id is None or int(parent_id) not in observation_by_document:
-                continue
-            parent = by_id[int(parent_id)]
-            child_metadata = _json_object(child.get("raw_metadata"))
-            parent_metadata = _json_object(parent.get("raw_metadata"))
-            relationship = str(child_metadata.get("relationship") or "").upper()
-            group = child_metadata.get("bilingual_group_id")
-            strong = (
-                relationship in {"TRANSLATION", "REVISION"}
-                and bool(group)
-                and group == parent_metadata.get("bilingual_group_id")
-                and bool(child.get("checksum") or child_metadata.get("pdf_checksum"))
-                and bool(parent.get("checksum") or parent_metadata.get("pdf_checksum"))
-            )
-            if not strong:
+        for document in documents:
+            parent_id = document.get("duplicate_of")
+            if parent_id is not None:
                 audit["unresolved_relations"].append(
-                    {"document_id": child_id, "duplicate_of": int(parent_id)}
+                    {"document_id": int(document["id"]), "duplicate_of": int(parent_id)}
                 )
-                continue
-            append_relation_observation(
-                conn,
-                RelationObservationInput(
-                    batch_id=batch_by_document[child_id],
-                    left_candidate_observation_id=str(
-                        child_observation["candidate_observation_id"]
-                    ),
-                    right_candidate_observation_id=str(
-                        observation_by_document[int(parent_id)]["candidate_observation_id"]
-                    ),
-                    relation_type=relationship,
-                    disposition="asserted",
-                    corroboration={
-                        "legacy_import": True,
-                        "bilingual_group_id": group,
-                        "left_checksum": child.get("checksum")
-                        or child_metadata.get("pdf_checksum"),
-                        "right_checksum": parent.get("checksum")
-                        or parent_metadata.get("pdf_checksum"),
-                    },
-                    rules_fingerprint=str(child.get("report_rules_fingerprint") or "legacy"),
-                ),
-            )
-            audit["asserted_relations"] += 1
     audit["unresolved_relations"].sort(key=lambda item: (item["document_id"], item["duplicate_of"]))
     audit["unbound_extractions"].sort()
     return audit
