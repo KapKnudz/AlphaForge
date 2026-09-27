@@ -1042,6 +1042,7 @@ class OneCompanyEvidenceFlow:
         resolver: MfnIssuerResolver | None = None,
         limits: EvidenceResourceLimits = DEFAULT_RESOURCE_LIMITS,
         now: Callable[[], datetime] | None = None,
+        artifact_store: Any | None = None,
     ) -> None:
         self.conn = conn
         if scraper is None:
@@ -1052,6 +1053,7 @@ class OneCompanyEvidenceFlow:
         self.resolver = resolver or MfnIssuerResolver(base_url=self.scraper.base_url)
         self.limits = limits
         self.now = now or (lambda: datetime.now(UTC))
+        self.artifact_store = artifact_store
 
     def run(
         self,
@@ -1407,6 +1409,33 @@ class OneCompanyEvidenceFlow:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        revision_recorder = None
+        if self.artifact_store is not None and not dry_run:
+            from alphaforge.evidence.revision_flow import RevisionRecorder
+
+            revision_recorder = RevisionRecorder(
+                self.conn,
+                self.artifact_store,
+                company_id=company_id,
+                as_of=as_of,
+                source_input_fingerprint=source_input_fingerprint,
+                report_rules_fingerprint=active_rules["fingerprint"],
+                effective_at=now.isoformat().replace("+00:00", "Z"),
+                max_pages=self.limits.max_pages,
+            )
+            for source_url in sorted(revoked_feed_urls):
+                if find_complete_evidence_document(self.conn, company_id, source_url) is None:
+                    continue
+                disposition = feed_dispositions[source_url]
+                revision_recorder.record(
+                    disposition,
+                    eligibility="revoked",
+                    eligibility_reason=(
+                        "invitation_veto"
+                        if disposition.get("invitation_veto")
+                        else "current_feed_revoked"
+                    ),
+                )
         unseen_feed = []
         future_dated_complete_release = False
         not_yet_published_complete_release = False
@@ -1710,6 +1739,7 @@ class OneCompanyEvidenceFlow:
         indeterminate_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
         stored_pdf_language_cache: dict[str, tuple[str, str]] = {}
         unresolved_existing_source_urls: set[str] = set(revoked_feed_urls)
+        revision_observations: dict[str, dict[str, Any]] = {}
 
         def mark_pdf_language_unresolved(
             index: int, candidate: dict[str, Any], existing: dict[str, Any] | None
@@ -1971,6 +2001,85 @@ class OneCompanyEvidenceFlow:
                 prepared_variants.append(prepared)
                 candidate_options.append((prepared, candidate_download, candidate_extracted, None))
             variants = prepared_variants
+            if revision_recorder is not None:
+                for (
+                    option_variant,
+                    option_download,
+                    option_extracted,
+                    option_existing,
+                ) in candidate_options:
+                    option_url = str(
+                        option_variant.get("source_url") or option_variant.get("url") or ""
+                    )
+                    if not option_url or option_url in revision_observations:
+                        continue
+                    foreign_reuse = bool(
+                        option_existing is not None
+                        and str(option_existing.get("canonical_source_url") or "") != option_url
+                    )
+                    revision_observations[option_url] = revision_recorder.record(
+                        _prepare_selected_article(
+                            option_variant, option_download, option_extracted
+                        ),
+                        eligibility="rejected" if foreign_reuse else "eligible",
+                        eligibility_reason=(
+                            "attachment_reused_by_different_report"
+                            if foreign_reuse
+                            else "deterministic_report_admission"
+                        ),
+                        downloaded=option_download,
+                        extracted=option_extracted,
+                    )
+                for failed_variant in variants:
+                    failed_url = str(
+                        failed_variant.get("source_url") or failed_variant.get("url") or ""
+                    )
+                    if (
+                        failed_url
+                        and failed_url not in revision_observations
+                        and not failed_variant.get("_persisted_evidence")
+                    ):
+                        revision_observations[failed_url] = revision_recorder.record(
+                            failed_variant,
+                            eligibility="incomplete",
+                            eligibility_reason="artifact_or_extraction_unavailable",
+                        )
+                if candidate_options:
+                    relation_anchor = sorted(
+                        (option[0] for option in candidate_options),
+                        key=lambda item: (
+                            0 if item.get("pdf_language") == "en" else 1,
+                            str(item.get("source_url") or item.get("url") or ""),
+                        ),
+                    )[0]
+                    anchor_url = str(
+                        relation_anchor.get("source_url") or relation_anchor.get("url") or ""
+                    )
+                    for related in variants:
+                        related_url = str(
+                            related.get("source_url") or related.get("url") or ""
+                        )
+                        if not related_url or related_url == anchor_url:
+                            continue
+                        relation = _variant_relationship(relation_anchor, related)
+                        if (
+                            relation in {"TRANSLATION", "REVISION"}
+                            and anchor_url in revision_observations
+                            and related_url in revision_observations
+                        ):
+                            revision_recorder.record_relation(
+                                revision_observations[anchor_url],
+                                revision_observations[related_url],
+                                relation_type=relation,
+                                disposition="asserted",
+                                corroboration={
+                                    "bilingual_group_id": relation_anchor.get(
+                                        "_bilingual_group_id"
+                                    ),
+                                    "left_pdf_checksum": relation_anchor.get("pdf_checksum"),
+                                    "right_pdf_checksum": related.get("pdf_checksum"),
+                                },
+                            )
 
             def persist_option(
                 article: dict[str, Any],
