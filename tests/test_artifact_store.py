@@ -37,6 +37,33 @@ def test_put_streams_pdf_to_content_addressed_path_and_reads_verified_bytes(
     assert not list((tmp_path / "sha256" / ".tmp").iterdir())
 
 
+def test_put_durably_creates_each_directory_and_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "store" / "objects"
+    store = LocalPdfArtifactStore(root)
+    synced: list[Path] = []
+    monkeypatch.setattr(store, "_fsync_directory", synced.append)
+
+    artifact = store.put_pdf(io.BytesIO(PDF_A))
+
+    sha256_directory = root / "sha256"
+    prefix_directory = sha256_directory / artifact.sha256[:2]
+    assert synced == [
+        tmp_path / "store",
+        tmp_path,
+        root,
+        tmp_path / "store",
+        sha256_directory,
+        root,
+        sha256_directory / ".tmp",
+        sha256_directory,
+        prefix_directory,
+        sha256_directory,
+        prefix_directory,
+    ]
+
+
 def test_repeated_put_reuses_verified_object_without_overwrite(tmp_path: Path) -> None:
     store = LocalPdfArtifactStore(tmp_path)
     first = store.put_pdf(io.BytesIO(PDF_A))

@@ -92,9 +92,12 @@ part of this lane.
 
 ### Immutable PDF object storage
 
-`alphaforge.evidence.artifact_store.LocalPdfArtifactStore` is the standalone
-local persistence boundary for newly retained PDF bytes. By default it stores
-objects at
+`alphaforge.evidence.artifact_store.LocalPdfArtifactStore` is a standalone
+local persistence foundation for retained PDF bytes. This slice does not wire
+it into the production evidence flow; that integration, including enforcement
+that historical metadata without retained verified bytes cannot qualify as new
+evidence, is deferred to `alphaforge-inwido-missing-reports-diagnosis`. By
+default the standalone store writes objects at
 `data/evidence/objects/sha256/<first-two-hex>/<sha256>.pdf` and returns a URI
 relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`). It
 streams writes through a same-filesystem temporary file, validates the byte
@@ -105,9 +108,9 @@ verification.
 Call `read_pdf(sha256, expected_size=...)` before use. It returns bytes only
 after streaming verification and raises `artifact_unavailable` or
 `artifact_checksum_mismatch` typed errors rather than falling back to a URL or
-another object. The store performs no database writes or deletion. Historical
-hash metadata without a retained, verified object therefore does not establish
-replayable evidence.
+another object. The store performs no database writes or deletion. These are
+store API guarantees, not claims about the currently unwired production
+evidence-selection path.
 
 A run with no model-ready source returns `no_evidence` with one of
 `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source`;

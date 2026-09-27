@@ -65,7 +65,7 @@ class LocalPdfArtifactStore:
     def put_pdf(self, source: BinaryIO) -> StoredPdfArtifact:
         """Stream, validate, and durably install one PDF without replacement."""
         staging_directory = self.root / "sha256" / ".tmp"
-        staging_directory.mkdir(parents=True, exist_ok=True)
+        self._mkdir_durable(staging_directory)
         fd, temporary_name = tempfile.mkstemp(prefix="pdf-", dir=staging_directory)
         temporary_path = Path(temporary_name)
         digest = hashlib.sha256()
@@ -95,7 +95,7 @@ class LocalPdfArtifactStore:
 
             sha256 = digest.hexdigest()
             destination = self._object_path(sha256)
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            self._mkdir_durable(destination.parent)
             try:
                 os.link(temporary_path, destination)
             except FileExistsError:
@@ -189,6 +189,23 @@ class LocalPdfArtifactStore:
             raise ArtifactValidationError(
                 "invalid_sha256", "SHA-256 must be 64 lowercase hexadecimal characters"
             )
+
+    def _mkdir_durable(self, path: Path) -> None:
+        missing = []
+        current = path
+        while not current.exists():
+            missing.append(current)
+            current = current.parent
+
+        for directory in reversed(missing):
+            try:
+                directory.mkdir()
+            except FileExistsError:
+                if not directory.is_dir():
+                    raise
+            else:
+                self._fsync_directory(directory)
+                self._fsync_directory(directory.parent)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
