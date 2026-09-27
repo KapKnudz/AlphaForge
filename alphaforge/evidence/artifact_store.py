@@ -6,7 +6,7 @@ import errno
 import hashlib
 import os
 import stat
-import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -68,13 +68,22 @@ class LocalPdfArtifactStore:
         """Stream, validate, and durably install one PDF without replacement."""
         staging_directory = self.root / "sha256" / ".tmp"
         self._mkdir_durable(staging_directory)
-        fd, temporary_name = tempfile.mkstemp(prefix="pdf-", dir=staging_directory)
-        temporary_path = Path(temporary_name)
+        staging_fd = self._open_store_directory(".tmp")
+        temporary_name = f"pdf-{uuid.uuid4().hex}"
+        destination_fd: int | None = None
+        temporary_created = False
         digest = hashlib.sha256()
         byte_size = 0
         prefix = bytearray()
 
         try:
+            fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=staging_fd,
+            )
+            temporary_created = True
             with os.fdopen(fd, "wb") as temporary_file:
                 while chunk := source.read(self.chunk_size):
                     if not isinstance(chunk, bytes):
@@ -98,8 +107,15 @@ class LocalPdfArtifactStore:
             sha256 = digest.hexdigest()
             destination = self._object_path(sha256)
             self._mkdir_durable(destination.parent)
+            destination_fd = self._open_store_directory(sha256[:2])
             try:
-                os.link(temporary_path, destination)
+                os.link(
+                    temporary_name,
+                    destination.name,
+                    src_dir_fd=staging_fd,
+                    dst_dir_fd=destination_fd,
+                    follow_symlinks=False,
+                )
             except FileExistsError:
                 self._verify_file(
                     destination,
@@ -107,8 +123,9 @@ class LocalPdfArtifactStore:
                     byte_size,
                     return_bytes=False,
                     fsync=True,
+                    directory_fd=destination_fd,
                 )
-            self._fsync_directory(destination.parent)
+            os.fsync(destination_fd)
 
             return StoredPdfArtifact(
                 sha256=sha256,
@@ -116,7 +133,14 @@ class LocalPdfArtifactStore:
                 object_uri=self._object_uri(sha256),
             )
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if destination_fd is not None:
+                os.close(destination_fd)
+            if temporary_created:
+                try:
+                    os.unlink(temporary_name, dir_fd=staging_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(staging_fd)
 
     def read_pdf(self, sha256: str, *, expected_size: int) -> bytes:
         """Return bytes only after streaming hash, size, limit, and PDF checks pass."""
@@ -151,13 +175,14 @@ class LocalPdfArtifactStore:
         *,
         return_bytes: bool,
         fsync: bool = False,
+        directory_fd: int | None = None,
     ) -> bytes | None:
         digest = hashlib.sha256()
         byte_size = 0
         prefix = bytearray()
         content = bytearray() if return_bytes else None
 
-        with self._open_regular_file(path) as artifact_file:
+        with self._open_regular_file(path, directory_fd=directory_fd) as artifact_file:
             while chunk := artifact_file.read(self.chunk_size):
                 byte_size += len(chunk)
                 if byte_size > expected_size:
@@ -185,20 +210,24 @@ class LocalPdfArtifactStore:
             )
         return bytes(content) if content is not None else None
 
-    @staticmethod
-    def _open_regular_file(path: Path) -> BinaryIO:
+    def _open_regular_file(
+        self, path: Path, *, directory_fd: int | None = None
+    ) -> BinaryIO:
+        owns_directory_fd = directory_fd is None
+        if directory_fd is None:
+            directory_fd = self._open_store_directory(path.parent.name)
         try:
-            path_mode = path.lstat().st_mode
-        except FileNotFoundError:
-            raise
-        if not stat.S_ISREG(path_mode):
-            raise ArtifactChecksumMismatchError(
-                "artifact_checksum_mismatch",
-                "retained object path is not a regular file",
+            path_mode = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+            if not stat.S_ISREG(path_mode):
+                raise ArtifactChecksumMismatchError(
+                    "artifact_checksum_mismatch",
+                    "retained object path is not a regular file",
+                )
+            file_fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory_fd,
             )
-
-        try:
-            file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as exc:
             if exc.errno == errno.ELOOP:
                 raise ArtifactChecksumMismatchError(
@@ -206,6 +235,9 @@ class LocalPdfArtifactStore:
                     "retained object path is not a regular file",
                 ) from exc
             raise
+        finally:
+            if owns_directory_fd:
+                os.close(directory_fd)
 
         try:
             if not stat.S_ISREG(os.fstat(file_fd).st_mode):
@@ -216,6 +248,32 @@ class LocalPdfArtifactStore:
             return os.fdopen(file_fd, "rb")
         except BaseException:
             os.close(file_fd)
+            raise
+
+    def _open_store_directory(self, child: str) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = self._open_directory(self.root, flags=flags)
+        try:
+            sha256_fd = self._open_directory("sha256", flags=flags, dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+        try:
+            return self._open_directory(child, flags=flags, dir_fd=sha256_fd)
+        finally:
+            os.close(sha256_fd)
+
+    @staticmethod
+    def _open_directory(
+        path: Path | str, *, flags: int, dir_fd: int | None = None
+    ) -> int:
+        try:
+            return os.open(path, flags, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise ArtifactChecksumMismatchError(
+                    "artifact_checksum_mismatch",
+                    "artifact store path contains a non-directory component",
+                ) from exc
             raise
 
     def _object_path(self, sha256: str) -> Path:
@@ -234,6 +292,7 @@ class LocalPdfArtifactStore:
             )
 
     def _mkdir_durable(self, path: Path) -> None:
+        self._validate_store_directories(path)
         missing = []
         current = path
         while not current.exists():
@@ -247,6 +306,7 @@ class LocalPdfArtifactStore:
                 if not directory.is_dir():
                     raise
 
+        self._validate_store_directories(path)
         durability_root = missing[-1] if self.root in missing else self.root
         current = path
         while True:
@@ -256,9 +316,30 @@ class LocalPdfArtifactStore:
                 break
             current = current.parent
 
+    def _validate_store_directories(self, path: Path) -> None:
+        current = self.root
+        directories = [current]
+        for part in path.relative_to(self.root).parts:
+            current /= part
+            directories.append(current)
+
+        for directory in directories:
+            try:
+                mode = directory.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                raise ArtifactChecksumMismatchError(
+                    "artifact_checksum_mismatch",
+                    "artifact store path contains a non-directory component",
+                )
+
     @staticmethod
     def _fsync_directory(path: Path) -> None:
-        directory_fd = os.open(path, os.O_RDONLY)
+        directory_fd = LocalPdfArtifactStore._open_directory(
+            path,
+            flags=os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
         try:
             os.fsync(directory_fd)
         finally:

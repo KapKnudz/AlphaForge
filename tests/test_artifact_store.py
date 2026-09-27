@@ -69,7 +69,6 @@ def test_put_durably_creates_each_directory_and_parent(
         sha256_directory,
         root,
         tmp_path / "store",
-        prefix_directory,
     ]
 
 
@@ -109,7 +108,6 @@ def test_put_syncs_directories_created_by_concurrent_writer(
         sha256_directory,
         tmp_path,
         tmp_path.parent,
-        prefix_directory,
     ]
 
 
@@ -138,7 +136,6 @@ def test_put_syncs_directories_already_visible_during_scan(
         sha256_directory,
         tmp_path,
         tmp_path.parent,
-        prefix_directory,
     ]
 
 
@@ -163,14 +160,21 @@ def test_put_makes_verified_concurrent_object_durable(
     synced_files: list[Path] = []
     synced_directories: list[Path] = []
     target_stat = path.stat()
+    target_directory_stat = path.parent.stat()
 
     def record_fsync(file_descriptor: int) -> None:
         descriptor_stat = os.fstat(file_descriptor)
-        if stat.S_ISREG(descriptor_stat.st_mode) and (
-            descriptor_stat.st_dev,
-            descriptor_stat.st_ino,
-        ) == (target_stat.st_dev, target_stat.st_ino):
+        identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+        if stat.S_ISREG(descriptor_stat.st_mode) and identity == (
+            target_stat.st_dev,
+            target_stat.st_ino,
+        ):
             synced_files.append(path)
+        if stat.S_ISDIR(descriptor_stat.st_mode) and identity == (
+            target_directory_stat.st_dev,
+            target_directory_stat.st_ino,
+        ):
+            synced_directories.append(path.parent)
 
     monkeypatch.setattr(os, "fsync", record_fsync)
     monkeypatch.setattr(store, "_fsync_directory", synced_directories.append)
@@ -179,7 +183,7 @@ def test_put_makes_verified_concurrent_object_durable(
 
     assert artifact.sha256 == hashlib.sha256(PDF_A).hexdigest()
     assert synced_files == [path]
-    assert synced_directories[-1] == path.parent
+    assert path.parent in synced_directories
     assert path.read_bytes() == PDF_A
 
 
@@ -225,16 +229,21 @@ def test_put_propagates_reused_link_directory_fsync_failure(
 ) -> None:
     path = seed_object(tmp_path, PDF_A)
     store = LocalPdfArtifactStore(tmp_path)
+    target_stat = path.parent.stat()
     destination_syncs = 0
 
-    def fail_final_destination_sync(directory: Path) -> None:
+    def fail_final_destination_sync(file_descriptor: int) -> None:
         nonlocal destination_syncs
-        if directory == path.parent:
+        descriptor_stat = os.fstat(file_descriptor)
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) == (
+            target_stat.st_dev,
+            target_stat.st_ino,
+        ):
             destination_syncs += 1
             if destination_syncs == 2:
                 raise OSError("directory fsync failed")
 
-    monkeypatch.setattr(store, "_fsync_directory", fail_final_destination_sync)
+    monkeypatch.setattr(os, "fsync", fail_final_destination_sync)
 
     with pytest.raises(OSError, match="directory fsync failed"):
         store.put_pdf(io.BytesIO(PDF_A))
@@ -295,6 +304,50 @@ def test_read_and_put_reject_non_regular_object_paths(
         assert external.read_bytes() == PDF_A
     else:
         assert path.is_dir()
+
+
+def test_put_and_read_reject_symlinked_object_prefix(tmp_path: Path) -> None:
+    root = tmp_path / "objects"
+    external = tmp_path / "external"
+    external.mkdir()
+    sha256_directory = root / "sha256"
+    sha256_directory.mkdir(parents=True)
+    digest = hashlib.sha256(PDF_A).hexdigest()
+    prefix = sha256_directory / digest[:2]
+    prefix.symlink_to(external, target_is_directory=True)
+    store = LocalPdfArtifactStore(root)
+
+    with pytest.raises(ArtifactChecksumMismatchError) as new_put_error:
+        store.put_pdf(io.BytesIO(PDF_A))
+    assert new_put_error.value.code == "artifact_checksum_mismatch"
+    assert not list(external.iterdir())
+
+    external_object = external / f"{digest}.pdf"
+    external_object.write_bytes(PDF_A)
+    with pytest.raises(ArtifactChecksumMismatchError) as read_error:
+        store.read_pdf(digest, expected_size=len(PDF_A))
+    assert read_error.value.code == "artifact_checksum_mismatch"
+
+    with pytest.raises(ArtifactChecksumMismatchError) as reuse_error:
+        store.put_pdf(io.BytesIO(PDF_A))
+    assert reuse_error.value.code == "artifact_checksum_mismatch"
+    assert external_object.read_bytes() == PDF_A
+
+
+def test_put_rejects_symlinked_staging_directory(tmp_path: Path) -> None:
+    root = tmp_path / "objects"
+    external = tmp_path / "external"
+    external.mkdir()
+    sha256_directory = root / "sha256"
+    sha256_directory.mkdir(parents=True)
+    (sha256_directory / ".tmp").symlink_to(external, target_is_directory=True)
+    store = LocalPdfArtifactStore(root)
+
+    with pytest.raises(ArtifactChecksumMismatchError) as error:
+        store.put_pdf(io.BytesIO(PDF_A))
+
+    assert error.value.code == "artifact_checksum_mismatch"
+    assert not list(external.iterdir())
 
 
 def test_read_reports_missing_and_corrupt_objects_explicitly(tmp_path: Path) -> None:
