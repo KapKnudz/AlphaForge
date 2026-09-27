@@ -1,0 +1,969 @@
+"""Append-only persistence for immutable evidence facts.
+
+This module deliberately does not acquire objects or select manifest slots. Callers
+supply canonical provider identities and verified object metadata.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+
+class ImmutableEvidenceConflict(ValueError):
+    """A stable identity already exists with a different immutable payload."""
+
+
+@dataclass(frozen=True)
+class ObservationBatchInput:
+    company_id: int
+    as_of: str
+    source_input_fingerprint: str
+    report_rules_fingerprint: str
+    effective_at: str
+    first_recorded_at: str
+
+
+@dataclass(frozen=True)
+class CandidateInput:
+    company_id: int
+    release_source_url: str
+    first_observed_at: str
+
+
+@dataclass(frozen=True)
+class ArtifactInput:
+    sha256: str
+    byte_size: int
+    content_type: str
+    first_observed_at: str
+
+
+@dataclass(frozen=True)
+class ArtifactObjectInput:
+    artifact_id: str
+    object_uri: str
+    storage_kind: str
+    verified_sha256: str
+    verified_size: int
+    stored_at: str
+
+
+@dataclass(frozen=True)
+class AttachmentObservationInput:
+    candidate_key: str
+    artifact_id: str
+    batch_id: str
+    attachment_source_url: str
+    content_type: str
+    http_status: int | None
+    feed_attachment_attested: bool
+    raw_metadata: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ExtractionPage:
+    page_number: int
+    anchor: str
+    text: str
+    text_checksum: str
+
+
+@dataclass(frozen=True)
+class ExtractionInput:
+    artifact_id: str
+    extractor: str
+    extractor_version: str
+    config_fingerprint: str
+    text_checksum: str
+    page_count: int
+    pages_included: str | None
+    page_truncated: bool
+    scanned: bool
+    limitations: Sequence[Any]
+    extracted_at: str
+    pages: Sequence[ExtractionPage]
+
+
+@dataclass(frozen=True)
+class CandidateObservationInput:
+    candidate_key: str
+    batch_id: str
+    authoritative_feed_title: str | None
+    detail_title: str | None
+    published_at: str | None
+    language: str | None
+    report_kind: str | None
+    document_type: str | None
+    fiscal_period: str | None
+    period_start: str | None
+    period_end: str | None
+    feed_report_identity: str | None
+    invitation_veto: bool
+    eligibility: str
+    eligibility_reason: str
+    attachment_observation_id: str | None
+    extraction_id: str | None
+    report_rules_fingerprint: str
+    raw_metadata: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class RelationObservationInput:
+    batch_id: str
+    left_candidate_observation_id: str
+    right_candidate_observation_id: str
+    relation_type: str
+    disposition: str
+    corroboration: Mapping[str, Any]
+    rules_fingerprint: str
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_hash(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def make_batch_id(value: ObservationBatchInput) -> str:
+    return _stable_hash(
+        {
+            "provider": "mfn",
+            "company_id": value.company_id,
+            "as_of": value.as_of,
+            "source_input_fingerprint": value.source_input_fingerprint,
+            "report_rules_fingerprint": value.report_rules_fingerprint,
+        }
+    )
+
+
+def make_candidate_key(company_id: int, release_source_url: str) -> str:
+    return _stable_hash(
+        {
+            "provider": "mfn",
+            "company_id": company_id,
+            "canonical_release_source_url": release_source_url.strip(),
+        }
+    )
+
+
+def _row(conn: Any, table: str, identity_column: str, identity: str) -> dict[str, Any] | None:
+    found = conn.execute(
+        f"SELECT * FROM {table} WHERE {identity_column}=?",
+        (identity,),  # noqa: S608
+    ).fetchone()
+    return dict(found) if found is not None else None
+
+
+def _require_same(
+    row: Mapping[str, Any], expected: Mapping[str, Any], *, identity: str
+) -> dict[str, Any]:
+    mismatches = [key for key, value in expected.items() if row.get(key) != value]
+    if mismatches:
+        raise ImmutableEvidenceConflict(
+            f"immutable identity {identity} has conflicting fields: {', '.join(mismatches)}"
+        )
+    return dict(row)
+
+
+def append_observation_batch(conn: Any, value: ObservationBatchInput) -> dict[str, Any]:
+    identity = make_batch_id(value)
+    existing = _row(conn, "evidence_observation_batches", "batch_id", identity)
+    expected = {
+        "company_id": value.company_id,
+        "provider": "mfn",
+        "as_of": value.as_of,
+        "source_input_fingerprint": value.source_input_fingerprint,
+        "report_rules_fingerprint": value.report_rules_fingerprint,
+    }
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    previous = conn.execute(
+        """SELECT effective_at FROM evidence_observation_batches
+           WHERE company_id=? AND provider='mfn'
+           ORDER BY effective_at DESC, batch_id DESC LIMIT 1""",
+        (value.company_id,),
+    ).fetchone()
+    if previous is not None and value.effective_at <= str(previous[0]):
+        raise ValueError("new observation batch effective_at must be strictly monotonic")
+    conn.execute(
+        """INSERT INTO evidence_observation_batches
+           (batch_id, company_id, provider, as_of, source_input_fingerprint,
+            report_rules_fingerprint, effective_at, first_recorded_at)
+           VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?)""",
+        (
+            identity,
+            value.company_id,
+            value.as_of,
+            value.source_input_fingerprint,
+            value.report_rules_fingerprint,
+            value.effective_at,
+            value.first_recorded_at,
+        ),
+    )
+    return _row(conn, "evidence_observation_batches", "batch_id", identity) or {}
+
+
+def _append_legacy_observation_batch(conn: Any, value: ObservationBatchInput) -> dict[str, Any]:
+    """Import historical chronology without applying the live monotonic clock rule."""
+    identity = make_batch_id(value)
+    existing = _row(conn, "evidence_observation_batches", "batch_id", identity)
+    expected = {
+        "company_id": value.company_id,
+        "provider": "mfn",
+        "as_of": value.as_of,
+        "source_input_fingerprint": value.source_input_fingerprint,
+        "report_rules_fingerprint": value.report_rules_fingerprint,
+    }
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_observation_batches
+           (batch_id, company_id, provider, as_of, source_input_fingerprint,
+            report_rules_fingerprint, effective_at, first_recorded_at)
+           VALUES (?, ?, 'mfn', ?, ?, ?, ?, ?)""",
+        (
+            identity,
+            value.company_id,
+            value.as_of,
+            value.source_input_fingerprint,
+            value.report_rules_fingerprint,
+            value.effective_at,
+            value.first_recorded_at,
+        ),
+    )
+    return _row(conn, "evidence_observation_batches", "batch_id", identity) or {}
+
+
+def append_candidate(conn: Any, value: CandidateInput) -> dict[str, Any]:
+    source_url = value.release_source_url.strip()
+    identity = make_candidate_key(value.company_id, source_url)
+    existing = _row(conn, "evidence_candidates", "candidate_key", identity)
+    expected = {
+        "company_id": value.company_id,
+        "provider": "mfn",
+        "release_source_url": source_url,
+    }
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_candidates
+           (candidate_key, company_id, provider, release_source_url, first_observed_at)
+           VALUES (?, ?, 'mfn', ?, ?)""",
+        (identity, value.company_id, source_url, value.first_observed_at),
+    )
+    return _row(conn, "evidence_candidates", "candidate_key", identity) or {}
+
+
+def append_artifact(conn: Any, value: ArtifactInput) -> dict[str, Any]:
+    digest = value.sha256.lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("artifact sha256 must be 64 lowercase hexadecimal characters")
+    identity = f"sha256:{digest}"
+    existing = _row(conn, "evidence_artifacts", "artifact_id", identity)
+    expected = {
+        "sha256": digest,
+        "byte_size": value.byte_size,
+        "content_type": value.content_type,
+    }
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_artifacts
+           (artifact_id, sha256, byte_size, content_type, first_observed_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (identity, digest, value.byte_size, value.content_type, value.first_observed_at),
+    )
+    return _row(conn, "evidence_artifacts", "artifact_id", identity) or {}
+
+
+def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, Any]:
+    artifact = _row(conn, "evidence_artifacts", "artifact_id", value.artifact_id)
+    if artifact is None:
+        raise ValueError("artifact object references an unknown artifact")
+    if value.verified_sha256 != artifact["sha256"] or value.verified_size != artifact["byte_size"]:
+        raise ValueError("verified object hash and size must match artifact metadata")
+    identity = _stable_hash(
+        {
+            "artifact_id": value.artifact_id,
+            "object_uri": value.object_uri,
+            "verified_sha256": value.verified_sha256,
+            "verified_size": value.verified_size,
+        }
+    )
+    existing = _row(conn, "evidence_artifact_objects", "object_record_id", identity)
+    expected = {
+        "artifact_id": artifact["id"],
+        "object_uri": value.object_uri,
+        "storage_kind": value.storage_kind,
+        "verified_sha256": value.verified_sha256,
+        "verified_size": value.verified_size,
+        "stored_at": value.stored_at,
+    }
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_artifact_objects
+           (object_record_id, artifact_id, object_uri, storage_kind,
+            verified_sha256, verified_size, stored_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            identity,
+            artifact["id"],
+            value.object_uri,
+            value.storage_kind,
+            value.verified_sha256,
+            value.verified_size,
+            value.stored_at,
+        ),
+    )
+    return _row(conn, "evidence_artifact_objects", "object_record_id", identity) or {}
+
+
+def append_attachment_observation(conn: Any, value: AttachmentObservationInput) -> dict[str, Any]:
+    candidate = _row(conn, "evidence_candidates", "candidate_key", value.candidate_key)
+    artifact = _row(conn, "evidence_artifacts", "artifact_id", value.artifact_id)
+    batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
+    if candidate is None or artifact is None or batch is None:
+        raise ValueError("attachment observation references an unknown identity")
+    if candidate["company_id"] != batch["company_id"]:
+        raise ValueError("attachment candidate and batch belong to different companies")
+    metadata = _canonical_json(value.raw_metadata) if value.raw_metadata is not None else None
+    identity = _stable_hash(
+        {
+            "candidate_key": value.candidate_key,
+            "attachment_source_url": value.attachment_source_url,
+            "artifact_id": value.artifact_id,
+            "batch_id": value.batch_id,
+            "feed_attachment_attestation": bool(value.feed_attachment_attested),
+            "http_provenance": {
+                "status": value.http_status,
+                "content_type": value.content_type,
+                "raw_metadata": value.raw_metadata,
+            },
+        }
+    )
+    expected = {
+        "candidate_id": candidate["id"],
+        "artifact_id": artifact["id"],
+        "batch_id": batch["id"],
+        "attachment_source_url": value.attachment_source_url,
+        "content_type": value.content_type,
+        "http_status": value.http_status,
+        "feed_attachment_attested": int(value.feed_attachment_attested),
+        "raw_metadata": metadata,
+    }
+    existing = _row(conn, "evidence_attachment_observations", "attachment_observation_id", identity)
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_attachment_observations
+           (attachment_observation_id, candidate_id, artifact_id, batch_id,
+            attachment_source_url, content_type, http_status,
+            feed_attachment_attested, raw_metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (identity, *expected.values()),
+    )
+    return (
+        _row(conn, "evidence_attachment_observations", "attachment_observation_id", identity) or {}
+    )
+
+
+def append_extraction(conn: Any, value: ExtractionInput) -> dict[str, Any]:
+    artifact = _row(conn, "evidence_artifacts", "artifact_id", value.artifact_id)
+    if artifact is None:
+        raise ValueError("extraction references an unknown artifact")
+    ordered_pages = sorted(value.pages, key=lambda page: page.page_number)
+    if len({page.page_number for page in ordered_pages}) != len(ordered_pages):
+        raise ValueError("extraction page numbers must be unique")
+    limitations = _canonical_json(list(value.limitations))
+    identity = _stable_hash(
+        {
+            "artifact_id": value.artifact_id,
+            "extractor": value.extractor,
+            "extractor_version": value.extractor_version,
+            "extraction_config_fingerprint": value.config_fingerprint,
+            "text_checksum": value.text_checksum,
+            "ordered_page_checksums": [page.text_checksum for page in ordered_pages],
+            "limitations": list(value.limitations),
+        }
+    )
+    expected = {
+        "artifact_id": artifact["id"],
+        "extractor": value.extractor,
+        "extractor_version": value.extractor_version,
+        "config_fingerprint": value.config_fingerprint,
+        "text_checksum": value.text_checksum,
+        "page_count": value.page_count,
+        "pages_included": value.pages_included,
+        "page_truncated": int(value.page_truncated),
+        "scanned": int(value.scanned),
+        "limitations": limitations,
+        "extracted_at": value.extracted_at,
+    }
+    existing = _row(conn, "evidence_artifact_extractions", "extraction_id", identity)
+    if existing is not None:
+        result = _require_same(existing, expected, identity=identity)
+        persisted_pages = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT page_number, anchor, text, text_checksum
+                   FROM evidence_artifact_pages WHERE extraction_id=? ORDER BY page_number""",
+                (existing["id"],),
+            ).fetchall()
+        ]
+        if persisted_pages != [asdict(page) for page in ordered_pages]:
+            raise ImmutableEvidenceConflict(
+                f"immutable extraction {identity} has conflicting pages"
+            )
+        return result
+    conn.execute("SAVEPOINT append_evidence_extraction")
+    try:
+        conn.execute(
+            """INSERT INTO evidence_artifact_extractions
+               (extraction_id, artifact_id, extractor, extractor_version, config_fingerprint,
+                text_checksum, page_count, pages_included, page_truncated, scanned,
+                limitations, extracted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (identity, *expected.values()),
+        )
+        extraction = _row(conn, "evidence_artifact_extractions", "extraction_id", identity) or {}
+        for page in ordered_pages:
+            conn.execute(
+                """INSERT INTO evidence_artifact_pages
+                   (extraction_id, page_number, anchor, text, text_checksum)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (extraction["id"], page.page_number, page.anchor, page.text, page.text_checksum),
+            )
+    except Exception:
+        conn.execute("ROLLBACK TO append_evidence_extraction")
+        conn.execute("RELEASE append_evidence_extraction")
+        raise
+    conn.execute("RELEASE append_evidence_extraction")
+    return extraction
+
+
+def append_candidate_observation(conn: Any, value: CandidateObservationInput) -> dict[str, Any]:
+    candidate = _row(conn, "evidence_candidates", "candidate_key", value.candidate_key)
+    batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
+    if candidate is None or batch is None:
+        raise ValueError("candidate observation references an unknown candidate or batch")
+    if candidate["company_id"] != batch["company_id"]:
+        raise ValueError("candidate observation candidate and batch belong to different companies")
+    attachment = None
+    if value.attachment_observation_id is not None:
+        attachment = _row(
+            conn,
+            "evidence_attachment_observations",
+            "attachment_observation_id",
+            value.attachment_observation_id,
+        )
+        if attachment is None or attachment["candidate_id"] != candidate["id"]:
+            raise ValueError("candidate observation attachment belongs to another candidate")
+    extraction = None
+    if value.extraction_id is not None:
+        extraction = _row(
+            conn, "evidence_artifact_extractions", "extraction_id", value.extraction_id
+        )
+        if extraction is None:
+            raise ValueError("candidate observation references an unknown extraction")
+        if attachment is None or extraction["artifact_id"] != attachment["artifact_id"]:
+            raise ValueError("candidate observation extraction and attachment artifacts differ")
+    metadata = _canonical_json(value.raw_metadata)
+    identity_payload = asdict(value)
+    identity_payload["invitation_veto"] = bool(value.invitation_veto)
+    identity = _stable_hash(identity_payload)
+    expected = {
+        "candidate_id": candidate["id"],
+        "batch_id": batch["id"],
+        "authoritative_feed_title": value.authoritative_feed_title,
+        "detail_title": value.detail_title,
+        "published_at": value.published_at,
+        "language": value.language,
+        "report_kind": value.report_kind,
+        "document_type": value.document_type,
+        "fiscal_period": value.fiscal_period,
+        "period_start": value.period_start,
+        "period_end": value.period_end,
+        "feed_report_identity": value.feed_report_identity,
+        "invitation_veto": int(value.invitation_veto),
+        "eligibility": value.eligibility,
+        "eligibility_reason": value.eligibility_reason,
+        "attachment_observation_id": attachment["id"] if attachment else None,
+        "extraction_id": extraction["id"] if extraction else None,
+        "report_rules_fingerprint": value.report_rules_fingerprint,
+        "raw_metadata": metadata,
+    }
+    existing = _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity)
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    placeholders = ", ".join("?" for _ in range(19))
+    conn.execute(
+        f"""INSERT INTO evidence_candidate_observations
+            (candidate_observation_id, candidate_id, batch_id, authoritative_feed_title,
+             detail_title, published_at, language, report_kind, document_type,
+             fiscal_period, period_start, period_end, feed_report_identity,
+             invitation_veto, eligibility, eligibility_reason,
+             attachment_observation_id, extraction_id, report_rules_fingerprint, raw_metadata)
+            VALUES (?, {placeholders})""",  # noqa: S608
+        (identity, *expected.values()),
+    )
+    return _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity) or {}
+
+
+def append_relation_observation(conn: Any, value: RelationObservationInput) -> dict[str, Any]:
+    left = _row(
+        conn,
+        "evidence_candidate_observations",
+        "candidate_observation_id",
+        value.left_candidate_observation_id,
+    )
+    right = _row(
+        conn,
+        "evidence_candidate_observations",
+        "candidate_observation_id",
+        value.right_candidate_observation_id,
+    )
+    batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
+    if left is None or right is None or batch is None:
+        raise ValueError("relation observation references an unknown identity")
+    left_candidate = conn.execute(
+        "SELECT candidate_key, company_id FROM evidence_candidates WHERE id=?",
+        (left["candidate_id"],),
+    ).fetchone()
+    right_candidate = conn.execute(
+        "SELECT candidate_key, company_id FROM evidence_candidates WHERE id=?",
+        (right["candidate_id"],),
+    ).fetchone()
+    if left_candidate is None or right_candidate is None:
+        raise ValueError("relation candidate is missing")
+    if left_candidate[1] != right_candidate[1] or left_candidate[1] != batch["company_id"]:
+        raise ValueError("relation candidates and batch must belong to one company")
+    if left_candidate[0] == right_candidate[0]:
+        raise ValueError("relation requires two independent candidates")
+    if left_candidate[0] > right_candidate[0]:
+        left, right = right, left
+        left_candidate, right_candidate = right_candidate, left_candidate
+    relation_key = _stable_hash(
+        {
+            "canonical_left_candidate_key": left_candidate[0],
+            "canonical_right_candidate_key": right_candidate[0],
+            "relation_type": value.relation_type,
+        }
+    )
+    identity = _stable_hash(
+        {
+            "relation_key": relation_key,
+            "batch_id": value.batch_id,
+            "left_candidate_observation_id": left["candidate_observation_id"],
+            "right_candidate_observation_id": right["candidate_observation_id"],
+            "disposition": value.disposition,
+            "corroboration": value.corroboration,
+            "rules_fingerprint": value.rules_fingerprint,
+        }
+    )
+    expected = {
+        "relation_key": relation_key,
+        "batch_id": batch["id"],
+        "left_candidate_observation_id": left["id"],
+        "right_candidate_observation_id": right["id"],
+        "relation_type": value.relation_type,
+        "disposition": value.disposition,
+        "corroboration": _canonical_json(value.corroboration),
+        "rules_fingerprint": value.rules_fingerprint,
+    }
+    existing = _row(
+        conn,
+        "evidence_candidate_relation_observations",
+        "relation_observation_id",
+        identity,
+    )
+    if existing is not None:
+        return _require_same(existing, expected, identity=identity)
+    conn.execute(
+        """INSERT INTO evidence_candidate_relation_observations
+           (relation_observation_id, relation_key, batch_id,
+            left_candidate_observation_id, right_candidate_observation_id,
+            relation_type, disposition, corroboration, rules_fingerprint)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (identity, *expected.values()),
+    )
+    return (
+        _row(
+            conn,
+            "evidence_candidate_relation_observations",
+            "relation_observation_id",
+            identity,
+        )
+        or {}
+    )
+
+
+def current_candidate_observations(
+    conn: Any, *, company_id: int, as_of: str
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """WITH ranked AS (
+               SELECT o.*, c.candidate_key, c.release_source_url,
+                      b.batch_id AS stable_batch_id, b.effective_at,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY o.candidate_id
+                          ORDER BY b.effective_at DESC, b.batch_id DESC,
+                                   o.candidate_observation_id DESC
+                      ) AS precedence_rank
+               FROM evidence_candidate_observations o
+               JOIN evidence_candidates c ON c.id=o.candidate_id
+               JOIN evidence_observation_batches b ON b.id=o.batch_id
+               WHERE c.company_id=? AND substr(b.as_of, 1, 10) <= substr(?, 1, 10)
+           )
+           SELECT * FROM ranked WHERE precedence_rank=1 ORDER BY candidate_key""",
+        (company_id, as_of),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def current_relation_observations(
+    conn: Any, *, company_id: int, as_of: str
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """WITH ranked AS (
+               SELECT r.*, b.batch_id AS stable_batch_id, b.effective_at,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY r.relation_key
+                          ORDER BY b.effective_at DESC, b.batch_id DESC,
+                                   r.relation_observation_id DESC
+                      ) AS precedence_rank
+               FROM evidence_candidate_relation_observations r
+               JOIN evidence_observation_batches b ON b.id=r.batch_id
+               WHERE b.company_id=? AND substr(b.as_of, 1, 10) <= substr(?, 1, 10)
+           )
+           SELECT * FROM ranked WHERE precedence_rank=1 ORDER BY relation_key""",
+        (company_id, as_of),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def append_evidence_bundle(
+    conn: Any,
+    *,
+    batch: ObservationBatchInput,
+    candidate: CandidateInput,
+    observation: CandidateObservationInput,
+    artifact: ArtifactInput | None = None,
+    object_record: ArtifactObjectInput | None = None,
+    attachment: AttachmentObservationInput | None = None,
+    extraction: ExtractionInput | None = None,
+    relations: Iterable[RelationObservationInput] = (),
+) -> dict[str, Any]:
+    """Append one coherent bundle atomically; stable references remain caller-visible."""
+    conn.execute("SAVEPOINT append_evidence_bundle")
+    try:
+        result: dict[str, Any] = {
+            "batch": append_observation_batch(conn, batch),
+            "candidate": append_candidate(conn, candidate),
+        }
+        if artifact is not None:
+            result["artifact"] = append_artifact(conn, artifact)
+        if object_record is not None:
+            result["object_record"] = append_artifact_object(conn, object_record)
+        if attachment is not None:
+            result["attachment"] = append_attachment_observation(conn, attachment)
+        if extraction is not None:
+            result["extraction"] = append_extraction(conn, extraction)
+        result["observation"] = append_candidate_observation(conn, observation)
+        result["relations"] = [append_relation_observation(conn, item) for item in relations]
+    except Exception:
+        conn.execute("ROLLBACK TO append_evidence_bundle")
+        conn.execute("RELEASE append_evidence_bundle")
+        raise
+    conn.execute("RELEASE append_evidence_bundle")
+    return result
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _legacy_effective_at(raw: str | None, ordinal: int) -> str:
+    # The suffix gives deterministic strict precedence when legacy timestamps collide.
+    base = (raw or "1970-01-01T00:00:00").rstrip("Z")
+    return f"{base}.{ordinal:09d}Z"
+
+
+def _table_digest(conn: Any, table: str, columns: str) -> str:
+    rows = [
+        list(row) for row in conn.execute(f"SELECT {columns} FROM {table} ORDER BY id").fetchall()
+    ]
+    return _stable_hash(rows)
+
+
+def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
+    """Idempotently snapshot current legacy MFN rows without inventing retained bytes."""
+    documents = [
+        dict(row)
+        for row in conn.execute(
+            """SELECT * FROM research_documents
+               WHERE source_type='mfn' AND company_id IS NOT NULL
+               ORDER BY company_id, fetched_at, source_url, id"""
+        ).fetchall()
+    ]
+    audit: dict[str, Any] = {
+        "migration": "010_immutable_evidence_history.sql",
+        "legacy_documents": len(documents),
+        "candidates": 0,
+        "metadata_only_artifacts": 0,
+        "attachment_observations": 0,
+        "extraction_snapshots": 0,
+        "candidate_observations": 0,
+        "asserted_relations": 0,
+        "unresolved_relations": [],
+        "unbound_extractions": [],
+        "historical_packets": int(
+            conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0]
+        ),
+        "historical_manifests": int(
+            conn.execute("SELECT count(*) FROM evidence_selection_manifests").fetchone()[0]
+        ),
+        "packet_digest": _table_digest(conn, "evidence_packets", "id, packet_json"),
+        "manifest_digest": _table_digest(conn, "evidence_selection_manifests", "id, manifest_json"),
+    }
+    observation_by_document: dict[int, dict[str, Any]] = {}
+    batch_by_document: dict[int, str] = {}
+    with conn:
+        company_ordinals: dict[int, int] = {}
+        for document in documents:
+            company_id = int(document["company_id"])
+            ordinal = company_ordinals.get(company_id, 0) + 1
+            company_ordinals[company_id] = ordinal
+            metadata = _json_object(document.get("raw_metadata"))
+            snapshot = {
+                key: document.get(key)
+                for key in (
+                    "id",
+                    "company_id",
+                    "source_url",
+                    "title",
+                    "published_at",
+                    "fetched_at",
+                    "duplicate_of",
+                    "ingested_lang",
+                    "checksum",
+                    "report_rules_fingerprint",
+                    "raw_metadata",
+                )
+            }
+            source_fingerprint = _stable_hash({"legacy_current_row": snapshot})
+            rules = str(document.get("report_rules_fingerprint") or "legacy")
+            effective_at = _legacy_effective_at(document.get("fetched_at"), ordinal)
+            batch_value = ObservationBatchInput(
+                company_id=company_id,
+                as_of=str(
+                    document.get("published_at") or document.get("fetched_at") or "1970-01-01"
+                )[:10],
+                source_input_fingerprint=source_fingerprint,
+                report_rules_fingerprint=rules,
+                effective_at=effective_at,
+                first_recorded_at=effective_at,
+            )
+            batch = _append_legacy_observation_batch(conn, batch_value)
+            batch_by_document[int(document["id"])] = str(batch["batch_id"])
+            candidate = append_candidate(
+                conn,
+                CandidateInput(company_id, str(document["source_url"]), effective_at),
+            )
+            audit["candidates"] += 1
+            attachments = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM research_attachments WHERE document_id=? ORDER BY id",
+                    (document["id"],),
+                ).fetchall()
+            ]
+            current_attachment = None
+            for legacy_attachment in attachments:
+                digest = str(legacy_attachment.get("sha256") or "").lower()
+                if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                    continue
+                artifact = append_artifact(
+                    conn,
+                    ArtifactInput(
+                        digest,
+                        int(legacy_attachment["byte_size"]),
+                        str(legacy_attachment.get("content_type") or "application/pdf"),
+                        str(legacy_attachment.get("fetched_at") or effective_at),
+                    ),
+                )
+                audit["metadata_only_artifacts"] += 1
+                current_attachment = append_attachment_observation(
+                    conn,
+                    AttachmentObservationInput(
+                        candidate_key=str(candidate["candidate_key"]),
+                        artifact_id=str(artifact["artifact_id"]),
+                        batch_id=str(batch["batch_id"]),
+                        attachment_source_url=str(legacy_attachment["source_url"]),
+                        content_type=str(
+                            legacy_attachment.get("content_type") or "application/pdf"
+                        ),
+                        http_status=legacy_attachment.get("http_status"),
+                        feed_attachment_attested=bool(legacy_attachment.get("magic_valid")),
+                        raw_metadata={
+                            "legacy_import": True,
+                            "legacy_attachment_id": legacy_attachment["id"],
+                            "legacy_raw_metadata": _json_object(
+                                legacy_attachment.get("raw_metadata")
+                            ),
+                        },
+                    ),
+                )
+                audit["attachment_observations"] += 1
+            extraction_record = None
+            legacy_extraction = conn.execute(
+                "SELECT * FROM document_extractions WHERE document_id=?", (document["id"],)
+            ).fetchone()
+            if legacy_extraction is not None and current_attachment is not None:
+                legacy_extraction = dict(legacy_extraction)
+                artifact_row = conn.execute(
+                    "SELECT artifact_id FROM evidence_artifacts WHERE id=?",
+                    (current_attachment["artifact_id"],),
+                ).fetchone()
+                pages = tuple(
+                    ExtractionPage(
+                        page_number=int(page["page_number"]),
+                        anchor=str(page["anchor"]),
+                        text=str(page["text"]),
+                        text_checksum=str(page["text_checksum"]),
+                    )
+                    for page in conn.execute(
+                        "SELECT * FROM document_pages WHERE extraction_id=? ORDER BY page_number",
+                        (legacy_extraction["id"],),
+                    ).fetchall()
+                )
+                limitations = list(json.loads(legacy_extraction.get("limitations") or "[]"))
+                if "legacy_source_without_retained_bytes" not in limitations:
+                    limitations.append("legacy_source_without_retained_bytes")
+                extraction_record = append_extraction(
+                    conn,
+                    ExtractionInput(
+                        artifact_id=str(artifact_row[0]),
+                        extractor=str(legacy_extraction["extractor"]),
+                        extractor_version="legacy-unknown",
+                        config_fingerprint="legacy-unknown",
+                        text_checksum=str(legacy_extraction.get("text_checksum") or ""),
+                        page_count=int(legacy_extraction["page_count"]),
+                        pages_included=legacy_extraction.get("pages_included"),
+                        page_truncated=bool(legacy_extraction["page_truncated"]),
+                        scanned=bool(legacy_extraction["scanned"]),
+                        limitations=limitations,
+                        extracted_at=str(legacy_extraction["extracted_at"]),
+                        pages=pages,
+                    ),
+                )
+                audit["extraction_snapshots"] += 1
+            elif legacy_extraction is not None:
+                audit["unbound_extractions"].append(int(document["id"]))
+            observation = append_candidate_observation(
+                conn,
+                CandidateObservationInput(
+                    candidate_key=str(candidate["candidate_key"]),
+                    batch_id=str(batch["batch_id"]),
+                    authoritative_feed_title=document.get("title"),
+                    detail_title=metadata.get("detail_title"),
+                    published_at=document.get("published_at"),
+                    language=document.get("ingested_lang"),
+                    report_kind=metadata.get("report_kind"),
+                    document_type=metadata.get("document_type"),
+                    fiscal_period=metadata.get("fiscal_period"),
+                    period_start=metadata.get("period_start"),
+                    period_end=metadata.get("period_end"),
+                    feed_report_identity=metadata.get("provider_event_id")
+                    or metadata.get("mfn_event_id"),
+                    invitation_veto=bool(metadata.get("invitation_veto")),
+                    eligibility="incomplete",
+                    eligibility_reason="legacy_source_without_retained_bytes",
+                    attachment_observation_id=(
+                        str(current_attachment["attachment_observation_id"])
+                        if current_attachment is not None
+                        else None
+                    ),
+                    extraction_id=(
+                        str(extraction_record["extraction_id"])
+                        if extraction_record is not None
+                        else None
+                    ),
+                    report_rules_fingerprint=rules,
+                    raw_metadata={"legacy_import": True, "legacy_metadata": metadata},
+                ),
+            )
+            observation_by_document[int(document["id"])] = observation
+            audit["candidate_observations"] += 1
+
+        by_id = {int(document["id"]): document for document in documents}
+        for child_id, child_observation in sorted(observation_by_document.items()):
+            child = by_id[child_id]
+            parent_id = child.get("duplicate_of")
+            if parent_id is None or int(parent_id) not in observation_by_document:
+                continue
+            parent = by_id[int(parent_id)]
+            child_metadata = _json_object(child.get("raw_metadata"))
+            parent_metadata = _json_object(parent.get("raw_metadata"))
+            relationship = str(child_metadata.get("relationship") or "").upper()
+            group = child_metadata.get("bilingual_group_id")
+            strong = (
+                relationship in {"TRANSLATION", "REVISION"}
+                and bool(group)
+                and group == parent_metadata.get("bilingual_group_id")
+                and bool(child.get("checksum") or child_metadata.get("pdf_checksum"))
+                and bool(parent.get("checksum") or parent_metadata.get("pdf_checksum"))
+            )
+            if not strong:
+                audit["unresolved_relations"].append(
+                    {"document_id": child_id, "duplicate_of": int(parent_id)}
+                )
+                continue
+            append_relation_observation(
+                conn,
+                RelationObservationInput(
+                    batch_id=batch_by_document[child_id],
+                    left_candidate_observation_id=str(
+                        child_observation["candidate_observation_id"]
+                    ),
+                    right_candidate_observation_id=str(
+                        observation_by_document[int(parent_id)]["candidate_observation_id"]
+                    ),
+                    relation_type=relationship,
+                    disposition="asserted",
+                    corroboration={
+                        "legacy_import": True,
+                        "bilingual_group_id": group,
+                        "left_checksum": child.get("checksum")
+                        or child_metadata.get("pdf_checksum"),
+                        "right_checksum": parent.get("checksum")
+                        or parent_metadata.get("pdf_checksum"),
+                    },
+                    rules_fingerprint=str(child.get("report_rules_fingerprint") or "legacy"),
+                ),
+            )
+            audit["asserted_relations"] += 1
+    audit["unresolved_relations"].sort(key=lambda item: (item["document_id"], item["duplicate_of"]))
+    audit["unbound_extractions"].sort()
+    return audit
+
+
+def write_legacy_backfill_audit(audit: Mapping[str, Any], path: Path | str) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(_canonical_json(dict(audit)) + "\n", encoding="utf-8")
