@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -160,7 +162,17 @@ def test_put_makes_verified_concurrent_object_durable(
     store = LocalPdfArtifactStore(tmp_path)
     synced_files: list[Path] = []
     synced_directories: list[Path] = []
-    monkeypatch.setattr(store, "_fsync_file", synced_files.append)
+    target_stat = path.stat()
+
+    def record_fsync(file_descriptor: int) -> None:
+        descriptor_stat = os.fstat(file_descriptor)
+        if stat.S_ISREG(descriptor_stat.st_mode) and (
+            descriptor_stat.st_dev,
+            descriptor_stat.st_ino,
+        ) == (target_stat.st_dev, target_stat.st_ino):
+            synced_files.append(path)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
     monkeypatch.setattr(store, "_fsync_directory", synced_directories.append)
 
     artifact = store.put_pdf(io.BytesIO(PDF_A))
@@ -190,13 +202,19 @@ def test_put_propagates_hierarchy_fsync_failure(
 def test_put_propagates_reused_file_fsync_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seed_object(tmp_path, PDF_A)
+    path = seed_object(tmp_path, PDF_A)
     store = LocalPdfArtifactStore(tmp_path)
+    target_stat = path.stat()
 
-    def fail_fsync(_path: Path) -> None:
-        raise OSError("file fsync failed")
+    def fail_fsync(file_descriptor: int) -> None:
+        descriptor_stat = os.fstat(file_descriptor)
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) == (
+            target_stat.st_dev,
+            target_stat.st_ino,
+        ):
+            raise OSError("file fsync failed")
 
-    monkeypatch.setattr(store, "_fsync_file", fail_fsync)
+    monkeypatch.setattr(os, "fsync", fail_fsync)
 
     with pytest.raises(OSError, match="file fsync failed"):
         store.put_pdf(io.BytesIO(PDF_A))
@@ -245,6 +263,38 @@ def test_existing_corrupt_destination_fails_without_overwrite(tmp_path: Path) ->
 
     assert error.value.code == "artifact_checksum_mismatch"
     assert path.read_bytes() == PDF_B
+
+
+@pytest.mark.parametrize("object_kind", ["symlink", "directory"])
+def test_read_and_put_reject_non_regular_object_paths(
+    tmp_path: Path, object_kind: str
+) -> None:
+    root = tmp_path / "objects"
+    store = LocalPdfArtifactStore(root)
+    digest = hashlib.sha256(PDF_A).hexdigest()
+    path = object_path(root, PDF_A)
+    path.parent.mkdir(parents=True)
+
+    if object_kind == "symlink":
+        external = tmp_path / "external.pdf"
+        external.write_bytes(PDF_A)
+        path.symlink_to(external)
+    else:
+        path.mkdir()
+
+    with pytest.raises(ArtifactChecksumMismatchError) as read_error:
+        store.read_pdf(digest, expected_size=len(PDF_A))
+    assert read_error.value.code == "artifact_checksum_mismatch"
+
+    with pytest.raises(ArtifactChecksumMismatchError) as put_error:
+        store.put_pdf(io.BytesIO(PDF_A))
+    assert put_error.value.code == "artifact_checksum_mismatch"
+
+    if object_kind == "symlink":
+        assert path.is_symlink()
+        assert external.read_bytes() == PDF_A
+    else:
+        assert path.is_dir()
 
 
 def test_read_reports_missing_and_corrupt_objects_explicitly(tmp_path: Path) -> None:

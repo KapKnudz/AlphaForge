@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,8 +101,13 @@ class LocalPdfArtifactStore:
             try:
                 os.link(temporary_path, destination)
             except FileExistsError:
-                self._verify_file(destination, sha256, byte_size, return_bytes=False)
-                self._fsync_file(destination)
+                self._verify_file(
+                    destination,
+                    sha256,
+                    byte_size,
+                    return_bytes=False,
+                    fsync=True,
+                )
             self._fsync_directory(destination.parent)
 
             return StoredPdfArtifact(
@@ -143,13 +150,14 @@ class LocalPdfArtifactStore:
         expected_size: int,
         *,
         return_bytes: bool,
+        fsync: bool = False,
     ) -> bytes | None:
         digest = hashlib.sha256()
         byte_size = 0
         prefix = bytearray()
         content = bytearray() if return_bytes else None
 
-        with path.open("rb") as artifact_file:
+        with self._open_regular_file(path) as artifact_file:
             while chunk := artifact_file.read(self.chunk_size):
                 byte_size += len(chunk)
                 if byte_size > expected_size:
@@ -162,6 +170,8 @@ class LocalPdfArtifactStore:
                 digest.update(chunk)
                 if content is not None:
                     content.extend(chunk)
+            if fsync:
+                os.fsync(artifact_file.fileno())
 
         actual_sha256 = digest.hexdigest()
         if byte_size != expected_size or actual_sha256 != expected_sha256:
@@ -174,6 +184,39 @@ class LocalPdfArtifactStore:
                 "invalid_pdf_magic", "retained object does not start with PDF magic bytes"
             )
         return bytes(content) if content is not None else None
+
+    @staticmethod
+    def _open_regular_file(path: Path) -> BinaryIO:
+        try:
+            path_mode = path.lstat().st_mode
+        except FileNotFoundError:
+            raise
+        if not stat.S_ISREG(path_mode):
+            raise ArtifactChecksumMismatchError(
+                "artifact_checksum_mismatch",
+                "retained object path is not a regular file",
+            )
+
+        try:
+            file_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ArtifactChecksumMismatchError(
+                    "artifact_checksum_mismatch",
+                    "retained object path is not a regular file",
+                ) from exc
+            raise
+
+        try:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise ArtifactChecksumMismatchError(
+                    "artifact_checksum_mismatch",
+                    "retained object path is not a regular file",
+                )
+            return os.fdopen(file_fd, "rb")
+        except BaseException:
+            os.close(file_fd)
+            raise
 
     def _object_path(self, sha256: str) -> Path:
         self._validate_sha256(sha256)
@@ -212,14 +255,6 @@ class LocalPdfArtifactStore:
                 self._fsync_directory(current.parent)
                 break
             current = current.parent
-
-    @staticmethod
-    def _fsync_file(path: Path) -> None:
-        file_fd = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(file_fd)
-        finally:
-            os.close(file_fd)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
