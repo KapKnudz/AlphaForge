@@ -112,6 +112,69 @@ def _pdf_response(content):
     )
 
 
+def test_narrative_report_feed_builds_complete_packet_and_replays_stably():
+    conn = _connection()
+    company_id = _mapped_company(conn, ins_id=8424, slug="all/a/inwido")
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    payload["items"] = payload["items"][4:6]
+    pages = {}
+    for item in payload["items"]:
+        attachment = item["content"]["attachments"][0]["url"]
+        pages[item["url"]] = f"""
+        <html><head>
+          <meta property="article:published_time" content="2026-07-15T05:45:00Z">
+          <link rel="canonical" href="{item["url"]}">
+        </head><body><h1>{item["content"]["title"]}</h1>
+          <div class="release-body"><p>January-June 2026. Net sales 100.</p>
+            <a class="mfn-primary" href="{attachment}">Q2 report</a>
+            <a class="mfn-primary" href="{attachment}">Q2 report</a>
+          </div>
+        </body></html>
+        """
+
+    def scraper_transport(method, url, **kwargs):
+        if "?offset=" in url:
+            text = json.dumps(payload)
+            return SimpleNamespace(
+                status_code=200,
+                text=text,
+                content=text.encode(),
+                headers={"Content-Type": "application/json"},
+            )
+        return SimpleNamespace(status_code=200, text=pages[url])
+
+    scraper = MfnScraper(base_url=BASE, max_articles=48)
+    with (
+        patch(
+            "alphaforge.providers.mfn.scraper.request_with_retry",
+            side_effect=scraper_transport,
+        ),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+        patch(
+            "alphaforge.evidence.flow.request_with_retry",
+            return_value=_pdf_response(_pdf()),
+        ),
+    ):
+        first = OneCompanyEvidenceFlow(conn, scraper=scraper).run(company_id, as_of="2026-07-20")
+        second = OneCompanyEvidenceFlow(conn, scraper=scraper).run(company_id, as_of="2026-07-20")
+
+    assert first.status == "complete"
+    assert second.status == "complete"
+    assert first.packet is not None and second.packet is not None
+    assert first.packet["packet_hash"] == second.packet["packet_hash"]
+    assert first.completeness == second.completeness
+    assert first.completeness["quarterly"]["expected"] >= 1
+    assert (
+        first.completeness["quarterly"]["expected"] == first.completeness["quarterly"]["retained"]
+    )
+    assert first.packet["sources"]
+    assert {source["title"] for source in first.packet["sources"]} <= {
+        item["content"]["title"] for item in payload["items"]
+    }
+
+
 def test_cis_bilingual_page_pair_flows_through_dedupe_without_group_id():
     """The bilingual unit is the sv/en page pair, never feed group_id pairing."""
     seeds = [

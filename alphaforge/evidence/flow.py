@@ -1444,7 +1444,10 @@ class OneCompanyEvidenceFlow:
         hard_blocks = 0
         for article in details:
             title = article.get("title") or ""
-            if not is_report(title):
+            corroborated_feed_report = bool(article.get("feed_report_identity")) and article.get(
+                "report_kind"
+            ) in {"annual", "quarterly"}
+            if not (is_report(title) or corroborated_feed_report):
                 result.skipped["non_report_release"] = (
                     result.skipped.get("non_report_release", 0) + 1
                 )

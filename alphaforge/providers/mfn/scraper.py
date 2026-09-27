@@ -20,7 +20,11 @@ from alphaforge.evidence.mfn_taxonomy import (
     ATTACHMENT_TIERS,  # noqa: F401 -- intentional re-export (see note below)
     CIS_RELEASE_PATH_RE,
     NON_REPORT_ATTACHMENT_TERMS,
+    REPORT_ANNUAL_TAG,
     REPORT_ATTACHMENT_TERMS,
+    REPORT_FEED_TAG,
+    REPORT_INTERIM_TAG_PREFIX,
+    REPORT_PDF_ATTACHMENT_TAG,
     document_type,
     is_invitation_or_presentation,
     is_report,
@@ -369,7 +373,7 @@ def _select_attachment(
     return None, "unresolved"
 
 
-def _parse_html(html: str) -> dict[str, Any]:
+def _parse_html(html: str, *, corroborated_report: bool = False) -> dict[str, Any]:
     parser = _MfnHtmlParser()
     parser.feed(html)
     pdf_links = [
@@ -379,7 +383,7 @@ def _parse_html(html: str) -> dict[str, Any]:
         and ".pdf" in href.lower()
     ]
     title = " ".join(" ".join(parser.h1_parts).split())
-    page_is_report = bool(title) and is_report(title)
+    page_is_report = bool(title) and (is_report(title) or corroborated_report)
     page_is_invitation = bool(title) and is_invitation_or_presentation(title)
     if page_is_invitation:
         storage_url, tier = None, "none"
@@ -463,6 +467,37 @@ def _issuer_token(mfn_slug: str) -> str:
     return mfn_slug.strip().strip("/").split("/")[-1].lower()
 
 
+def _feed_report_identity(entry: dict[str, Any]) -> tuple[str, str | None] | None:
+    """Return report identity only when independent MFN feed signals agree."""
+    properties = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+    tags = {str(tag).lower() for tag in properties.get("tags", []) if isinstance(tag, str)}
+    content = entry.get("content") if isinstance(entry.get("content"), dict) else {}
+    attachments = content.get("attachments") if isinstance(content.get("attachments"), list) else []
+    has_report_pdf = any(
+        isinstance(attachment, dict)
+        and str(attachment.get("content_type") or "").lower() == "application/pdf"
+        and REPORT_PDF_ATTACHMENT_TAG
+        in {str(tag).lower() for tag in attachment.get("tags", []) if isinstance(tag, str)}
+        for attachment in attachments
+    )
+    if REPORT_FEED_TAG not in tags or not has_report_pdf:
+        return None
+    if REPORT_ANNUAL_TAG in tags and not any(
+        tag.startswith(REPORT_INTERIM_TAG_PREFIX) for tag in tags
+    ):
+        return "annual", "ANNUAL_REPORT"
+    quarters = sorted(
+        tag.removeprefix(REPORT_INTERIM_TAG_PREFIX)
+        for tag in tags
+        if tag.startswith(REPORT_INTERIM_TAG_PREFIX)
+        and tag.removeprefix(REPORT_INTERIM_TAG_PREFIX) in {"1", "2", "3", "4"}
+    )
+    if len(quarters) != 1:
+        return None
+    quarter = quarters[0]
+    return "quarterly", f"INTERIM_Q{quarter}" if quarter != "4" else "YEAR_END_REPORT"
+
+
 def _report_identity_seed(article: dict[str, Any]) -> dict[str, Any]:
     title = article.get("title") or ""
     return {
@@ -526,7 +561,8 @@ class MfnScraper:
             if not _is_mfn_release_url(absolute, self.base_url):
                 self._count_discovery("non_release_url")
                 continue
-            if reports_only and not is_report(title):
+            feed_identity = _feed_report_identity(entry)
+            if reports_only and not (is_report(title) or feed_identity):
                 self._count_discovery("non_report_title")
                 continue
             seen.add(absolute)
@@ -536,6 +572,9 @@ class MfnScraper:
                 "title": " ".join(title.split()),
                 "published_at": content.get("publish_date") or entry.get("publish_date"),
             }
+            if feed_identity is not None:
+                article["report_kind"], article["document_type"] = feed_identity
+                article["feed_report_identity"] = "mfn-report-tag+archive-report-pdf"
             # Preserve feed-level language when available
             props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
             feed_lang = str(props.get("lang") or "").lower()
@@ -770,9 +809,10 @@ class MfnScraper:
                 raise MfnAcquisitionError(
                     "mfn_detail_http_status", f"MFN detail request returned HTTP {resp.status_code}"
                 )
-            parsed = _parse_html(resp.text)
+            feed_report_identity = bool(seed.get("feed_report_identity"))
+            parsed = _parse_html(resp.text, corroborated_report=feed_report_identity)
             title = parsed["title"] or ""
-            if reports_only and not is_report(title):
+            if reports_only and not (is_report(title) or feed_report_identity):
                 self._count_detail("non_report_title")
                 continue
             if is_invitation_or_presentation(title):
@@ -797,6 +837,9 @@ class MfnScraper:
                 # evidence lane.
                 "published_at": parsed["published_at"],
                 "lang": seed.get("lang") or _language_hint(title),
+                "report_kind": seed.get("report_kind"),
+                "document_type": seed.get("document_type"),
+                "feed_report_identity": seed.get("feed_report_identity"),
             }
             article.update(_report_identity_seed(article))
             out.append(article)

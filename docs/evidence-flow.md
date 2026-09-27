@@ -19,7 +19,11 @@ The one-company lane is explicit:
 alphaforge evidence --ticker TICKER --as-of YYYY-MM-DD --diagnostic
 ```
 
-It discovers MFN quarterly/interim, year-end, and annual releases; accepts only
+It discovers MFN quarterly/interim, year-end, and annual releases. A narrative
+headline is admitted only when MFN's JSON feed independently supplies both the
+`sub:report` classification (with one annual or interim-quarter subtype) and an
+`archive:report:pdf` attachment marker; either signal alone remains non-report.
+It accepts only
 authoritative detail-page publication timestamps at or before both the requested
 cutoff and the current wall-clock date; downloads unseen PDF attachments with
 bounded retries and byte/page limits; checks content type and `%PDF-` magic
@@ -244,7 +248,7 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
 their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v3 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v4 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including

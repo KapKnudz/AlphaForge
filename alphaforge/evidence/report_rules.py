@@ -14,13 +14,17 @@ from alphaforge.evidence.mfn_taxonomy import (
     INVITATION_MARKERS,
     NON_REPORT_ATTACHMENT_TERMS,
     RECOGNIZED_ATTACHMENT_TIERS,
+    REPORT_ANNUAL_TAG,
     REPORT_ATTACHMENT_TERMS,
+    REPORT_FEED_TAG,
+    REPORT_INTERIM_TAG_PREFIX,
+    REPORT_PDF_ATTACHMENT_TAG,
     REPORT_TITLE_TERMS,
 )
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 2
+REPORT_RULES_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,10 @@ def report_rules_inputs() -> dict[str, Any]:
         "version": REPORT_RULES_VERSION,
         "taxonomy": {
             "report_title_terms": list(REPORT_TITLE_TERMS),
+            "feed_report_tag": REPORT_FEED_TAG,
+            "feed_report_pdf_attachment_tag": REPORT_PDF_ATTACHMENT_TAG,
+            "feed_interim_tag_prefix": REPORT_INTERIM_TAG_PREFIX,
+            "feed_annual_tag": REPORT_ANNUAL_TAG,
             "invitation_markers": list(INVITATION_MARKERS),
             "attachment_report_terms": list(REPORT_ATTACHMENT_TERMS),
             "attachment_non_report_terms": list(NON_REPORT_ATTACHMENT_TERMS),

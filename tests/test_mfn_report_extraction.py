@@ -955,6 +955,90 @@ def test_cis_release_url_requires_stable_shape():
     assert not _is_mfn_release_url("https://mfn.test/about/annual-report", base)
 
 
+def test_json_discovery_accepts_corroborated_narrative_inwido_reports_only():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+
+    articles = scraper._parse_json_feed_items(payload)
+
+    assert len(articles) == 9
+    narrative = [article for article in articles if article.get("feed_report_identity")]
+    assert len(narrative) == 8
+    assert [article["document_type"] for article in narrative[:6]] == [
+        "YEAR_END_REPORT",
+        "YEAR_END_REPORT",
+        "INTERIM_Q1",
+        "INTERIM_Q1",
+        "INTERIM_Q2",
+        "INTERIM_Q2",
+    ]
+    assert {article["report_kind"] for article in narrative[:6]} == {"quarterly"}
+    assert narrative[6]["document_type"] == "INTERIM_Q3"
+    assert narrative[7]["document_type"] == "ANNUAL_REPORT"
+    assert scraper.drain_discovery_skips() == {"non_report_title": 2}
+
+
+def test_corroborated_narrative_identity_authorizes_detail_attachment_selection():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+    narrative = scraper._parse_json_feed_items(payload)[:6]
+
+    def transport(method, url, **kwargs):
+        seed = next(article for article in narrative if article["url"] == url)
+        pdf_url = next(
+            item["content"]["attachments"][0]["url"]
+            for item in payload["items"]
+            if item["url"] == url
+        )
+        html = f"""
+        <html><head>
+          <meta property="article:published_time" content="{seed["published_at"]}">
+          <link rel="canonical" href="{url}">
+        </head><body><h1>{seed["title"]}</h1><div class="release-body">
+          <a class="mfn-primary" href="{pdf_url}">Report PDF</a>
+          <a class="mfn-primary" href="{pdf_url}">Report PDF</a>
+        </div></body></html>
+        """
+        return SimpleNamespace(status_code=200, text=html)
+
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", side_effect=transport),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        details = scraper.scrape_details(narrative)
+
+    assert len(details) == 6
+    assert all(article["attachment_tier"] == "mfn-primary" for article in details)
+    assert [article["document_type"] for article in details] == [
+        "YEAR_END_REPORT",
+        "YEAR_END_REPORT",
+        "INTERIM_Q1",
+        "INTERIM_Q1",
+        "INTERIM_Q2",
+        "INTERIM_Q2",
+    ]
+    # Re-parsing the same immutable feed yields the same candidate identities,
+    # which keeps the unchanged-run feed fingerprint and replay inputs stable.
+    replay = scraper._parse_json_feed_items(payload)
+    assert replay == scraper._parse_json_feed_items(payload)
+
+
+def test_corroborated_narrative_report_keeps_distinct_attachments_ambiguous():
+    html = """
+    <html><body><h1>Strong progress despite a difficult market</h1>
+      <a class="mfn-primary" href="https://storage.mfn.se/acme/q2.pdf">Q2 report</a>
+      <a class="mfn-primary" href="https://storage.mfn.se/acme/q2-appendix.pdf">Appendix</a>
+    </body></html>
+    """
+    parsed = _parse_html(html, corroborated_report=True)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
 def test_discovery_accepts_cis_shapes_with_counted_drops():
     payload = {
         "items": [
