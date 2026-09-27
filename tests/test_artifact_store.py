@@ -64,6 +64,44 @@ def test_put_durably_creates_each_directory_and_parent(
     ]
 
 
+def test_put_syncs_directories_created_by_concurrent_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = LocalPdfArtifactStore(tmp_path)
+    sha256_directory = tmp_path / "sha256"
+    staging_directory = sha256_directory / ".tmp"
+    digest = hashlib.sha256(PDF_A).hexdigest()
+    prefix_directory = sha256_directory / digest[:2]
+    race_directories = {staging_directory, prefix_directory}
+    raced: set[Path] = set()
+    real_mkdir = Path.mkdir
+
+    def mkdir_with_race(path: Path, *args: object, **kwargs: object) -> None:
+        if path in race_directories and path not in raced:
+            raced.add(path)
+            real_mkdir(path, *args, **kwargs)
+            raise FileExistsError
+        real_mkdir(path, *args, **kwargs)
+
+    synced: list[Path] = []
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_race)
+    monkeypatch.setattr(store, "_fsync_directory", synced.append)
+
+    artifact = store.put_pdf(io.BytesIO(PDF_A))
+
+    assert artifact.sha256 == digest
+    assert raced == race_directories
+    assert synced == [
+        sha256_directory,
+        tmp_path,
+        staging_directory,
+        sha256_directory,
+        prefix_directory,
+        sha256_directory,
+        prefix_directory,
+    ]
+
+
 def test_repeated_put_reuses_verified_object_without_overwrite(tmp_path: Path) -> None:
     store = LocalPdfArtifactStore(tmp_path)
     first = store.put_pdf(io.BytesIO(PDF_A))

@@ -203,9 +203,8 @@ class LocalPdfArtifactStore:
             except FileExistsError:
                 if not directory.is_dir():
                     raise
-            else:
-                self._fsync_directory(directory)
-                self._fsync_directory(directory.parent)
+            self._fsync_directory(directory)
+            self._fsync_directory(directory.parent)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
