@@ -192,7 +192,7 @@ links, and packet and manifest digests for operator review.
 
 Selection is centralized in a pure, side-effect-free manifest
 (`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
-evidence-selection-manifest-v1`). Immutable observation batches use canonical
+evidence-selection-manifest-v2`). Immutable observation batches use canonical
 `YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; live candidate and
 relation observations may reuse older facts but cannot reference a later batch.
 Deterministic legacy backfill may attach a historical observation to an unchanged
@@ -248,7 +248,7 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
 their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v4 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v5 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including
