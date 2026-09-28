@@ -743,22 +743,53 @@ def test_v2_relation_persists_derived_fiscal_period(tmp_path):
         release_language = kwargs["release_lang"]
         return release_language, f"pdf_text:{release_language}"
 
+    store = LocalPdfArtifactStore(tmp_path / "objects")
+    requested = []
+
+    def tracked_request(method, url, **kwargs):
+        requested.append(url)
+        return request(method, url, **kwargs)
+
     with (
-        patch("alphaforge.evidence.flow.request_with_retry", side_effect=request),
+        patch("alphaforge.evidence.flow.request_with_retry", side_effect=tracked_request),
         patch(
             "alphaforge.evidence.flow.ResearchDocumentIngestionService.extract_pdf_pages",
             return_value=extracted,
         ),
         patch("alphaforge.evidence.flow.resolve_document_language", side_effect=language),
     ):
+        first = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper([articles[0]]),
+            artifact_store=store,
+            now=lambda: datetime(2026, 9, 10, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+        assert first.status == "complete"
+
+        conn.execute("DROP TRIGGER evidence_candidate_observations_no_update")
+        conn.execute("UPDATE evidence_candidate_observations SET fiscal_period=NULL")
+        conn.executescript(
+            """CREATE TRIGGER evidence_candidate_observations_no_update
+               BEFORE UPDATE ON evidence_candidate_observations
+               BEGIN
+                   SELECT RAISE(ABORT, 'evidence_candidate_observations is append-only');
+               END;"""
+        )
+        conn.execute(
+            "UPDATE research_documents SET raw_metadata=json_remove(raw_metadata, '$.fiscal_period')"
+        )
+        conn.commit()
+        requested.clear()
+
         result = OneCompanyEvidenceFlow(
             conn,
             scraper=_FakeScraper(articles),
-            artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+            artifact_store=store,
             now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
         ).run(company_id, as_of="2026-09-20")
 
     assert result.status == "complete"
+    assert set(requested) == {article["attachment_url"] for article in articles}
     assert len(result.packet["sources"]) == 1
     assert result.packet["sources"][0]["language"] == "en"
     assert (
@@ -826,6 +857,68 @@ def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
     assert replay.completeness == {
         "annual": {"expected": 1, "retained": 0},
         "quarterly": {"expected": 1, "retained": 1},
+    }
+
+
+def test_v2_intentional_rejections_do_not_block_complete_evidence(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    valid = {
+        "source_url": "https://mfn.test/a/flow/q2-valid",
+        "title": "Flow AB Interim Report Q2 2026",
+        "published_at": "2026-07-15T08:00:00Z",
+        "report_kind": "quarterly",
+        "attachment_url": "https://storage.mfn.test/flow/q2-valid.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    rejected = [
+        {
+            "source_url": "https://mfn.test/a/flow/general-update",
+            "title": "Flow AB general update",
+            "published_at": "2026-07-16T08:00:00Z",
+            "report_kind": "quarterly",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/invitation",
+            "title": "Invitation to presentation of Flow AB Q2 report",
+            "published_at": "2026-07-17T08:00:00Z",
+            "report_kind": "quarterly",
+        },
+    ]
+
+    class _BackstopScraper(_FakeScraper):
+        def discover_feed(self, mfn_slug, *, reports_only=True):
+            return [
+                {
+                    "url": article["source_url"],
+                    "title": "Flow AB Interim Report Q2 2026",
+                }
+                for article in self.articles
+            ]
+
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_BackstopScraper([valid, *rejected]),
+            artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "complete"
+    assert [source["source_url"] for source in result.packet["sources"]] == [
+        valid["source_url"]
+    ]
+    assert result.completeness == {"quarterly": {"expected": 1, "retained": 1}}
+    observations = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
+    assert {row["release_source_url"]: row["eligibility"] for row in observations} == {
+        valid["source_url"]: "eligible",
+        rejected[0]["source_url"]: "rejected",
+        rejected[1]["source_url"]: "rejected",
     }
 
 

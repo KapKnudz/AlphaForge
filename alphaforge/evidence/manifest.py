@@ -239,8 +239,16 @@ def select_evidence_manifest(
     group_records = [
         record
         for record in candidates
-        if _in_window(record, as_of=as_of, window=window)
-        or (record.get("eligibility") == "incomplete" and not record.get("published_at"))
+        if (
+            _in_window(record, as_of=as_of, window=window)
+            or (record.get("eligibility") == "incomplete" and not record.get("published_at"))
+        )
+        and record.get("eligibility") != "revoked"
+        and not (
+            record.get("eligibility") == "rejected"
+            and record.get("rejection_reason")
+            in {"invitation_veto", "non_report_detail_title", "non_report_release"}
+        )
     ]
     selected_packet_rows = _packet_rows(
         [record for record in packet_inputs if _in_window(record, as_of=as_of, window=window)]

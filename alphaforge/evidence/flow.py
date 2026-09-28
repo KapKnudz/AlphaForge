@@ -1517,6 +1517,12 @@ class OneCompanyEvidenceFlow:
                             metadata = loaded_metadata
                     except (TypeError, ValueError):
                         metadata = {}
+                    required_fiscal_period = (
+                        metadata.get("fiscal_period")
+                        or metadata.get("report_period")
+                        or _fiscal_period({**complete, **metadata})
+                        or None
+                    )
                     disposition = feed_dispositions.get(str(entry_url))
                     disposition_matches = disposition is None or (
                         str(complete.get("title") or "") == str(disposition.get("title") or "")
@@ -1532,7 +1538,7 @@ class OneCompanyEvidenceFlow:
                         immutable_current = (
                             self.conn.execute(
                                 """SELECT 1 FROM (
-                                       SELECT o.eligibility, o.extraction_id,
+                                       SELECT o.eligibility, o.extraction_id, o.fiscal_period,
                                               ao.artifact_id,
                                               ROW_NUMBER() OVER (
                                                   ORDER BY b.as_of DESC,
@@ -1549,12 +1555,19 @@ class OneCompanyEvidenceFlow:
                                    ) current
                                    WHERE precedence_rank=1 AND eligibility='eligible'
                                      AND extraction_id IS NOT NULL
+                                     AND (? IS NULL OR fiscal_period=?)
                                      AND EXISTS (
                                          SELECT 1 FROM evidence_artifact_objects obj
                                          WHERE obj.artifact_id=current.artifact_id
                                            AND obj.acquisition_max_pdf_bytes IS NOT NULL
                                      )""",
-                                (company_id, str(entry_url), as_of[:10]),
+                                (
+                                    company_id,
+                                    str(entry_url),
+                                    as_of[:10],
+                                    required_fiscal_period,
+                                    required_fiscal_period,
+                                ),
                             ).fetchone()
                             is not None
                         )
