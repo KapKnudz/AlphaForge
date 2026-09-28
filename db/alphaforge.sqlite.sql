@@ -553,7 +553,12 @@ CREATE TABLE IF NOT EXISTS evidence_artifact_objects (
     verified_sha256 TEXT NOT NULL,
     verified_size INTEGER NOT NULL CHECK (verified_size >= 0),
     stored_at TEXT NOT NULL,
-    CHECK (verified_sha256 <> '')
+    acquisition_max_pdf_bytes INTEGER,
+    CHECK (verified_sha256 <> ''),
+    CHECK (
+        acquisition_max_pdf_bytes IS NULL
+        OR acquisition_max_pdf_bytes >= verified_size
+    )
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_artifact_objects_artifact
     ON evidence_artifact_objects(artifact_id, object_record_id);

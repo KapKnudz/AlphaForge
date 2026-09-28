@@ -123,7 +123,7 @@ def test_migration_adds_exact_nine_tables_and_append_only_guards(tmp_path):
         )
     }
     assert NEW_TABLES <= tables
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 11
     connection.execute("INSERT INTO companies (borsdata_id, name) VALUES (1, 'Acme')")
     batch = append_observation_batch(connection, _batch(1, "one", "2026-09-24T10:00:00Z"))
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
@@ -283,6 +283,7 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 3
     assert conn.execute("SELECT count(*) FROM evidence_artifact_objects").fetchone()[0] == 1
     assert object1["verified_sha256"] == digest1
+    assert object1["acquisition_max_pdf_bytes"] is None
     with pytest.raises(ImmutableEvidenceConflict):
         append_artifact(conn, ArtifactInput(digest1, 99, "application/pdf", "later"))
 

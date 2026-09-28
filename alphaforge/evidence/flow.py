@@ -738,6 +738,7 @@ def build_frozen_evidence_packet(
                 "extraction_id": row["immutable_extraction_id"],
                 "relation_observation_ids": list(row.get("relation_observation_ids") or ()),
                 "object_uri": row.get("object_uri"),
+                "acquisition_max_pdf_bytes": row.get("acquisition_max_pdf_bytes"),
             }
         sources.append(source)
     sources.sort(
@@ -1461,6 +1462,7 @@ class OneCompanyEvidenceFlow:
                 report_rules_fingerprint=active_rules["fingerprint"],
                 effective_at=now.isoformat().replace("+00:00", "Z"),
                 max_pages=self.limits.max_pages,
+                max_pdf_bytes=self.limits.max_pdf_bytes,
             )
             admitted_immutable_urls = {
                 str(observation["release_source_url"])

@@ -39,6 +39,7 @@ class RevisionRecorder:
         report_rules_fingerprint: str,
         effective_at: str,
         max_pages: int,
+        max_pdf_bytes: int,
     ) -> None:
         from alphaforge.db.evidence_repository import (
             ObservationBatchInput,
@@ -50,6 +51,7 @@ class RevisionRecorder:
         self.company_id = company_id
         self.report_rules_fingerprint = report_rules_fingerprint
         self.effective_at = effective_at
+        self.max_pdf_bytes = max_pdf_bytes
         self.config_fingerprint = hashlib.sha256(
             json.dumps(
                 {"extractor": "pypdf", "max_pages": max_pages},
@@ -133,6 +135,7 @@ class RevisionRecorder:
                     verified_sha256=stored.sha256,
                     verified_size=stored.byte_size,
                     stored_at=self.effective_at,
+                    acquisition_max_pdf_bytes=self.max_pdf_bytes,
                 ),
             )
             attachment_row = append_attachment_observation(

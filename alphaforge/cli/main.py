@@ -1140,12 +1140,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     results_by_company: dict[int, dict] = {}
     for company in companies:
-        results_by_company[company.id] = load_results_for_company(
-            conn,
-            company.id,
-            as_of,
-            max_pdf_bytes=args.max_pdf_bytes,
-        )
+        results_by_company[company.id] = load_results_for_company(conn, company.id, as_of)
 
     # Run ranking
     engine = RankingEngine()
@@ -1411,7 +1406,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Watchlist CSV path (optional, uses DB watchlist if omitted)",
     )
-    rank.add_argument("--max-pdf-bytes", type=int, default=25 * 1024 * 1024)
     rank.set_defaults(func=cmd_rank)
 
     mfn_seed = sub.add_parser(

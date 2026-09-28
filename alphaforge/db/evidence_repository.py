@@ -14,6 +14,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from alphaforge.evidence.artifact_store import DEFAULT_MAX_PDF_BYTES
+
 
 class ImmutableEvidenceConflict(ValueError):
     """A stable identity already exists with a different immutable payload."""
@@ -52,6 +54,7 @@ class ArtifactObjectInput:
     verified_sha256: str
     verified_size: int
     stored_at: str
+    acquisition_max_pdf_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +336,11 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
         raise ValueError("artifact object references an unknown artifact")
     if value.verified_sha256 != artifact["sha256"] or value.verified_size != artifact["byte_size"]:
         raise ValueError("verified object hash and size must match artifact metadata")
+    if (
+        value.acquisition_max_pdf_bytes is not None
+        and value.acquisition_max_pdf_bytes < value.verified_size
+    ):
+        raise ValueError("artifact acquisition limit must accommodate verified size")
     identity = _stable_hash(
         {
             "artifact_id": value.artifact_id,
@@ -349,17 +357,20 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
         "verified_sha256": value.verified_sha256,
         "verified_size": value.verified_size,
         "stored_at": value.stored_at,
+        "acquisition_max_pdf_bytes": value.acquisition_max_pdf_bytes,
     }
     if existing is not None:
         stable_expected = {
-            key: field_value for key, field_value in expected.items() if key != "stored_at"
+            key: field_value
+            for key, field_value in expected.items()
+            if key not in {"stored_at", "acquisition_max_pdf_bytes"}
         }
         return _require_same(existing, stable_expected, identity=identity)
     conn.execute(
         """INSERT INTO evidence_artifact_objects
            (object_record_id, artifact_id, object_uri, storage_kind,
-            verified_sha256, verified_size, stored_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            verified_sha256, verified_size, stored_at, acquisition_max_pdf_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             identity,
             artifact["id"],
@@ -368,6 +379,7 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
             value.verified_sha256,
             value.verified_size,
             value.stored_at,
+            value.acquisition_max_pdf_bytes,
         ),
     )
     return _row(conn, "evidence_artifact_objects", "object_record_id", identity) or {}
@@ -1095,7 +1107,8 @@ def manifest_v2_projection(
             continue
         bound = dict(bound)
         object_row = conn.execute(
-            """SELECT object_uri, storage_kind, verified_sha256, verified_size
+            """SELECT object_uri, storage_kind, verified_sha256, verified_size,
+                      acquisition_max_pdf_bytes
                FROM evidence_artifact_objects
                WHERE artifact_id=(SELECT id FROM evidence_artifacts WHERE artifact_id=?)
                  AND verified_sha256=? AND verified_size=?
@@ -1105,7 +1118,16 @@ def manifest_v2_projection(
         if object_row is None:
             base["rejection_reason"] = "artifact_unavailable"
             continue
-        artifact_store.read_pdf(str(bound["sha256"]), expected_size=int(bound["byte_size"]))
+        acquisition_limit = object_row["acquisition_max_pdf_bytes"]
+        artifact_store.read_pdf(
+            str(bound["sha256"]),
+            expected_size=int(bound["byte_size"]),
+            max_pdf_bytes=(
+                int(acquisition_limit)
+                if acquisition_limit is not None
+                else DEFAULT_MAX_PDF_BYTES
+            ),
+        )
         pages = [
             dict(row)
             for row in conn.execute(
@@ -1141,6 +1163,11 @@ def manifest_v2_projection(
                 "pages": pages,
                 "siblings": [],
                 "object_uri": object_row["object_uri"],
+                "acquisition_max_pdf_bytes": (
+                    int(acquisition_limit)
+                    if acquisition_limit is not None
+                    else DEFAULT_MAX_PDF_BYTES
+                ),
             }
         )
 

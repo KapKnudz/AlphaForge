@@ -28,11 +28,7 @@ from alphaforge.db.repositories import (
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
-from alphaforge.evidence.artifact_store import (
-    ArtifactUnavailableError,
-    ArtifactValidationError,
-    LocalPdfArtifactStore,
-)
+from alphaforge.evidence.artifact_store import ArtifactUnavailableError, LocalPdfArtifactStore
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
@@ -431,13 +427,21 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     }
     scraper = _FakeScraper([article])
     monkeypatch.chdir(tmp_path)
-    store = LocalPdfArtifactStore(tmp_path / "data" / "evidence" / "objects")
     response = SimpleNamespace(
         status_code=200,
         headers={"Content-Type": "application/pdf"},
         content=_pdf(),
     )
-    flow = OneCompanyEvidenceFlow(conn, scraper=scraper, artifact_store=store)
+    store = LocalPdfArtifactStore(
+        tmp_path / "data" / "evidence" / "objects",
+        max_pdf_bytes=len(response.content),
+    )
+    flow = OneCompanyEvidenceFlow(
+        conn,
+        scraper=scraper,
+        artifact_store=store,
+        limits=EvidenceResourceLimits(max_pdf_bytes=len(response.content)),
+    )
 
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
         first = flow.run(company_id, as_of="2026-09-20")
@@ -470,18 +474,16 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     )
     assert manifest["manifest_version"] == "evidence-selection-manifest-v2"
     assert manifest["deduplication"][0]["selected"]["artifact_id"] == immutable["artifact_id"]
-    with pytest.raises(ArtifactValidationError, match="resource_limit"):
-        load_evidence_view(
-            conn,
-            company_id=company_id,
-            as_of="2026-09-20",
-            max_pdf_bytes=len(response.content) - 1,
-        )
+    assert immutable["acquisition_max_pdf_bytes"] == len(response.content)
+    verifier = LocalPdfArtifactStore(
+        tmp_path / "data" / "evidence" / "objects",
+        max_pdf_bytes=5,
+    )
     read_packet, read_manifest = load_evidence_view(
         conn,
         company_id=company_id,
         as_of="2026-09-20",
-        max_pdf_bytes=len(response.content),
+        artifact_store=verifier,
     )
     assert read_packet is not None
     assert [row["source_url"] for row in read_manifest.packet_contents()] == [

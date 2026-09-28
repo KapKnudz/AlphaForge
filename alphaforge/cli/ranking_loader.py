@@ -14,7 +14,6 @@ from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
-from alphaforge.evidence.artifact_store import DEFAULT_MAX_PDF_BYTES
 from alphaforge.evidence.manifest_store import load_evidence_view
 
 
@@ -87,20 +86,11 @@ def _price(row, fallback_currency: str | None) -> StockPrice:
     )
 
 
-def load_results_for_company(
-    conn,
-    company_id: int,
-    as_of: str,
-    *,
-    max_pdf_bytes: int = DEFAULT_MAX_PDF_BYTES,
-) -> dict[str, Any]:
+def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any]:
     """Load all ranking inputs visible at *as_of* (never current live rows)."""
     cutoff = date.fromisoformat(as_of[:10])
     evidence_packet, selection_manifest = load_evidence_view(
-        conn,
-        company_id=company_id,
-        as_of=as_of[:10],
-        max_pdf_bytes=max_pdf_bytes,
+        conn, company_id=company_id, as_of=as_of[:10]
     )
     docs = [
         {

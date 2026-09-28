@@ -142,7 +142,13 @@ class LocalPdfArtifactStore:
                     pass
             os.close(staging_fd)
 
-    def read_pdf(self, sha256: str, *, expected_size: int) -> bytes:
+    def read_pdf(
+        self,
+        sha256: str,
+        *,
+        expected_size: int,
+        max_pdf_bytes: int | None = None,
+    ) -> bytes:
         """Return bytes only after streaming hash, size, limit, and PDF checks pass."""
         self._validate_sha256(sha256)
         if (
@@ -153,7 +159,18 @@ class LocalPdfArtifactStore:
             raise ArtifactValidationError(
                 "invalid_size", "expected_size must be a non-negative integer"
             )
-        if expected_size > self.max_pdf_bytes:
+        effective_max_pdf_bytes = (
+            self.max_pdf_bytes if max_pdf_bytes is None else max_pdf_bytes
+        )
+        if (
+            not isinstance(effective_max_pdf_bytes, int)
+            or isinstance(effective_max_pdf_bytes, bool)
+            or effective_max_pdf_bytes < len(_PDF_MAGIC)
+        ):
+            raise ArtifactValidationError(
+                "invalid_size", "max_pdf_bytes must accommodate PDF magic bytes"
+            )
+        if expected_size > effective_max_pdf_bytes:
             raise ArtifactValidationError(
                 "resource_limit", "expected PDF size exceeds the configured byte limit"
             )
