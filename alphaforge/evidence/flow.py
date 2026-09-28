@@ -643,11 +643,15 @@ def build_frozen_evidence_packet(
                 "title": row["title"] or "",
                 "content_text": body_text,
                 "observation_date": (
-                    raw_metadata.get("observation_date")
-                    if raw_metadata.get("observation_date_authoritative")
-                    else None
+                    row.get("observation_date")
+                    if row.get("observation_date_authoritative")
+                    else (
+                        raw_metadata.get("observation_date")
+                        if raw_metadata.get("observation_date_authoritative")
+                        else None
+                    )
                 ),
-                "period_end": raw_metadata.get("period_end"),
+                "period_end": row.get("period_end") or raw_metadata.get("period_end"),
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
         )
@@ -659,11 +663,19 @@ def build_frozen_evidence_packet(
             "source_id": source_id,
             "source_url": row["source_url"],
             "title": row["title"] or "",
-            "report_kind": raw_metadata.get("report_kind"),
-            "document_type": raw_metadata.get("document_type"),
-            "fiscal_period": raw_metadata.get("fiscal_period") or raw_metadata.get("report_period"),
-            "period_start": raw_metadata.get("period_start"),
-            "period_end": raw_metadata.get("period_end") or raw_metadata.get("report_period_end"),
+            "report_kind": row.get("report_kind") or raw_metadata.get("report_kind"),
+            "document_type": row.get("document_type") or raw_metadata.get("document_type"),
+            "fiscal_period": (
+                row.get("fiscal_period")
+                or raw_metadata.get("fiscal_period")
+                or raw_metadata.get("report_period")
+            ),
+            "period_start": row.get("period_start") or raw_metadata.get("period_start"),
+            "period_end": (
+                row.get("period_end")
+                or raw_metadata.get("period_end")
+                or raw_metadata.get("report_period_end")
+            ),
             "observation_date": observation_date,
             "language": source_language,
             "variant_group_id": raw_metadata.get("bilingual_group_id"),
@@ -2152,15 +2164,11 @@ class OneCompanyEvidenceFlow:
                                 _translation_neutral_title,
                             )
 
-                            left_event = (
-                                relation_anchor.get("feed_report_identity")
-                                or relation_anchor.get("provider_event_id")
-                                or relation_anchor.get("mfn_event_id")
-                            )
-                            right_event = (
-                                related.get("feed_report_identity")
-                                or related.get("provider_event_id")
-                                or related.get("mfn_event_id")
+                            left_event = relation_anchor.get(
+                                "provider_event_id"
+                            ) or relation_anchor.get("mfn_event_id")
+                            right_event = related.get("provider_event_id") or related.get(
+                                "mfn_event_id"
                             )
                             left_checksum = relation_anchor.get(
                                 "pdf_checksum"

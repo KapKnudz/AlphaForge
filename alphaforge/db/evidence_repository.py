@@ -724,6 +724,7 @@ def _require_assertion_corroboration(
         valid_strong = (
             isinstance(value, str)
             and bool(value)
+            and value != "mfn-report-tag+archive-report-pdf"
             and not (directly_legacy or inherited_legacy)
             and all(observation["feed_report_identity"] == value for observation in (left, right))
         )
@@ -972,25 +973,53 @@ def manifest_v2_projection(
     mutable legacy document tables.
     """
     observations = current_candidate_observations(conn, company_id=company_id, as_of=as_of)
+    if artifact_store is None:
+        from alphaforge.evidence.artifact_store import ArtifactUnavailableError
+
+        raise ArtifactUnavailableError(
+            "artifact_verifier_unavailable", "V2 projection requires an artifact store"
+        )
     relations = current_relation_observations(conn, company_id=company_id, as_of=as_of)
     asserted = [row for row in relations if row["disposition"] == "asserted"]
     observation_by_id = {str(row["candidate_observation_id"]): row for row in observations}
     relation_membership: dict[str, list[dict[str, Any]]] = {}
+    parent = {stable_id: stable_id for stable_id in observation_by_id}
+
+    def component(stable_id: str) -> str:
+        while parent[stable_id] != stable_id:
+            parent[stable_id] = parent[parent[stable_id]]
+            stable_id = parent[stable_id]
+        return stable_id
+
     for relation in asserted:
-        left = conn.execute(
-            "SELECT candidate_observation_id FROM evidence_candidate_observations WHERE id=?",
-            (relation["left_candidate_observation_id"],),
-        ).fetchone()
-        right = conn.execute(
-            "SELECT candidate_observation_id FROM evidence_candidate_observations WHERE id=?",
-            (relation["right_candidate_observation_id"],),
-        ).fetchone()
-        if left is None or right is None:
+        endpoints = [
+            conn.execute(
+                "SELECT candidate_observation_id FROM evidence_candidate_observations WHERE id=?",
+                (relation[field],),
+            ).fetchone()
+            for field in (
+                "left_candidate_observation_id",
+                "right_candidate_observation_id",
+            )
+        ]
+        if any(endpoint is None for endpoint in endpoints):
             continue
-        for stable_id in (str(left[0]), str(right[0])):
-            member = observation_by_id.get(stable_id)
-            if member is not None:
-                relation_membership.setdefault(stable_id, []).append(relation)
+        left_id, right_id = (str(endpoint[0]) for endpoint in endpoints)
+        if left_id not in observation_by_id or right_id not in observation_by_id:
+            continue
+        relation_membership.setdefault(left_id, []).append(relation)
+        relation_membership.setdefault(right_id, []).append(relation)
+        left_root = component(left_id)
+        right_root = component(right_id)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    component_group_ids: dict[str, str] = {}
+    for stable_id, memberships in relation_membership.items():
+        root = component(stable_id)
+        relation_keys = [str(row["relation_key"]) for row in memberships]
+        current = component_group_ids.get(root)
+        component_group_ids[root] = min([*relation_keys, *([current] if current else [])])
 
     candidates: list[dict[str, Any]] = []
     usable: list[dict[str, Any]] = []
@@ -999,8 +1028,11 @@ def manifest_v2_projection(
         stable_observation_id = str(observation["candidate_observation_id"])
         memberships = relation_membership.get(stable_observation_id, [])
         relation_ids = sorted(str(row["relation_observation_id"]) for row in memberships)
-        relation_keys = sorted(str(row["relation_key"]) for row in memberships)
-        group_id = relation_keys[0] if relation_keys else str(observation["candidate_key"])
+        group_id = (
+            component_group_ids[component(stable_observation_id)]
+            if memberships
+            else str(observation["candidate_key"])
+        )
         base = {
             "source_url": str(observation["release_source_url"]),
             "title": observation["authoritative_feed_title"] or observation["detail_title"] or "",
@@ -1013,6 +1045,14 @@ def manifest_v2_projection(
             "fiscal_period": observation["fiscal_period"],
             "period_start": observation["period_start"],
             "period_end": observation["period_end"],
+            "observation_date": (
+                metadata.get("observation_date")
+                if metadata.get("observation_date_authoritative")
+                else None
+            ),
+            "observation_date_authoritative": bool(
+                metadata.get("observation_date_authoritative")
+            ),
             "candidate_key": observation["candidate_key"],
             "candidate_observation_id": stable_observation_id,
             "eligibility": observation["eligibility"],
@@ -1065,8 +1105,7 @@ def manifest_v2_projection(
         if object_row is None:
             base["rejection_reason"] = "artifact_unavailable"
             continue
-        if artifact_store is not None:
-            artifact_store.read_pdf(str(bound["sha256"]), expected_size=int(bound["byte_size"]))
+        artifact_store.read_pdf(str(bound["sha256"]), expected_size=int(bound["byte_size"]))
         pages = [
             dict(row)
             for row in conn.execute(
@@ -1108,6 +1147,8 @@ def manifest_v2_projection(
     # Relations are manifest inputs only. Select one independently retained
     # edition per asserted relation component; English wins translations and
     # revision-marked/latest observations win revisions.
+    from alphaforge.evidence.ingest import _has_revision_markers
+
     selected: list[dict[str, Any]] = []
     by_group: dict[str, list[dict[str, Any]]] = {}
     for row in usable:
@@ -1121,7 +1162,15 @@ def manifest_v2_projection(
         if "REVISION" in relation_types:
             rows.sort(
                 key=lambda row: (
-                    "correct" not in (str(row["title"]) + str(row["detail_title"])).casefold(),
+                    _has_revision_markers(
+                        {
+                            "title": " ".join(
+                                (str(row["title"]), str(row["detail_title"] or ""))
+                            ),
+                            "attachment_url": row.get("attachment_url"),
+                            "raw_metadata": row.get("raw_metadata"),
+                        }
+                    ),
                     str(row["published_at"] or ""),
                     str(row["source_url"]),
                 ),

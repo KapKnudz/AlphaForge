@@ -996,6 +996,22 @@ def test_json_discovery_accepts_corroborated_narrative_inwido_reports_only():
     assert dispositions[commentary["url"]]["feed_report_identity"] is None
 
 
+def test_json_discovery_records_all_dispositions_after_article_limit():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=2)
+
+    articles = scraper._parse_json_feed_items(payload)
+    dispositions = scraper.drain_discovery_dispositions()
+
+    assert len(articles) == 2
+    assert set(dispositions) == {item["url"] for item in payload["items"]}
+    commentary = payload["items"][-2]
+    assert dispositions[commentary["url"]]["title_admitted"] is False
+    assert dispositions[commentary["url"]]["feed_report_identity"] is None
+
+
 def test_corroborated_narrative_identity_authorizes_detail_attachment_selection():
     payload = json.loads(
         (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")

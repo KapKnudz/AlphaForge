@@ -770,6 +770,50 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
     assert asserted["relation_key"] == withdrawn["relation_key"]
 
 
+def test_report_classification_marker_is_not_a_provider_event_identity(conn):
+    batch = append_observation_batch(conn, _batch(1, "classification", "2026-09-24T10:00:00Z"))
+    observations = []
+    for language in ("en", "sv"):
+        candidate = append_candidate(
+            conn,
+            CandidateInput(
+                1,
+                f"https://example.test/classification-{language}",
+                "2026-09-24T10:00:00Z",
+            ),
+        )
+        observations.append(
+            append_candidate_observation(
+                conn,
+                replace(
+                    _observation(candidate["candidate_key"], batch["batch_id"]),
+                    language=language,
+                    feed_report_identity="mfn-report-tag+archive-report-pdf",
+                ),
+            )
+        )
+
+    with pytest.raises(ValueError, match="strong corroborator"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                batch["batch_id"],
+                observations[0]["candidate_observation_id"],
+                observations[1]["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {
+                    "strong_corroborator": {
+                        "kind": "shared_provider_event_id",
+                        "value": "mfn-report-tag+archive-report-pdf",
+                    },
+                    "compatible_signals": ["fiscal_period", "publication_date"],
+                },
+                "relation-rules-1",
+            ),
+        )
+
+
 def test_asserted_relation_type_compatibility_uses_persisted_observations(conn):
     batch = append_observation_batch(conn, _batch(1, "relations", "2026-09-24T10:00:00Z"))
 

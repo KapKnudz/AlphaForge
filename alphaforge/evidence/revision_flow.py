@@ -186,7 +186,6 @@ class RevisionRecorder:
             for key in (
                 "attachment_tier",
                 "language_evidence",
-                "observation_date",
                 "provider_event_id",
                 "mfn_event_id",
                 "mfn_slug",
@@ -197,6 +196,12 @@ class RevisionRecorder:
             )
             if article.get(key) is not None
         }
+        observation_date_authoritative = article.get("observation_date_authoritative")
+        if observation_date_authoritative is None:
+            observation_date_authoritative = article.get("observation_date") is not None
+        if observation_date_authoritative and article.get("observation_date") is not None:
+            metadata["observation_date"] = article["observation_date"]
+            metadata["observation_date_authoritative"] = True
         observation = append_candidate_observation(
             self.conn,
             CandidateObservationInput(
@@ -213,8 +218,7 @@ class RevisionRecorder:
                 fiscal_period=article.get("fiscal_period") or article.get("report_period"),
                 period_start=article.get("period_start"),
                 period_end=article.get("period_end") or article.get("report_period_end"),
-                feed_report_identity=article.get("feed_report_identity")
-                or article.get("provider_event_id")
+                feed_report_identity=article.get("provider_event_id")
                 or article.get("mfn_event_id"),
                 invitation_veto=bool(article.get("invitation_veto")),
                 eligibility=eligibility,

@@ -614,9 +614,8 @@ class MfnScraper:
             if feed_lang in {"sv", "en"}:
                 article["lang"] = feed_lang
             article.update(_report_identity_seed(article))
-            articles.append(article)
-            if len(articles) >= self.max_articles:
-                break
+            if len(articles) < self.max_articles:
+                articles.append(article)
         return articles
 
     def discover_feed(

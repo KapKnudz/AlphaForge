@@ -27,7 +27,7 @@ from alphaforge.db.repositories import (
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
-from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
+from alphaforge.evidence.artifact_store import ArtifactUnavailableError, LocalPdfArtifactStore
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
@@ -415,7 +415,10 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
         "report_kind": "quarterly",
         "document_type": "interim_report",
         "fiscal_period": "Q2-2026",
+        "period_start": "2026-04-01",
         "period_end": "2026-06-30",
+        "observation_date": "2026-06-30",
+        "observation_date_authoritative": True,
         "attachment_url": "https://storage.mfn.test/flow/q2-v2.pdf",
         "attachment_tier": "mfn-primary",
         "lang": "en",
@@ -436,6 +439,12 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
     source = first.packet["sources"][0]
     immutable = source["immutable_evidence"]
     assert source["source_id"].endswith(immutable["candidate_observation_id"])
+    assert source["report_kind"] == "quarterly"
+    assert source["document_type"] == "interim_report"
+    assert source["fiscal_period"] == "Q2-2026"
+    assert source["period_start"] == "2026-04-01"
+    assert source["period_end"] == "2026-06-30"
+    assert source["observation_date"] == "2026-06-30"
     assert immutable["artifact_id"] == f"sha256:{source['attachment']['sha256']}"
     assert (
         store.read_pdf(
@@ -460,6 +469,9 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
     assert second.status == "complete"
     assert second.downloaded == 0
     assert second.packet_hash == first.packet_hash
+
+    with pytest.raises(ArtifactUnavailableError, match="artifact_verifier_unavailable"):
+        build_frozen_evidence_packet(conn, company_id=company_id, as_of="2026-09-20")
 
     digest = source["attachment"]["sha256"]
     (store.root / "sha256" / digest[:2] / f"{digest}.pdf").unlink()
