@@ -522,6 +522,7 @@ class MfnScraper:
         self.max_articles = max_articles
         self._discovery_skips: dict[str, int] = {}
         self._detail_skips: dict[str, int] = {}
+        self._detail_dispositions: dict[str, dict[str, Any]] = {}
         self._discovery_dispositions: dict[str, dict[str, Any]] = {}
         self._discovery_truncated = False
 
@@ -541,6 +542,11 @@ class MfnScraper:
         """Return detail drop counts since the last drain and clear them."""
         drained = dict(self._detail_skips)
         self._detail_skips = {}
+        return drained
+
+    def drain_detail_dispositions(self) -> dict[str, dict[str, Any]]:
+        drained = {url: dict(value) for url, value in self._detail_dispositions.items()}
+        self._detail_dispositions = {}
         return drained
 
     def drain_discovery_dispositions(self) -> dict[str, dict[str, Any]]:
@@ -863,11 +869,22 @@ class MfnScraper:
                 detail_title = parsed["title"] or ""
             if not detail_title:
                 self._count_detail("non_report_title")
+                self._detail_dispositions[str(url)] = {
+                    **seed,
+                    "source_url": str(url),
+                    "eligibility_reason": "missing_detail_title",
+                }
                 continue
             if reports_only and not (
                 is_report(detail_title) or feed_title_admitted or feed_report_identity
             ):
                 self._count_detail("non_report_title")
+                self._detail_dispositions[str(url)] = {
+                    **seed,
+                    "source_url": str(url),
+                    "detail_title": detail_title,
+                    "eligibility_reason": "non_report_detail_title",
+                }
                 continue
             if is_invitation_or_presentation(feed_title) or is_invitation_or_presentation(
                 detail_title
@@ -875,6 +892,13 @@ class MfnScraper:
                 # An invitation/presentation about a report is not the report:
                 # its attachments must never become report evidence.
                 self._count_detail("invitation_or_presentation_release")
+                self._detail_dispositions[str(url)] = {
+                    **seed,
+                    "source_url": str(url),
+                    "detail_title": detail_title,
+                    "invitation_veto": True,
+                    "eligibility_reason": "invitation_veto",
+                }
                 continue
             body = parsed["body"]
             article = {

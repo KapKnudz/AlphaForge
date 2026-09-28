@@ -995,6 +995,7 @@ def manifest_v2_projection(
     asserted = [row for row in relations if row["disposition"] == "asserted"]
     observation_by_id = {str(row["candidate_observation_id"]): row for row in observations}
     relation_membership: dict[str, list[dict[str, Any]]] = {}
+    relation_bindings: dict[str, dict[str, Any]] = {}
     parent = {stable_id: stable_id for stable_id in observation_by_id}
 
     def component(stable_id: str) -> str:
@@ -1021,17 +1022,38 @@ def manifest_v2_projection(
             continue
         relation_membership.setdefault(left_id, []).append(relation)
         relation_membership.setdefault(right_id, []).append(relation)
+        endpoint_urls = sorted(
+            (
+                str(observation_by_id[left_id]["release_source_url"]),
+                str(observation_by_id[right_id]["release_source_url"]),
+            )
+        )
+        relation_type = str(relation["relation_type"])
+        relation_bindings[str(relation["relation_observation_id"])] = {
+            "relation_key": _stable_hash(
+                {
+                    "relation_type": relation_type,
+                    "endpoint_source_urls": endpoint_urls,
+                }
+            ),
+            "relation_type": relation_type,
+            "endpoint_source_urls": endpoint_urls,
+        }
         left_root = component(left_id)
         right_root = component(right_id)
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
     component_group_ids: dict[str, str] = {}
+    component_relation_ids: dict[str, set[str]] = {}
     for stable_id, memberships in relation_membership.items():
         root = component(stable_id)
         relation_keys = [str(row["relation_key"]) for row in memberships]
         current = component_group_ids.get(root)
         component_group_ids[root] = min([*relation_keys, *([current] if current else [])])
+        component_relation_ids.setdefault(root, set()).update(
+            str(row["relation_observation_id"]) for row in memberships
+        )
 
     candidates: list[dict[str, Any]] = []
     usable: list[dict[str, Any]] = []
@@ -1039,11 +1061,10 @@ def manifest_v2_projection(
         metadata = _json_object(observation.get("raw_metadata"))
         stable_observation_id = str(observation["candidate_observation_id"])
         memberships = relation_membership.get(stable_observation_id, [])
-        relation_ids = sorted(str(row["relation_observation_id"]) for row in memberships)
+        root = component(stable_observation_id) if memberships else None
+        relation_ids = sorted(component_relation_ids[root]) if root is not None else []
         group_id = (
-            component_group_ids[component(stable_observation_id)]
-            if memberships
-            else str(observation["candidate_key"])
+            component_group_ids[root] if root is not None else str(observation["candidate_key"])
         )
         base = {
             "source_url": str(observation["release_source_url"]),
@@ -1075,6 +1096,7 @@ def manifest_v2_projection(
             ),
             "selection_group_id": group_id,
             "relation_observation_ids": relation_ids,
+            "relation_bindings": [relation_bindings[relation_id] for relation_id in relation_ids],
             "raw_metadata": metadata,
         }
         candidates.append(base)
@@ -1199,6 +1221,7 @@ def manifest_v2_projection(
                         }
                     ),
                     str(row["published_at"] or ""),
+                    str(row.get("language") or "").lower() == "en",
                     str(row["source_url"]),
                 ),
                 reverse=True,

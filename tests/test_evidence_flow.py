@@ -441,6 +441,7 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
         scraper=scraper,
         artifact_store=store,
         limits=EvidenceResourceLimits(max_pdf_bytes=len(response.content)),
+        now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
     )
 
     with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
@@ -515,6 +516,51 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
         ).fetchone()[0]
         == 0
     )
+
+
+def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": "https://mfn.test/a/flow/q2-valid",
+            "title": "Flow AB Interim Report Q2 2026",
+            "published_at": "2026-07-15T08:00:00Z",
+            "report_kind": "quarterly",
+            "attachment_url": "https://storage.mfn.test/flow/q2-valid.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/annual-missing-date",
+            "title": "Flow AB Annual Report 2025",
+            "published_at": None,
+            "report_kind": "annual",
+            "attachment_url": "https://storage.mfn.test/flow/annual-missing-date.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+    ]
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    store = LocalPdfArtifactStore(tmp_path / "objects")
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeScraper(articles), artifact_store=store
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "evidence_incomplete"
+    assert result.packet is None
+    observations = current_candidate_observations(
+        conn, company_id=company_id, as_of="2026-09-20"
+    )
+    assert {row["release_source_url"]: row["eligibility"] for row in observations} == {
+        articles[0]["source_url"]: "eligible",
+        articles[1]["source_url"]: "incomplete",
+    }
 
 
 def test_v2_feed_revocation_does_not_require_legacy_document(tmp_path):
@@ -1351,6 +1397,16 @@ def test_packet_hash_excludes_immutable_database_identities():
             "artifact_id": "sha256:same-pdf",
             "extraction_id": "database-one-extraction",
             "relation_observation_ids": ["database-one-relation"],
+            "relation_bindings": [
+                {
+                    "relation_key": "stable-relation",
+                    "relation_type": "TRANSLATION",
+                    "endpoint_source_urls": [
+                        "https://mfn.test/a/flow/q2",
+                        "https://mfn.test/a/flow/q2-sv",
+                    ],
+                }
+            ],
             "object_uri": "file:database-one",
         },
     }
@@ -1377,7 +1433,13 @@ def test_packet_hash_excludes_immutable_database_identities():
         assert stable_packet_hash(tampered) != stable_packet_hash(first)
     unrelated = json.loads(json.dumps(first))
     unrelated["sources"][0]["immutable_evidence"]["relation_observation_ids"] = []
+    unrelated["sources"][0]["immutable_evidence"]["relation_bindings"] = []
     assert stable_packet_hash(unrelated) != stable_packet_hash(first)
+    different_relation = json.loads(json.dumps(first))
+    different_relation["sources"][0]["immutable_evidence"]["relation_bindings"][0][
+        "endpoint_source_urls"
+    ][1] = "https://mfn.test/a/flow/different-sv"
+    assert stable_packet_hash(different_relation) != stable_packet_hash(first)
 
 
 def test_packet_hash_stable_across_run_timestamps():

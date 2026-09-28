@@ -242,6 +242,7 @@ class RevisionRecorder:
                 attachment_row["attachment_observation_id"] if attachment_row else None
             ),
             "extraction_id": extraction_row["extraction_id"] if extraction_row else None,
+            "extraction_row_id": extraction_row["id"] if extraction_row else None,
         }
 
     def record_relation(

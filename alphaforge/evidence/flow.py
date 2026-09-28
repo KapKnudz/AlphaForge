@@ -737,6 +737,7 @@ def build_frozen_evidence_packet(
                 "artifact_id": row["artifact_id"],
                 "extraction_id": row["immutable_extraction_id"],
                 "relation_observation_ids": list(row.get("relation_observation_ids") or ()),
+                "relation_bindings": list(row.get("relation_bindings") or ()),
                 "object_uri": row.get("object_uri"),
                 "acquisition_max_pdf_bytes": row.get("acquisition_max_pdf_bytes"),
             }
@@ -879,9 +880,11 @@ def _drain_skips(scraper: Any, method: str) -> dict[str, int]:
     return dict(drained or {})
 
 
-def _drain_dispositions(scraper: Any) -> dict[str, dict[str, Any]]:
-    """Read current feed classifications without coupling test scrapers."""
-    drain = getattr(scraper, "drain_discovery_dispositions", None)
+def _drain_dispositions(
+    scraper: Any, method: str = "drain_discovery_dispositions"
+) -> dict[str, dict[str, Any]]:
+    """Read current candidate classifications without coupling test scrapers."""
+    drain = getattr(scraper, method, None)
     if not callable(drain):
         return {}
     try:
@@ -1460,7 +1463,7 @@ class OneCompanyEvidenceFlow:
                 as_of=as_of,
                 source_input_fingerprint=source_input_fingerprint,
                 report_rules_fingerprint=active_rules["fingerprint"],
-                effective_at=now.isoformat().replace("+00:00", "Z"),
+                effective_at=now.isoformat(timespec="microseconds").replace("+00:00", "Z"),
                 max_pages=self.limits.max_pages,
                 max_pdf_bytes=self.limits.max_pdf_bytes,
             )
@@ -1589,6 +1592,16 @@ class OneCompanyEvidenceFlow:
             )
         for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
             early_skips[reason] = early_skips.get(reason, 0) + count
+        detail_dispositions = _drain_dispositions(self.scraper, "drain_detail_dispositions")
+        if revision_recorder is not None:
+            for disposition in detail_dispositions.values():
+                revision_recorder.record(
+                    disposition,
+                    eligibility="incomplete",
+                    eligibility_reason=str(
+                        disposition.get("eligibility_reason") or "detail_candidate_incomplete"
+                    ),
+                )
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
@@ -1603,7 +1616,9 @@ class OneCompanyEvidenceFlow:
         eligible: list[dict[str, Any]] = []
         blocked_candidates: list[dict[str, Any]] = []
         pre_cutoff_report = False
-        hard_blocks = int(discovery_truncated)
+        hard_blocks = int(discovery_truncated) + (
+            len(detail_dispositions) if revision_recorder is not None else 0
+        )
         if discovery_truncated:
             result.skipped["discovery_truncated"] = 1
         for article in details:
@@ -1615,6 +1630,12 @@ class OneCompanyEvidenceFlow:
                 result.skipped["non_report_release"] = (
                     result.skipped.get("non_report_release", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason="non_report_release",
+                    )
                 continue
             if corroborated_feed_report and (
                 not article.get("feed_report_attachment_url")
@@ -1652,17 +1673,36 @@ class OneCompanyEvidenceFlow:
                 result.skipped["missing_publication_timestamp"] = (
                     result.skipped.get("missing_publication_timestamp", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="incomplete",
+                        eligibility_reason="missing_publication_timestamp",
+                    )
+                    hard_blocks += 1
                 continue
             published_date = str(published_at)[:10]
             if published_date > as_of[:10]:
                 result.skipped["future_dated_release"] = (
                     result.skipped.get("future_dated_release", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason="future_dated_release",
+                    )
                 continue
             if published_date > today.isoformat():
                 result.skipped["not_yet_published_release"] = (
                     result.skipped.get("not_yet_published_release", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="incomplete",
+                        eligibility_reason="not_yet_published_release",
+                    )
                 continue
             kind = article.get("report_kind")
             cutoff = _resolve_cutoff(
@@ -1672,6 +1712,12 @@ class OneCompanyEvidenceFlow:
                 result.skipped["pre_cutoff_release"] = (
                     result.skipped.get("pre_cutoff_release", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason="pre_cutoff_release",
+                    )
                 continue
             release_url = str(article.get("url") or article.get("source_url") or "")
             issuer_failure = _confirm_cis_issuer(
@@ -2227,12 +2273,20 @@ class OneCompanyEvidenceFlow:
                                 similarity = _numeric_similarity(
                                     _numeric_key_figure_fingerprint(
                                         _extraction_text(
-                                            self.conn, left_observation.get("extraction_id")
+                                            self.conn,
+                                            left_observation.get(
+                                                "extraction_row_id",
+                                                left_observation.get("extraction_id"),
+                                            ),
                                         )
                                     ),
                                     _numeric_key_figure_fingerprint(
                                         _extraction_text(
-                                            self.conn, right_observation.get("extraction_id")
+                                            self.conn,
+                                            right_observation.get(
+                                                "extraction_row_id",
+                                                right_observation.get("extraction_id"),
+                                            ),
                                         )
                                     ),
                                 )

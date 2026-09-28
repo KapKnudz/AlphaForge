@@ -165,15 +165,42 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
             continue
         immutable = source.get("immutable_evidence")
         if isinstance(immutable, dict):
+            bindings = immutable.get("relation_bindings")
+            stable_bindings = (
+                sorted(
+                    (
+                        {
+                            "relation_key": binding.get("relation_key"),
+                            "relation_type": binding.get("relation_type"),
+                            "endpoint_source_urls": sorted(
+                                str(url) for url in binding.get("endpoint_source_urls") or ()
+                            ),
+                        }
+                        for binding in bindings
+                        if isinstance(binding, dict)
+                    ),
+                    key=lambda binding: json.dumps(
+                        binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    ),
+                )
+                if isinstance(bindings, list)
+                else []
+            )
             source["immutable_evidence"] = {
                 **{
                     key: immutable.get(key)
                     for key in ("artifact_id", "extraction_id", "object_uri")
                     if key in immutable
                 },
-                "relation_observation_ids": sorted(
-                    stable_relations[str(relation_id)]
-                    for relation_id in immutable.get("relation_observation_ids") or ()
+                **(
+                    {"relation_bindings": stable_bindings}
+                    if stable_bindings
+                    else {
+                        "relation_observation_ids": sorted(
+                            stable_relations[str(relation_id)]
+                            for relation_id in immutable.get("relation_observation_ids") or ()
+                        )
+                    }
                 ),
             }
         body_value = source.get("body")
