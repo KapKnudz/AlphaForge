@@ -419,10 +419,15 @@ def append_extraction(conn: Any, value: ExtractionInput) -> dict[str, Any]:
             "artifact_id": value.artifact_id,
             "extractor": value.extractor,
             "extractor_version": value.extractor_version,
-            "extraction_config_fingerprint": value.config_fingerprint,
+            "config_fingerprint": value.config_fingerprint,
             "text_checksum": value.text_checksum,
-            "ordered_page_checksums": [page.text_checksum for page in ordered_pages],
+            "page_count": value.page_count,
+            "pages_included": value.pages_included,
+            "page_truncated": int(value.page_truncated),
+            "scanned": int(value.scanned),
             "limitations": list(value.limitations),
+            "extracted_at": value.extracted_at,
+            "pages": [asdict(page) for page in ordered_pages],
         }
     )
     expected = {

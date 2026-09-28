@@ -968,6 +968,33 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     assert make_candidate_key(1, "https://example.test/en")
     assert make_batch_id(_batch(1, "one", "2026-09-24T10:00:00Z"))
 
+    extraction_count = conn.execute(
+        "SELECT count(*) FROM evidence_artifact_extractions"
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE document_extractions SET page_truncated=1 WHERE id=?",
+        (extraction_id,),
+    )
+    conn.commit()
+    metadata_corrected = backfill_legacy_evidence(conn)
+    metadata_counts = {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in NEW_TABLES
+    }
+    assert backfill_legacy_evidence(conn) == metadata_corrected
+    assert {
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for table in NEW_TABLES
+    } == metadata_counts
+    assert conn.execute("SELECT count(*) FROM evidence_artifact_extractions").fetchone()[0] == (
+        extraction_count + 1
+    )
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    en_current = next(row for row in current if row["release_source_url"].endswith("/en"))
+    assert conn.execute(
+        "SELECT page_truncated FROM evidence_artifact_extractions WHERE id=?",
+        (en_current["extraction_id"],),
+    ).fetchone()[0] == 1
+
     batch_count = conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0]
     conn.execute(
         "UPDATE document_pages SET text='corrected', text_checksum='page-corrected' WHERE extraction_id=?",

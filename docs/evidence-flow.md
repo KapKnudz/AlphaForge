@@ -134,9 +134,11 @@ Schema version 10 adds an SQLite-only, additive history layer in
 acquire evidence, or select manifest slots. Each MFN release URL remains an
 independent candidate. Content-addressed artifacts and verified object
 locations are recorded separately from append-only attachment, extraction/page,
-candidate-classification, and relation observations. Stable identities make
-identical retries idempotent and reject conflicting payloads, while relation
-withdrawals and later candidate states append new observations rather than
+candidate-classification, and relation observations. Extraction identities
+cover the complete extraction metadata and ordered page payload, so corrections
+append a distinct snapshot while identical retries remain idempotent. Other
+stable identities reject conflicting payloads, while relation withdrawals and
+later candidate states append new observations rather than
 mutating history.
 
 `backfill_legacy_evidence()` explicitly snapshots current legacy MFN rows into
