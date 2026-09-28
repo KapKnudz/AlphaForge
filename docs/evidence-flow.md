@@ -121,7 +121,8 @@ another object. The store itself performs no database writes or deletion; the
 revision recorder persists its returned identity in the evidence history.
 Schema version 11 stores each object's acquisition byte limit so replay verifies
 it under the limit that originally admitted it. Migrated objects with no stored
-limit use the default until exact reacquisition safely fills that one field.
+limit remain unavailable until exact reacquisition verifies the object and fills
+that one field.
 
 A run with no model-ready source returns `no_evidence` with one of
 `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source`;

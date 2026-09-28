@@ -38,6 +38,7 @@ from alphaforge.db.repositories import (
 )
 from alphaforge.evidence.ingest import (
     ResearchDocumentIngestionService,
+    _fiscal_period,
     _variant_relationship,
     ambiguous_variant_pairs,
     bilingual_dedupe,
@@ -1782,24 +1783,6 @@ class OneCompanyEvidenceFlow:
                     "company_id": company_id,
                 }
             )
-        # Resolve identity dates once per article so variant grouping compares
-        # real fiscal periods instead of synthesized calendar quarters, and a
-        # later English edition can attach even when published on another day.
-        for article in eligible:
-            if not (article.get("attachment_url") or article.get("storage_url")):
-                article["_pdf_language_unresolved"] = True
-            if article.get("document_type") is None:
-                article["document_type"] = document_type(str(article.get("title") or ""))
-            if article.get("period_start") is None:
-                article["period_start"] = article.get("report_period_start") or _period_start(
-                    article
-                )
-            if article.get("period_end") is None:
-                article["period_end"] = article.get("report_period_end") or _body_period_end(
-                    article
-                )
-            if article.get("observation_date") is None:
-                article["observation_date"] = _observation_date(article)
         persisted_identity = []
         persisted_cutoff = min(as_of[:10], today.isoformat())
         for persisted in complete_evidence_identity_documents(
@@ -1856,6 +1839,23 @@ class OneCompanyEvidenceFlow:
                 }
             )
         identity_candidates = persisted_identity + eligible
+        for article in identity_candidates:
+            if not (article.get("attachment_url") or article.get("storage_url")):
+                article["_pdf_language_unresolved"] = True
+            if article.get("document_type") is None:
+                article["document_type"] = document_type(str(article.get("title") or ""))
+            if not article.get("fiscal_period"):
+                article["fiscal_period"] = _fiscal_period(article) or None
+            if article.get("period_start") is None:
+                article["period_start"] = article.get("report_period_start") or _period_start(
+                    article
+                )
+            if article.get("period_end") is None:
+                article["period_end"] = article.get("report_period_end") or _body_period_end(
+                    article
+                )
+            if article.get("observation_date") is None:
+                article["observation_date"] = _observation_date(article)
         manifest_candidates = identity_candidates + blocked_candidates
         previous_manifest = load_current_evidence_selection_manifest_payload(
             self.conn,

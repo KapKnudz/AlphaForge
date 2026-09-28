@@ -38,6 +38,7 @@ from alphaforge.evidence.flow import (
     download_pdf,
     validate_frozen_packet,
 )
+from alphaforge.evidence.ingest import PdfExtraction
 from alphaforge.evidence.manifest_store import load_evidence_view
 from alphaforge.evidence.report_rules import report_rules_metadata
 from alphaforge.providers.mfn.issuer import (
@@ -681,6 +682,91 @@ def test_v2_revision_selection_prefers_newer_edition_over_older_correction(tmp_p
     assert [source["source_url"] for source in result.packet["sources"]] == [
         "https://mfn.test/a/flow/q2-latest"
     ]
+
+
+def test_v2_relation_persists_derived_fiscal_period(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": "https://mfn.test/a/flow/q1-en",
+            "title": "Flow AB Interim report: strong start Q1 2026/2027",
+            "published_at": "2026-09-09T07:30:00Z",
+            "report_kind": "quarterly",
+            "attachment_url": "https://storage.mfn.test/flow/q1-en.pdf",
+            "attachment_tier": "mfn-primary",
+            "content_text": "Revenue 2847 MSEK. Operating profit 312 MSEK.",
+            "lang": "en",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/q1-sv",
+            "title": "Flow AB Delårsrapport: stabil utveckling första kvartalet 2026/2027",
+            "published_at": "2026-09-09T07:30:00Z",
+            "report_kind": "quarterly",
+            "attachment_url": "https://storage.mfn.test/flow/q1-sv.pdf",
+            "attachment_tier": "mfn-primary",
+            "content_text": "Omsättning 2847 MSEK. Rörelseresultat 312 MSEK.",
+            "lang": "sv",
+        },
+    ]
+    responses = {
+        articles[0]["attachment_url"]: SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "application/pdf"},
+            content=_pdf(),
+        ),
+        articles[1]["attachment_url"]: SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "application/pdf"},
+            content=_pdf(pages=2),
+        ),
+    }
+    extracted = PdfExtraction(
+        text="[page 1]\nRevenue 2847 MSEK. Operating profit 312 MSEK.",
+        page_count=1,
+        pages_included="1",
+        page_truncated=0,
+        scanned=False,
+        pages=(
+            {
+                "page_number": 1,
+                "anchor": "page:1",
+                "text": "Revenue 2847 MSEK. Operating profit 312 MSEK.",
+            },
+        ),
+    )
+
+    def request(_method, url, **_kwargs):
+        return responses[url]
+
+    def language(**kwargs):
+        release_language = kwargs["release_lang"]
+        return release_language, f"pdf_text:{release_language}"
+
+    with (
+        patch("alphaforge.evidence.flow.request_with_retry", side_effect=request),
+        patch(
+            "alphaforge.evidence.flow.ResearchDocumentIngestionService.extract_pdf_pages",
+            return_value=extracted,
+        ),
+        patch("alphaforge.evidence.flow.resolve_document_language", side_effect=language),
+    ):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper(articles),
+            artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "complete"
+    assert len(result.packet["sources"]) == 1
+    assert result.packet["sources"][0]["language"] == "en"
+    assert (
+        conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
+        == 1
+    )
+    observations = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
+    assert {row["fiscal_period"] for row in observations} == {"2026/2027-q1"}
 
 
 def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
