@@ -278,7 +278,7 @@ provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 from the hash, so identical artifacts hash identically across databases built
 at different times; packets hashed before this change keep validating against
 their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v5 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v6 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including

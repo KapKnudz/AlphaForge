@@ -14,8 +14,6 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from alphaforge.evidence.artifact_store import DEFAULT_MAX_PDF_BYTES
-
 
 class ImmutableEvidenceConflict(ValueError):
     """A stable identity already exists with a different immutable payload."""
@@ -1152,19 +1150,18 @@ def manifest_v2_projection(
                FROM evidence_artifact_objects
                WHERE artifact_id=(SELECT id FROM evidence_artifacts WHERE artifact_id=?)
                  AND verified_sha256=? AND verified_size=?
+                 AND acquisition_max_pdf_bytes IS NOT NULL
                ORDER BY object_record_id LIMIT 1""",
             (bound["artifact_id"], bound["sha256"], bound["byte_size"]),
         ).fetchone()
         if object_row is None:
             base["rejection_reason"] = "artifact_unavailable"
             continue
-        acquisition_limit = object_row["acquisition_max_pdf_bytes"]
+        acquisition_limit = int(object_row["acquisition_max_pdf_bytes"])
         artifact_store.read_pdf(
             str(bound["sha256"]),
             expected_size=int(bound["byte_size"]),
-            max_pdf_bytes=(
-                int(acquisition_limit) if acquisition_limit is not None else DEFAULT_MAX_PDF_BYTES
-            ),
+            max_pdf_bytes=acquisition_limit,
         )
         pages = [
             dict(row)
@@ -1201,11 +1198,7 @@ def manifest_v2_projection(
                 "pages": pages,
                 "siblings": [],
                 "object_uri": object_row["object_uri"],
-                "acquisition_max_pdf_bytes": (
-                    int(acquisition_limit)
-                    if acquisition_limit is not None
-                    else DEFAULT_MAX_PDF_BYTES
-                ),
+                "acquisition_max_pdf_bytes": acquisition_limit,
             }
         )
 

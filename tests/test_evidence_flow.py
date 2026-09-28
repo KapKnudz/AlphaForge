@@ -17,7 +17,7 @@ from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, stable_packet_
 from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
 from alphaforge.db.evidence_repository import current_candidate_observations
-from alphaforge.db.migrations import migrate
+from alphaforge.db.migrations import migrate, set_user_version
 from alphaforge.db.repositories import (
     describe_evidence_state,
     get_mfn_mapping_review,
@@ -498,6 +498,31 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     assert second.downloaded == 0
     assert second.packet_hash == first.packet_hash
 
+    conn.execute("DROP TRIGGER evidence_artifact_objects_no_update")
+    conn.execute("UPDATE evidence_artifact_objects SET acquisition_max_pdf_bytes=NULL")
+    conn.executescript(
+        """CREATE TRIGGER evidence_artifact_objects_no_update
+           BEFORE UPDATE ON evidence_artifact_objects
+           BEGIN
+               SELECT RAISE(ABORT, 'evidence_artifact_objects is append-only');
+           END;"""
+    )
+    set_user_version(conn, 10)
+    migrate(conn)
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry", return_value=response
+    ) as reacquire:
+        enriched = flow.run(company_id, as_of="2026-09-20")
+    assert enriched.status == "complete"
+    assert enriched.packet_hash == first.packet_hash
+    assert reacquire.called
+    assert (
+        conn.execute(
+            "SELECT acquisition_max_pdf_bytes FROM evidence_artifact_objects"
+        ).fetchone()[0]
+        == len(response.content)
+    )
+
     with pytest.raises(ArtifactUnavailableError, match="artifact_verifier_unavailable"):
         build_frozen_evidence_packet(conn, company_id=company_id, as_of="2026-09-20")
 
@@ -698,6 +723,23 @@ def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
     assert {row["release_source_url"]: row["eligibility"] for row in observations} == {
         articles[0]["source_url"]: "eligible",
         articles[1]["source_url"]: "incomplete",
+    }
+
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        side_effect=AssertionError("current retained evidence must replay offline"),
+    ):
+        replay = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper([articles[0]]),
+            artifact_store=store,
+        ).run(company_id, as_of="2026-09-20")
+
+    assert replay.status == "evidence_incomplete"
+    assert replay.packet is None
+    assert replay.completeness == {
+        "annual": {"expected": 1, "retained": 0},
+        "quarterly": {"expected": 1, "retained": 1},
     }
 
 

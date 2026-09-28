@@ -237,7 +237,10 @@ def select_evidence_manifest(
     window = ReportHistoryWindow(**history_values)
     candidates = [dict(record) for record in (candidate_records or []) if _source_url(record)]
     group_records = [
-        record for record in candidates if _in_window(record, as_of=as_of, window=window)
+        record
+        for record in candidates
+        if _in_window(record, as_of=as_of, window=window)
+        or (record.get("eligibility") == "incomplete" and not record.get("published_at"))
     ]
     selected_packet_rows = _packet_rows(
         [record for record in packet_inputs if _in_window(record, as_of=as_of, window=window)]

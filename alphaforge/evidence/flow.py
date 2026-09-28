@@ -1551,6 +1551,7 @@ class OneCompanyEvidenceFlow:
                                      AND EXISTS (
                                          SELECT 1 FROM evidence_artifact_objects obj
                                          WHERE obj.artifact_id=current.artifact_id
+                                           AND obj.acquisition_max_pdf_bytes IS NOT NULL
                                      )""",
                                 (company_id, str(entry_url), as_of[:10]),
                             ).fetchone()
