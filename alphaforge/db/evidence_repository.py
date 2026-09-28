@@ -652,25 +652,54 @@ def _require_assertion_corroboration(
         raise ValueError("asserted relation requires structured corroboration")
     kind = strong.get("kind")
     value = strong.get("value")
-    metadata_only_legacy = any(
+    directly_legacy = any(
         bool(_json_object(observation["raw_metadata"]).get("legacy_import"))
         for observation in (left, right)
     )
     if kind == "shared_provider_event_id":
-        valid_strong = not metadata_only_legacy and bool(value) and all(
-            observation["feed_report_identity"] == value for observation in (left, right)
+        inherited_legacy = isinstance(value, str) and any(
+            conn.execute(
+                """SELECT 1 FROM evidence_candidate_observations
+                   WHERE candidate_id=? AND feed_report_identity=?
+                     AND json_extract(raw_metadata, '$.legacy_import')=1
+                   LIMIT 1""",
+                (observation["candidate_id"], value),
+            ).fetchone()
+            is not None
+            for observation in (left, right)
+        )
+        valid_strong = (
+            isinstance(value, str)
+            and bool(value)
+            and not (directly_legacy or inherited_legacy)
+            and all(observation["feed_report_identity"] == value for observation in (left, right))
         )
     elif kind == "shared_attachment_checksum":
-        checksums = [
+        attachments = [
             conn.execute(
-                """SELECT a.sha256 FROM evidence_attachment_observations ao
+                """SELECT a.sha256, ao.artifact_id FROM evidence_attachment_observations ao
                    JOIN evidence_artifacts a ON a.id=ao.artifact_id WHERE ao.id=?""",
                 (observation["attachment_observation_id"],),
             ).fetchone()
             for observation in (left, right)
         ]
-        valid_strong = not metadata_only_legacy and bool(value) and all(
-            checksum is not None and checksum[0] == str(value).lower() for checksum in checksums
+        inherited_legacy = any(
+            attachment is not None
+            and conn.execute(
+                """SELECT 1 FROM evidence_candidate_observations o
+                   JOIN evidence_attachment_observations ao
+                     ON ao.id=o.attachment_observation_id
+                   WHERE o.candidate_id=? AND ao.artifact_id=?
+                     AND json_extract(o.raw_metadata, '$.legacy_import')=1
+                   LIMIT 1""",
+                (observation["candidate_id"], attachment["artifact_id"]),
+            ).fetchone()
+            is not None
+            for observation, attachment in zip((left, right), attachments, strict=True)
+        )
+        valid_strong = not (directly_legacy or inherited_legacy) and bool(value) and all(
+            attachment is not None and attachment["sha256"] == str(value).lower()
+            for attachment in attachments
         )
     else:
         numeric_fingerprints = [
@@ -971,11 +1000,38 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 if legacy_extraction is not None
                 else []
             )
+            semantic_attachments = [
+                {
+                    key: value
+                    for key, value in attachment.items()
+                    if key not in {"id", "document_id"}
+                }
+                for attachment in attachments
+            ]
+            semantic_attachments.sort(key=_canonical_json)
+            semantic_extraction = (
+                {
+                    key: value
+                    for key, value in legacy_extraction.items()
+                    if key not in {"id", "document_id"}
+                }
+                if legacy_extraction is not None
+                else None
+            )
+            semantic_pages = [
+                {
+                    key: value
+                    for key, value in page.items()
+                    if key not in {"id", "extraction_id"}
+                }
+                for page in legacy_pages
+            ]
+            semantic_pages.sort(key=lambda page: (page["page_number"], _canonical_json(page)))
             snapshot = {
-                "document": document,
-                "attachments": attachments,
-                "extraction": legacy_extraction,
-                "pages": legacy_pages,
+                "document": {key: value for key, value in document.items() if key != "id"},
+                "attachments": semantic_attachments,
+                "extraction": semantic_extraction,
+                "pages": semantic_pages,
             }
             source_fingerprint = _stable_hash({"legacy_current_state": snapshot})
             rules = str(document.get("report_rules_fingerprint") or "legacy")

@@ -826,6 +826,105 @@ def test_numeric_relation_corroboration_is_recomputed_from_persisted_pages(conn)
         )
 
 
+def test_legacy_metadata_provenance_survives_later_observations(conn):
+    legacy_batch = append_observation_batch(
+        conn, _batch(1, "legacy-metadata", "2026-09-24T10:00:00Z")
+    )
+    artifact = append_artifact(
+        conn,
+        ArtifactInput("a" * 64, 100, "application/pdf", "2026-09-24T10:00:00Z"),
+    )
+    candidates = []
+    for language in ("en", "sv"):
+        candidate = append_candidate(
+            conn,
+            CandidateInput(
+                1,
+                f"https://example.test/legacy-{language}",
+                "2026-09-24T10:00:00Z",
+            ),
+        )
+        attachment = append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                candidate["candidate_key"],
+                artifact["artifact_id"],
+                legacy_batch["batch_id"],
+                f"https://example.test/legacy-{language}.pdf",
+                "application/pdf",
+                200,
+                True,
+                {"legacy_import": True},
+            ),
+        )
+        append_candidate_observation(
+            conn,
+            replace(
+                _observation(
+                    candidate["candidate_key"],
+                    legacy_batch["batch_id"],
+                    attachment_id=attachment["attachment_observation_id"],
+                ),
+                language=language,
+                raw_metadata={"legacy_import": True},
+            ),
+        )
+        candidates.append(candidate)
+
+    later_batch = append_observation_batch(
+        conn, _batch(1, "laundered-metadata", "2026-09-24T11:00:00Z")
+    )
+    later_observations = []
+    for language, candidate in zip(("en", "sv"), candidates, strict=True):
+        attachment = append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                candidate["candidate_key"],
+                artifact["artifact_id"],
+                later_batch["batch_id"],
+                f"https://example.test/current-{language}.pdf",
+                "application/pdf",
+                200,
+                True,
+                {"source": "current"},
+            ),
+        )
+        later_observations.append(
+            append_candidate_observation(
+                conn,
+                replace(
+                    _observation(
+                        candidate["candidate_key"],
+                        later_batch["batch_id"],
+                        attachment_id=attachment["attachment_observation_id"],
+                    ),
+                    language=language,
+                ),
+            )
+        )
+
+    for strong_corroborator in (
+        {"kind": "shared_provider_event_id", "value": "event-1"},
+        {"kind": "shared_attachment_checksum", "value": "a" * 64},
+    ):
+        with pytest.raises(ValueError, match="strong corroborator"):
+            append_relation_observation(
+                conn,
+                RelationObservationInput(
+                    later_batch["batch_id"],
+                    later_observations[0]["candidate_observation_id"],
+                    later_observations[1]["candidate_observation_id"],
+                    "TRANSLATION",
+                    "asserted",
+                    {
+                        "strong_corroborator": strong_corroborator,
+                        "compatible_signals": ["fiscal_period", "publication_date"],
+                    },
+                    "relation-rules-1",
+                ),
+            )
+
+
 def test_extraction_insert_is_atomic_when_a_page_is_invalid(conn):
     artifact = append_artifact(
         conn,
@@ -973,6 +1072,57 @@ def test_legacy_stale_replay_reuses_first_occurrence(conn):
     assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == 2
     current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
     assert current[0]["authoritative_feed_title"] == "State B"
+
+
+def test_legacy_page_reinsertion_does_not_create_recurrence(conn):
+    document_id = _insert_legacy_document(
+        conn, title="Page replay", fetched_at="2026-07-15T10:00:00Z"
+    )
+    conn.execute(
+        """INSERT INTO research_attachments
+           (document_id, source_url, content_type, byte_size, sha256,
+            magic_valid, http_status)
+           VALUES (?, 'https://example.test/replay.pdf', 'application/pdf', 100, ?, 1, 200)""",
+        (document_id, "a" * 64),
+    )
+    conn.execute(
+        """INSERT INTO document_extractions
+           (document_id, extractor, text_checksum, page_count, pages_included,
+            page_truncated, scanned, limitations)
+           VALUES (?, 'pypdf', 'text-a', 1, '1', 0, 0, '[]')""",
+        (document_id,),
+    )
+    extraction_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def replace_page(state: str) -> None:
+        conn.execute("DELETE FROM document_pages WHERE extraction_id=?", (extraction_id,))
+        conn.execute(
+            """INSERT INTO document_pages
+               (extraction_id, page_number, anchor, text, text_checksum)
+               VALUES (?, 1, 'p1', ?, ?)""",
+            (extraction_id, state, f"page-{state.lower()}"),
+        )
+        conn.execute(
+            "UPDATE document_extractions SET text_checksum=? WHERE id=?",
+            (f"text-{state.lower()}", extraction_id),
+        )
+        conn.commit()
+
+    replace_page("A")
+    backfill_legacy_evidence(conn)
+    replace_page("B")
+    backfill_legacy_evidence(conn)
+    replace_page("A")
+
+    backfill_legacy_evidence(conn)
+
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == 2
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    page = conn.execute(
+        "SELECT text FROM evidence_artifact_pages WHERE extraction_id=?",
+        (current[0]["extraction_id"],),
+    ).fetchone()
+    assert page[0] == "B"
 
 
 def test_legacy_recurrence_requires_changed_source_timestamp(conn):

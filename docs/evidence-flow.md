@@ -147,12 +147,14 @@ pages may be copied with a `legacy_source_without_retained_bytes` limitation,
 but the backfill creates no retained-object claim or asserted relationship;
 legacy `duplicate_of` links remain unresolved audit entries. The
 asserted-relation boundary rejects provider-event and checksum corroboration
-from these metadata-only imports; only proof recomputed from persisted page
+from these metadata-only imports, including later observations that reuse the
+same imported event or artifact; only proof recomputed from persisted page
 content can qualify. Imported candidate observations are therefore
-`incomplete`. Each snapshot at an unchanged legacy source timestamp reuses its
-first immutable occurrence, so stale A-after-B replay cannot supersede B. A
-changed source timestamp establishes a new occurrence and can represent a
-legitimate recurrence. Historical packet and manifest rows remain untouched, and
+`incomplete`. Semantic snapshot identity excludes surrogate legacy row IDs, so
+replacement-generated rows do not look like new evidence. Each snapshot at an
+unchanged legacy source timestamp reuses its first immutable occurrence, so
+stale A-after-B replay cannot supersede B. A changed source timestamp establishes
+a new occurrence and can represent a legitimate recurrence. Historical packet and manifest rows remain untouched, and
 `write_legacy_backfill_audit()` can persist the returned counts, unresolved
 links, and packet and manifest digests for operator review.
 
