@@ -931,6 +931,100 @@ def test_legacy_metadata_provenance_survives_cross_candidate_reuse(conn):
             )
 
 
+def test_unbound_legacy_attachment_provenance_blocks_checksum_relation(conn):
+    legacy_digest = "a" * 64
+    conn.execute(
+        """INSERT INTO research_documents
+           (company_id, source_url, source_type, title, published_at, fetched_at,
+            ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+           VALUES (1, 'https://example.test/legacy', 'mfn', 'Quarterly report',
+                   '2026-07-15', '2026-07-15T10:00:00Z', 'en', ?, '{}',
+                   'legacy-rules')""",
+        ("c" * 64,),
+    )
+    document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for suffix, digest in (("x", legacy_digest), ("y", "b" * 64)):
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status)
+               VALUES (?, ?, 'application/pdf', 100, ?, 1, 200)""",
+            (document_id, f"https://example.test/{suffix}.pdf", digest),
+        )
+    conn.commit()
+    backfill_legacy_evidence(conn)
+
+    artifact = conn.execute(
+        "SELECT artifact_id FROM evidence_artifacts WHERE sha256=?", (legacy_digest,)
+    ).fetchone()
+    assert artifact is not None
+    assert conn.execute(
+        """SELECT count(*) FROM evidence_candidate_observations o
+           JOIN evidence_attachment_observations ao ON ao.id=o.attachment_observation_id
+           WHERE ao.artifact_id=?""",
+        (artifact[0],),
+    ).fetchone()[0] == 0
+    later_batch = append_observation_batch(
+        conn, _batch(1, "unbound-legacy-artifact", "2026-09-24T11:00:00Z")
+    )
+    observations = []
+    for language in ("en", "sv"):
+        candidate = append_candidate(
+            conn,
+            CandidateInput(
+                1,
+                f"https://example.test/current-{language}",
+                "2026-09-24T11:00:00Z",
+            ),
+        )
+        attachment = append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                candidate["candidate_key"],
+                artifact[0],
+                later_batch["batch_id"],
+                f"https://example.test/current-{language}.pdf",
+                "application/pdf",
+                200,
+                True,
+                {"source": "current"},
+            ),
+        )
+        observations.append(
+            append_candidate_observation(
+                conn,
+                replace(
+                    _observation(
+                        candidate["candidate_key"],
+                        later_batch["batch_id"],
+                        attachment_id=attachment["attachment_observation_id"],
+                    ),
+                    language=language,
+                ),
+            )
+        )
+
+    with pytest.raises(ValueError, match="strong corroborator"):
+        append_relation_observation(
+            conn,
+            RelationObservationInput(
+                later_batch["batch_id"],
+                observations[0]["candidate_observation_id"],
+                observations[1]["candidate_observation_id"],
+                "TRANSLATION",
+                "asserted",
+                {
+                    "strong_corroborator": {
+                        "kind": "shared_attachment_checksum",
+                        "value": legacy_digest,
+                    },
+                    "compatible_signals": ["fiscal_period", "publication_date"],
+                },
+                "relation-rules-1",
+            ),
+        )
+
+
 def test_extraction_insert_is_atomic_when_a_page_is_invalid(conn):
     artifact = append_artifact(
         conn,

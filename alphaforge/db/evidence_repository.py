@@ -686,11 +686,9 @@ def _require_assertion_corroboration(
         inherited_legacy = any(
             attachment is not None
             and conn.execute(
-                """SELECT 1 FROM evidence_candidate_observations o
-                   JOIN evidence_attachment_observations ao
-                     ON ao.id=o.attachment_observation_id
-                   WHERE ao.artifact_id=?
-                     AND json_extract(o.raw_metadata, '$.legacy_import')=1
+                """SELECT 1 FROM evidence_attachment_observations
+                   WHERE artifact_id=?
+                     AND json_extract(raw_metadata, '$.legacy_import')=1
                    LIMIT 1""",
                 (attachment["artifact_id"],),
             ).fetchone()
