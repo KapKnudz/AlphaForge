@@ -1559,7 +1559,7 @@ def test_legacy_backfill_reuses_later_live_identities_without_rewriting_them(con
     )
     artifact = append_artifact(
         conn,
-        ArtifactInput(digest, 10, "application/pdf", "2030-01-01T10:00:00Z"),
+        ArtifactInput(digest, 10, "application/octet-stream", "2030-01-01T10:00:00Z"),
     )
     live_attachment = append_attachment_observation(
         conn,
@@ -1568,7 +1568,7 @@ def test_legacy_backfill_reuses_later_live_identities_without_rewriting_them(con
             artifact["artifact_id"],
             live_batch["batch_id"],
             f"{source_url}.pdf",
-            "application/pdf",
+            "application/octet-stream",
             200,
             True,
         ),
@@ -1630,6 +1630,12 @@ def test_legacy_backfill_reuses_later_live_identities_without_rewriting_them(con
     )
     assert candidate_after == candidate_before
     assert artifact_after == artifact_before
+    assert [
+        row[0]
+        for row in conn.execute(
+            "SELECT content_type FROM evidence_attachment_observations ORDER BY id"
+        )
+    ] == ["application/octet-stream", "application/pdf"]
     historical = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
     assert len(historical) == 1
     assert historical[0]["authoritative_feed_title"] == "Legacy report"

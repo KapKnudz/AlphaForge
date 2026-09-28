@@ -1182,12 +1182,19 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 digest = str(legacy_attachment.get("sha256") or "").lower()
                 if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                     continue
+                existing_artifact = _row(
+                    conn, "evidence_artifacts", "artifact_id", f"sha256:{digest}"
+                )
                 artifact = append_artifact(
                     conn,
                     ArtifactInput(
                         digest,
                         int(legacy_attachment["byte_size"]),
-                        "application/pdf",
+                        (
+                            str(existing_artifact["content_type"])
+                            if existing_artifact is not None
+                            else "application/pdf"
+                        ),
                         effective_at,
                     ),
                 )
