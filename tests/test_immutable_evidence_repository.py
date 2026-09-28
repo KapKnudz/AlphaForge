@@ -1434,14 +1434,14 @@ def test_legacy_backfill_preserves_attachment_acquisition_order(conn):
         """SELECT ao.attachment_source_url, a.sha256
            FROM evidence_attachment_observations ao
            JOIN evidence_artifacts a ON a.id=ao.artifact_id
-           WHERE ao.attachment_observation_id=?""",
+           WHERE ao.id=?""",
         (current["attachment_observation_id"],),
     ).fetchone()
     extraction = conn.execute(
         """SELECT a.sha256
            FROM evidence_artifact_extractions e
            JOIN evidence_artifacts a ON a.id=e.artifact_id
-           WHERE e.extraction_id=?""",
+           WHERE e.id=?""",
         (current["extraction_id"],),
     ).fetchone()
     assert tuple(attachment) == ("https://example.test/a-current.pdf", "b" * 64)
