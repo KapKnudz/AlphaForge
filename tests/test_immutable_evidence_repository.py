@@ -943,6 +943,51 @@ def test_legacy_persisted_pages_can_corroborate_numeric_relation(conn):
     }
 
 
+def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
+    digest = hashlib.sha256(b"shared legacy PDF").hexdigest()
+    for index, content_type in enumerate(
+        ("application/octet-stream", "application/pdf"), start=1
+    ):
+        conn.execute(
+            """INSERT INTO research_documents
+               (company_id, source_url, source_type, title, published_at, fetched_at,
+                ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+               VALUES (1, ?, 'mfn', ?, '2026-07-15', ?, 'en', ?, '{}', 'legacy-rules')""",
+            (
+                f"https://example.test/document-{index}",
+                f"Report {index}",
+                f"2026-07-15T10:0{index}:00Z",
+                hashlib.sha256(f"document-{index}".encode()).hexdigest(),
+            ),
+        )
+        document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status)
+               VALUES (?, ?, ?, 100, ?, 1, 200)""",
+            (
+                document_id,
+                f"https://example.test/document-{index}.pdf",
+                content_type,
+                digest,
+            ),
+        )
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+
+    assert [
+        row[0] for row in conn.execute("SELECT content_type FROM evidence_artifacts")
+    ] == ["application/pdf"]
+    assert [
+        row[0]
+        for row in conn.execute(
+            "SELECT content_type FROM evidence_attachment_observations ORDER BY content_type"
+        )
+    ] == ["application/octet-stream", "application/pdf"]
+
+
 def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, tmp_path):
     conn.execute(
         """INSERT INTO research_documents

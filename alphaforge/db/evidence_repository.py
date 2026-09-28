@@ -1035,7 +1035,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                     ArtifactInput(
                         digest,
                         int(legacy_attachment["byte_size"]),
-                        str(legacy_attachment.get("content_type") or "application/pdf"),
+                        "application/pdf",
                         str(legacy_attachment.get("fetched_at") or effective_at),
                     ),
                 )
