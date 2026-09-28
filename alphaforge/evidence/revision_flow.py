@@ -171,9 +171,7 @@ class RevisionRecorder:
                     extractor="pypdf",
                     extractor_version=_extractor_version(),
                     config_fingerprint=self.config_fingerprint,
-                    text_checksum=hashlib.sha256(
-                        str(extracted.text).encode("utf-8")
-                    ).hexdigest(),
+                    text_checksum=hashlib.sha256(str(extracted.text).encode("utf-8")).hexdigest(),
                     page_count=int(extracted.page_count),
                     pages_included=extracted.pages_included,
                     page_truncated=bool(extracted.page_truncated),
@@ -192,6 +190,10 @@ class RevisionRecorder:
                 "provider_event_id",
                 "mfn_event_id",
                 "mfn_slug",
+                "content_text",
+                "body",
+                "authoritative_publication_timestamp",
+                "feed_report_attachment_url",
             )
             if article.get(key) is not None
         }
@@ -211,7 +213,9 @@ class RevisionRecorder:
                 fiscal_period=article.get("fiscal_period") or article.get("report_period"),
                 period_start=article.get("period_start"),
                 period_end=article.get("period_end") or article.get("report_period_end"),
-                feed_report_identity=article.get("feed_report_identity"),
+                feed_report_identity=article.get("feed_report_identity")
+                or article.get("provider_event_id")
+                or article.get("mfn_event_id"),
                 invitation_veto=bool(article.get("invitation_veto")),
                 eligibility=eligibility,
                 eligibility_reason=eligibility_reason,

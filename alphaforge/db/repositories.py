@@ -623,34 +623,42 @@ def persist_evidence_selection_manifest(
 ) -> None:
     """Persist one immutable selection decision for audit and replay."""
     payload = manifest.to_dict()
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     existing = conn.execute(
-        """SELECT packet_hash FROM evidence_selection_manifests
+        """SELECT manifest_json, report_rules_fingerprint, packet_hash
+           FROM evidence_selection_manifests
            WHERE company_id=? AND as_of=? AND manifest_id=?""",
         (manifest.company_id, manifest.as_of, manifest.manifest_id),
     ).fetchone()
-    if packet_hash is None and existing is not None:
-        packet_hash = existing[0]
-    conn.execute(
-        """DELETE FROM evidence_selection_manifests
-           WHERE company_id=? AND as_of=? AND manifest_id=?""",
-        (manifest.company_id, manifest.as_of, manifest.manifest_id),
-    )
-    conn.execute(
-        """
-        INSERT INTO evidence_selection_manifests
-            (company_id, as_of, manifest_id, manifest_json,
-             report_rules_fingerprint, packet_hash)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            manifest.company_id,
-            manifest.as_of,
-            manifest.manifest_id,
-            json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            manifest.report_rules_fingerprint,
-            packet_hash,
-        ),
-    )
+    if existing is not None:
+        if existing[0] != serialized or existing[1] != manifest.report_rules_fingerprint:
+            raise ValueError("immutable evidence manifest identity has conflicting content")
+        if packet_hash is not None and existing[2] not in (None, packet_hash):
+            raise ValueError("immutable evidence manifest has conflicting packet binding")
+        if packet_hash is not None and existing[2] is None:
+            conn.execute(
+                """UPDATE evidence_selection_manifests SET packet_hash=?
+                   WHERE company_id=? AND as_of=? AND manifest_id=?
+                     AND packet_hash IS NULL""",
+                (packet_hash, manifest.company_id, manifest.as_of, manifest.manifest_id),
+            )
+    else:
+        conn.execute(
+            """
+            INSERT INTO evidence_selection_manifests
+                (company_id, as_of, manifest_id, manifest_json,
+                 report_rules_fingerprint, packet_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest.company_id,
+                manifest.as_of,
+                manifest.manifest_id,
+                serialized,
+                manifest.report_rules_fingerprint,
+                packet_hash,
+            ),
+        )
     if commit:
         conn.commit()
 
@@ -980,6 +988,7 @@ def load_evidence_selection_manifest(
     publication_cutoff: str | None = None,
     excluded_source_urls: set[str] | None = None,
     source_input_fingerprint: str | None = None,
+    artifact_store: Any | None = None,
 ) -> Any:
     """Read immutable evidence facts and derive the shared selection manifest."""
     from datetime import date
@@ -992,6 +1001,31 @@ def load_evidence_selection_manifest(
     if not isinstance(history_values, dict):
         raise ValueError("selection manifest requires an active history window")
     window = ReportHistoryWindow(**history_values)
+
+    # Strict company/window cutover: as soon as immutable observations exist,
+    # V2 facts are the whole input. Legacy rows are never mixed into a V2
+    # packet, even while bounded reacquisition leaves the run incomplete.
+    from alphaforge.db.evidence_repository import (
+        has_manifest_v2_observations,
+        manifest_v2_projection,
+    )
+
+    if has_manifest_v2_observations(conn, company_id=company_id, as_of=as_of):
+        immutable_candidates, immutable_packet_rows = manifest_v2_projection(
+            conn,
+            company_id=company_id,
+            as_of=as_of,
+            artifact_store=artifact_store,
+        )
+        return select_evidence_manifest(
+            company_id=company_id,
+            as_of=as_of,
+            report_rules=report_rules,
+            audit_history=immutable_candidates,
+            candidate_records=immutable_candidates,
+            packet_inputs=immutable_packet_rows,
+            source_input_fingerprint=source_input_fingerprint,
+        )
 
     def cutoff(kind: str) -> str:
         years = window.annual_lookback_years if kind == "annual" else window.interim_lookback_years

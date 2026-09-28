@@ -27,6 +27,7 @@ from alphaforge.db.repositories import (
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
+from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
@@ -402,6 +403,77 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     # The replayed packet has the same content identity, so the
     # content-addressed packet row is refreshed in place, not duplicated.
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
+
+
+def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/q2-v2",
+        "title": "Flow AB Interim Report Q2 2026",
+        "published_at": "2026-07-15T08:00:00Z",
+        "report_kind": "quarterly",
+        "document_type": "interim_report",
+        "fiscal_period": "Q2-2026",
+        "period_end": "2026-06-30",
+        "attachment_url": "https://storage.mfn.test/flow/q2-v2.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    scraper = _FakeScraper([article])
+    store = LocalPdfArtifactStore(tmp_path / "objects")
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    flow = OneCompanyEvidenceFlow(conn, scraper=scraper, artifact_store=store)
+
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = flow.run(company_id, as_of="2026-09-20")
+
+    assert first.status == "complete"
+    source = first.packet["sources"][0]
+    immutable = source["immutable_evidence"]
+    assert source["source_id"].endswith(immutable["candidate_observation_id"])
+    assert immutable["artifact_id"] == f"sha256:{source['attachment']['sha256']}"
+    assert (
+        store.read_pdf(
+            source["attachment"]["sha256"],
+            expected_size=source["attachment"]["byte_size"],
+        )
+        == response.content
+    )
+    manifest = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+    )
+    assert manifest["manifest_version"] == "evidence-selection-manifest-v2"
+    assert manifest["deduplication"][0]["selected"]["artifact_id"] == immutable["artifact_id"]
+
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        side_effect=AssertionError("offline replay must not fetch the PDF"),
+    ):
+        second = flow.run(company_id, as_of="2026-09-20")
+    assert second.status == "complete"
+    assert second.downloaded == 0
+    assert second.packet_hash == first.packet_hash
+
+    digest = source["attachment"]["sha256"]
+    (store.root / "sha256" / digest[:2] / f"{digest}.pdf").unlink()
+    missing = flow.run(company_id, as_of="2026-09-20")
+    assert missing.status == "evidence_incomplete"
+    assert missing.skipped["artifact_unavailable"] == 1
+    assert missing.packet is None
+    assert (
+        conn.execute(
+            "SELECT usable FROM evidence_packets WHERE packet_hash=?",
+            (first.packet_hash,),
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():

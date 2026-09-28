@@ -572,6 +572,7 @@ def build_frozen_evidence_packet(
     report_rules: dict[str, Any] | None = None,
     evidence_diagnostic: dict[str, Any] | None = None,
     selection_manifest: EvidenceSelectionManifest | None = None,
+    artifact_store: Any | None = None,
 ) -> dict[str, Any]:
     """Build canonical point-in-time JSON from persisted page anchors."""
     mapping = mapping or get_verified_mfn_mapping(conn, company_id)
@@ -597,6 +598,7 @@ def build_frozen_evidence_packet(
             report_rules=active_rules,
             publication_cutoff=publication_cutoff,
             excluded_source_urls=excluded_source_urls,
+            artifact_store=artifact_store,
         )
     rows = packet_contents(selection_manifest)
     sources: list[dict[str, Any]] = []
@@ -604,7 +606,8 @@ def build_frozen_evidence_packet(
     fallback_source_count = 0
     excluded_source_urls = excluded_source_urls or set()
     for row in rows:
-        document_id = int(row["document_id"])
+        immutable_observation_id = row.get("candidate_observation_id")
+        document_id = int(row["document_id"]) if row.get("document_id") is not None else None
         page_rows = row.get("pages", [])
         sibling_rows = row.get("siblings", [])
         row_limitations: list[str] = []
@@ -617,14 +620,20 @@ def build_frozen_evidence_packet(
                 row_limitations = ["invalid_extraction_limitations_metadata"]
         limitations.update(row_limitations)
         raw_metadata: dict[str, Any] = {}
-        if row["raw_metadata"]:
+        if isinstance(row.get("raw_metadata"), dict):
+            raw_metadata = dict(row["raw_metadata"])
+        elif row.get("raw_metadata"):
             try:
                 loaded = json.loads(row["raw_metadata"])
                 if isinstance(loaded, dict):
                     raw_metadata = loaded
             except (TypeError, ValueError):
                 limitations.add("invalid_document_metadata")
-        source_id = f"document:{document_id}"
+        source_id = (
+            f"candidate-observation:{immutable_observation_id}"
+            if immutable_observation_id
+            else f"document:{document_id}"
+        )
         body_text = str(row["release_body"] or "").strip()
         body_paragraphs = [
             paragraph.strip() for paragraph in re.split(r"\n\s*\n", body_text) if paragraph.strip()
@@ -665,7 +674,7 @@ def build_frozen_evidence_packet(
             "attachment_tier": raw_metadata.get("attachment_tier"),
             "publication_date": row["published_at"],
             "publication_timestamp_authoritative": bool(
-                raw_metadata.get("authoritative_publication_timestamp")
+                immutable_observation_id or raw_metadata.get("authoritative_publication_timestamp")
             ),
             "ingestion_date": row["fetched_at"],
             "body": {
@@ -702,10 +711,22 @@ def build_frozen_evidence_packet(
                 }
                 for page in page_rows
             ],
-            "bilingual_siblings": [
-                _sibling_entry(sibling, document_id) for sibling in sibling_rows
-            ],
+            "bilingual_siblings": (
+                []
+                if document_id is None
+                else [_sibling_entry(sibling, document_id) for sibling in sibling_rows]
+            ),
         }
+        if immutable_observation_id:
+            source["immutable_evidence"] = {
+                "candidate_key": row["candidate_key"],
+                "candidate_observation_id": immutable_observation_id,
+                "attachment_observation_id": row["attachment_observation_id"],
+                "artifact_id": row["artifact_id"],
+                "extraction_id": row["immutable_extraction_id"],
+                "relation_observation_ids": list(row.get("relation_observation_ids") or ()),
+                "object_uri": row.get("object_uri"),
+            }
         sources.append(source)
     sources.sort(
         key=lambda source: (source["publication_date"], source["source_url"], source["source_id"])
@@ -1352,10 +1373,7 @@ class OneCompanyEvidenceFlow:
         revoked_feed_urls = {
             url
             for url, disposition in feed_dispositions.items()
-            if not (
-                disposition.get("title_admitted")
-                or disposition.get("feed_report_identity")
-            )
+            if not (disposition.get("title_admitted") or disposition.get("feed_report_identity"))
         }
         unique_feed: list[dict[str, Any]] = []
         seen_feed_urls: set[str] = set()
@@ -1461,8 +1479,7 @@ class OneCompanyEvidenceFlow:
                         metadata = {}
                     disposition = feed_dispositions.get(str(entry_url))
                     disposition_matches = disposition is None or (
-                        str(complete.get("title") or "")
-                        == str(disposition.get("title") or "")
+                        str(complete.get("title") or "") == str(disposition.get("title") or "")
                         and metadata.get("report_kind") == disposition.get("report_kind")
                         and metadata.get("document_type") == disposition.get("document_type")
                         and metadata.get("feed_report_identity")
@@ -1470,11 +1487,40 @@ class OneCompanyEvidenceFlow:
                         and metadata.get("feed_report_attachment_url")
                         == disposition.get("feed_report_attachment_url")
                     )
+                    immutable_current = True
+                    if revision_recorder is not None:
+                        immutable_current = (
+                            self.conn.execute(
+                                """SELECT 1 FROM (
+                                       SELECT o.eligibility, o.extraction_id,
+                                              ao.artifact_id,
+                                              ROW_NUMBER() OVER (
+                                                  ORDER BY b.as_of DESC,
+                                                           b.effective_at DESC,
+                                                           b.batch_id DESC
+                                              ) AS precedence_rank
+                                       FROM evidence_candidate_observations o
+                                       JOIN evidence_candidates c ON c.id=o.candidate_id
+                                       JOIN evidence_observation_batches b ON b.id=o.batch_id
+                                       LEFT JOIN evidence_attachment_observations ao
+                                         ON ao.id=o.attachment_observation_id
+                                       WHERE c.company_id=? AND c.release_source_url=?
+                                         AND b.as_of <= ?
+                                   ) current
+                                   WHERE precedence_rank=1 AND eligibility='eligible'
+                                     AND extraction_id IS NOT NULL
+                                     AND EXISTS (
+                                         SELECT 1 FROM evidence_artifact_objects obj
+                                         WHERE obj.artifact_id=current.artifact_id
+                                     )""",
+                                (company_id, str(entry_url), as_of[:10]),
+                            ).fetchone()
+                            is not None
+                        )
                     if (
-                        disposition_matches
-                        and complete.get("report_rules_fingerprint") == active_rules[
-                            "fingerprint"
-                        ]
+                        immutable_current
+                        and disposition_matches
+                        and complete.get("report_rules_fingerprint") == active_rules["fingerprint"]
                         and _has_current_attachment_provenance(complete.get("raw_metadata"))
                     ):
                         continue
@@ -1559,6 +1605,12 @@ class OneCompanyEvidenceFlow:
                 result.skipped["invitation_or_presentation_release"] = (
                     result.skipped.get("invitation_or_presentation_release", 0) + 1
                 )
+                if revision_recorder is not None:
+                    revision_recorder.record(
+                        article,
+                        eligibility="rejected",
+                        eligibility_reason="invitation_veto",
+                    )
                 continue
             published_at = article.get("published_at")
             if not published_at:
@@ -2033,7 +2085,12 @@ class OneCompanyEvidenceFlow:
                     option_url = str(
                         option_variant.get("source_url") or option_variant.get("url") or ""
                     )
-                    if not option_url or option_url in revision_observations:
+                    if (
+                        not option_url
+                        or option_url in revision_observations
+                        or option_download is None
+                        or option_extracted is None
+                    ):
                         continue
                     foreign_reuse = bool(
                         option_existing is not None
@@ -2078,28 +2135,97 @@ class OneCompanyEvidenceFlow:
                         relation_anchor.get("source_url") or relation_anchor.get("url") or ""
                     )
                     for related in variants:
-                        related_url = str(
-                            related.get("source_url") or related.get("url") or ""
-                        )
+                        related_url = str(related.get("source_url") or related.get("url") or "")
                         if not related_url or related_url == anchor_url:
                             continue
                         relation = _variant_relationship(relation_anchor, related)
-                        if (
-                            relation in {"TRANSLATION", "REVISION"}
-                            and anchor_url in revision_observations
-                            and related_url in revision_observations
+                        if relation in {"TRANSLATION", "REVISION"} and (
+                            anchor_url in revision_observations
+                            or related_url in revision_observations
                         ):
+                            from alphaforge.db.evidence_repository import (
+                                current_candidate_observations,
+                            )
+                            from alphaforge.evidence.ingest import (
+                                _numeric_key_figure_fingerprint,
+                                _numeric_similarity,
+                                _translation_neutral_title,
+                            )
+
+                            left_event = (
+                                relation_anchor.get("feed_report_identity")
+                                or relation_anchor.get("provider_event_id")
+                                or relation_anchor.get("mfn_event_id")
+                            )
+                            right_event = (
+                                related.get("feed_report_identity")
+                                or related.get("provider_event_id")
+                                or related.get("mfn_event_id")
+                            )
+                            left_checksum = relation_anchor.get(
+                                "pdf_checksum"
+                            ) or relation_anchor.get("attachment_checksum")
+                            right_checksum = related.get("pdf_checksum") or related.get(
+                                "attachment_checksum"
+                            )
+                            if left_event and left_event == right_event:
+                                strong = {"kind": "shared_provider_event_id", "value": left_event}
+                            elif left_checksum and left_checksum == right_checksum:
+                                strong = {
+                                    "kind": "shared_attachment_checksum",
+                                    "value": left_checksum,
+                                }
+                            else:
+                                left_text = str(
+                                    relation_anchor.get("content_text")
+                                    or relation_anchor.get("body")
+                                    or ""
+                                )
+                                right_text = str(
+                                    related.get("content_text") or related.get("body") or ""
+                                )
+                                similarity = _numeric_similarity(
+                                    _numeric_key_figure_fingerprint(left_text),
+                                    _numeric_key_figure_fingerprint(right_text),
+                                )
+                                strong = {"kind": "numeric_key_figure_jaccard", "value": similarity}
+                            compatible = []
+                            if relation_anchor.get("fiscal_period") and relation_anchor.get(
+                                "fiscal_period"
+                            ) == related.get("fiscal_period"):
+                                compatible.append("fiscal_period")
+                            if relation_anchor.get("period_end") and relation_anchor.get(
+                                "period_end"
+                            ) == related.get("period_end"):
+                                compatible.append("resolved_observation_date")
+                            if (
+                                str(relation_anchor.get("published_at") or "")[:10]
+                                == str(related.get("published_at") or "")[:10]
+                            ):
+                                compatible.append("publication_date")
+                            issuer = str(relation_anchor.get("mfn_slug") or "")
+                            if _translation_neutral_title(
+                                relation_anchor, issuer
+                            ) and _translation_neutral_title(
+                                relation_anchor, issuer
+                            ) == _translation_neutral_title(related, issuer):
+                                compatible.append("translation_neutral_title")
+                            current_by_url = {
+                                str(row["release_source_url"]): row
+                                for row in current_candidate_observations(
+                                    self.conn,
+                                    company_id=company_id,
+                                    as_of=as_of[:10],
+                                )
+                            }
                             revision_recorder.record_relation(
-                                revision_observations[anchor_url],
-                                revision_observations[related_url],
+                                revision_observations.get(anchor_url, current_by_url[anchor_url]),
+                                revision_observations.get(related_url, current_by_url[related_url]),
                                 relation_type=relation,
                                 disposition="asserted",
                                 corroboration={
-                                    "bilingual_group_id": relation_anchor.get(
-                                        "_bilingual_group_id"
-                                    ),
-                                    "left_pdf_checksum": relation_anchor.get("pdf_checksum"),
-                                    "right_pdf_checksum": related.get("pdf_checksum"),
+                                    "strong_corroborator": strong,
+                                    "compatible_signals": compatible,
                                 },
                             )
 
@@ -2268,16 +2394,93 @@ class OneCompanyEvidenceFlow:
                 }
                 persist_option(independent_article, candidate_download, candidate_extracted, [])
                 result.downloaded += 1
-        selection_manifest = load_evidence_selection_manifest(
-            self.conn,
-            company_id=company_id,
-            as_of=as_of,
-            report_rules=active_rules,
-            candidate_records=manifest_candidates,
-            publication_cutoff=today.isoformat(),
-            excluded_source_urls=unresolved_existing_source_urls,
-            source_input_fingerprint=source_input_fingerprint,
-        )
+
+        if revision_recorder is not None and revision_observations:
+            from alphaforge.db.evidence_repository import current_relation_observations
+
+            articles_by_url = {
+                str(article.get("source_url") or article.get("url") or ""): article
+                for article in identity_candidates
+            }
+            for relation_state in current_relation_observations(
+                self.conn, company_id=company_id, as_of=as_of[:10]
+            ):
+                if relation_state["disposition"] != "asserted":
+                    continue
+                endpoints = self.conn.execute(
+                    """SELECT lc.release_source_url, lo.candidate_observation_id,
+                              rc.release_source_url, ro.candidate_observation_id
+                       FROM evidence_candidate_observations lo
+                       JOIN evidence_candidates lc ON lc.id=lo.candidate_id
+                       JOIN evidence_candidate_observations ro ON ro.id=?
+                       JOIN evidence_candidates rc ON rc.id=ro.candidate_id
+                       WHERE lo.id=?""",
+                    (
+                        relation_state["right_candidate_observation_id"],
+                        relation_state["left_candidate_observation_id"],
+                    ),
+                ).fetchone()
+                if endpoints is None:
+                    continue
+                left_url, left_observation_id, right_url, right_observation_id = map(str, endpoints)
+                if not ({left_url, right_url} & revision_observations.keys()):
+                    continue
+                left_article = articles_by_url.get(left_url)
+                right_article = articles_by_url.get(right_url)
+                if left_article is None or right_article is None:
+                    still_valid = False
+                else:
+                    still_valid = (
+                        _variant_relationship(left_article, right_article)
+                        == relation_state["relation_type"]
+                    )
+                if still_valid:
+                    continue
+                left_current = revision_observations.get(
+                    left_url, {"candidate_observation_id": left_observation_id}
+                )
+                right_current = revision_observations.get(
+                    right_url, {"candidate_observation_id": right_observation_id}
+                )
+                revision_recorder.record_relation(
+                    left_current,
+                    right_current,
+                    relation_type=str(relation_state["relation_type"]),
+                    disposition="withdrawn",
+                    corroboration={"reason": "current_observations_no_longer_corroborate"},
+                )
+        try:
+            selection_manifest = load_evidence_selection_manifest(
+                self.conn,
+                company_id=company_id,
+                as_of=as_of,
+                report_rules=active_rules,
+                candidate_records=manifest_candidates,
+                publication_cutoff=today.isoformat(),
+                excluded_source_urls=unresolved_existing_source_urls,
+                source_input_fingerprint=source_input_fingerprint,
+                artifact_store=self.artifact_store,
+            )
+        except Exception as exc:
+            from alphaforge.evidence.artifact_store import ArtifactStoreError
+
+            if not isinstance(exc, ArtifactStoreError):
+                raise
+            return finish(
+                EvidenceFlowResult(
+                    "evidence_incomplete",
+                    company_id,
+                    mapping_status="mapped",
+                    discovered=result.discovered,
+                    eligible=result.eligible,
+                    downloaded=result.downloaded,
+                    persisted=result.persisted,
+                    skipped={**result.skipped, exc.code: 1},
+                    completeness={},
+                    attachment_selection=result.attachment_selection,
+                    message=str(exc),
+                )
+            )
         if not dry_run:
             persist_evidence_selection_manifest(self.conn, selection_manifest, commit=False)
         result.completeness = manifest_completeness(selection_manifest)
@@ -2333,6 +2536,7 @@ class OneCompanyEvidenceFlow:
             report_rules=active_rules,
             evidence_diagnostic=result.diagnostic(),
             selection_manifest=selection_manifest,
+            artifact_store=self.artifact_store,
         )
         if not packet.get("sources"):
             if (

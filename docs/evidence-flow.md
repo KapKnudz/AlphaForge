@@ -68,14 +68,11 @@ a `REVISION` relation rather than a translation; other grouped cross-language
 pairs are labelled `TRANSLATION`. Same-language documents merge only when a
 revision marker identifies the relation; ambiguous or semantic-only pairs
 remain separate and may receive an optional shadow-only review. The preferred
-variant is unconditionally English when available, otherwise Swedish, so a
-later English edition supersedes a previously selected
-Swedish one on re-run; suppressed siblings retain a `duplicate_of`, language,
-group, selection-rule, and relationship audit record (metadata only — the
-demoted edition's attachment, extraction, and page rows are removed),
-surfaced in the packet as
-`selection_state` / `selection_reason` (`PREFERRED_LANGUAGE` /
-`FALLBACK_LANGUAGE`) / `variant_group_id`.
+variant is unconditionally English when available, otherwise Swedish. On the
+V2 path, suppression exists only in the manifest: both candidates retain their
+independent attachments, artifacts, extractions, pages, and observations. The
+mutable `duplicate_of` representation remains a legacy compatibility view and
+is not a V2 selection authority.
 
 Document language is decided from the PDF itself — attachment-filename markers,
 then word scoring over the first three extracted pages — and outranks MFN
@@ -103,12 +100,11 @@ part of this lane.
 
 ### Immutable PDF object storage
 
-`alphaforge.evidence.artifact_store.LocalPdfArtifactStore` is a standalone
-local persistence foundation for retained PDF bytes. This slice does not wire
-it into the production evidence flow; that integration, including enforcement
-that historical metadata without retained verified bytes cannot qualify as new
-evidence, is deferred to `alphaforge-inwido-missing-reports-diagnosis`. By
-default the standalone store writes objects at
+`alphaforge.evidence.artifact_store.LocalPdfArtifactStore` is the production
+retention boundary for new V2 PDF evidence. The CLI injects it into the
+one-company flow, and V2 selection requires a matching immutable object record
+plus successful checksum and size verification. Historical metadata without
+retained verified bytes cannot qualify as new V2 evidence. By default the store writes objects at
 `data/evidence/objects/sha256/<first-two-hex>/<sha256>.pdf` and returns a URI
 relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`). It
 streams writes through a same-filesystem temporary file, validates the byte
@@ -121,9 +117,9 @@ rather than following them outside the configured root.
 Call `read_pdf(sha256, expected_size=...)` before use. It returns bytes only
 after streaming verification and raises `artifact_unavailable` or
 `artifact_checksum_mismatch` typed errors rather than falling back to a URL or
-another object. The store performs no database writes or deletion. These are
-store API guarantees, not claims about the currently unwired production
-evidence-selection path.
+another object. The store itself performs no database writes or deletion; the
+revision recorder persists its returned identity in the append-only evidence
+tables.
 
 A run with no model-ready source returns `no_evidence` with one of
 `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source`;
@@ -206,11 +202,12 @@ inputs, typed rejections — from immutable facts plus one rule input set
 construction, cache reuse, and readiness all consume that one view, never
 raw persistence; `tools/check_evidence_manifest_boundary.py` enforces the
 boundary in CI, and `manifest_store.load_evidence_view` is the read path.
-Groups key on explicit bilingual group, then provider event id, then fiscal
-period, then source URL (attachmentless events still group by period), with
-class `annual` vs `quarterly`; completeness counts retained groups over
-expected groups and `packet_contents()` returns exactly the retained
-sources. Rejected candidates carry typed reasons (`rejection_reason`,
+Legacy groups retain their compatibility grouping rules. V2 groups key only on
+an independently owned candidate or a currently asserted immutable relation;
+shared event, period, PDF URL, or hash does not itself merge candidates. Every
+group also carries its fiscal slot key. Completeness counts retained groups over
+expected groups and `packet_contents()` returns exactly the observations
+selected by stable identity. Rejected candidates carry typed reasons (`rejection_reason`,
 `outside_history_window`, `not_selected_by_manifest`); ambiguous-selection
 blocks are recorded as typed rejections so their group stays in the coverage
 denominator. Evidence without a recognized `attachment_tier` is
@@ -221,9 +218,9 @@ fingerprint matches and the candidate remains in that feed. The normalized feed
 fingerprint is part of the manifest identity. A refetched detail that disappears
 cannot erase a previously blocked candidate; changed feed inputs do not inherit
 prior dispositions. The shared ranking/readiness view reconstructs candidate
-accounting from that persisted manifest. Re-recording
-a recurring manifest identity moves it to the current end of the run chronology,
-so A→B→A input transitions expose A to replay and readiness. For new v2 evidence, Swedish and English release URLs are independent candidate
+accounting from that persisted manifest. Manifest JSON is immutable: recording
+the same identity verifies identical content and may bind its packet hash once,
+but does not delete and reinsert history. For new V2 evidence, Swedish and English release URLs are independent candidate
 identities with independently retained artifacts and extractions. An append-only
 asserted relation may group their observations only after deterministic
 corroboration; a later explicit withdrawn relation separates them. Suppression
@@ -237,9 +234,13 @@ Manifest v2 groups also carry a deterministic fiscal `slot_key` and, for new
 immutable observations, bind the exact `candidate_observation_id`,
 `attachment_observation_id`, content-addressed `artifact_id`, and
 `extraction_id`. A later observation at the same release or PDF URL therefore
-cannot change what an older manifest selected. Historical v1 manifests remain
-readable as historical records; packet construction never combines v1-selected
-rows with a v2 manifest.
+cannot change what an older manifest selected. Historical V1 manifests remain
+readable as historical records. Cutover is strict per company and requested
+window: once any current V2 observation exists, projection uses only current
+append-only candidate and relation observations. Missing retained objects or
+untouched candidates make the run incomplete rather than mixing V1 rows into a
+V2 packet. Latest revoked, rejected, or incomplete observations block fallback
+to an older eligible observation.
 
 New PDF bytes are retained by `LocalPdfArtifactStore` below
 `data/evidence/objects/sha256/` under their lowercase SHA-256. Writes use a
@@ -262,8 +263,10 @@ leave an independent incomplete group.
 
 The resulting `evidence_packets` row is canonical JSON with stable ordering,
 publication/ingestion dates, source/page anchors, limitations, and a SHA-256
-hash over the packet without its own `packet_hash`. Database-local document IDs
-are projected to stable source identities derived from source URL, publication
+hash over the packet without its own `packet_hash`. V2 packet sources copy the
+exact candidate, candidate-observation, attachment-observation, artifact,
+extraction, relation, and object identities selected by the manifest. Legacy
+database-local document IDs are projected to stable source identities derived from source URL, publication
 date, and attachment checksum for hashing; stored IDs remain available for
 provenance and citations. Run timestamps (`issuer.verified_at`, per-source
 `ingestion_date`) stay in the stored JSON for auditability but are excluded

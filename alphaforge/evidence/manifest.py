@@ -58,9 +58,7 @@ class EvidenceSelectionManifest:
             if isinstance(group.get("selected"), dict)
         }
         retained_observations.discard("")
-        retained_urls = {
-            url for group in self.deduplication for url in group["packet_source_urls"]
-        }
+        retained_urls = {url for group in self.deduplication for url in group["packet_source_urls"]}
         return tuple(
             source
             for source in self.packet_inputs
@@ -138,6 +136,9 @@ def _in_window(record: dict[str, Any], *, as_of: str, window: ReportHistoryWindo
 
 
 def _group_id(record: dict[str, Any]) -> str:
+    selection_group = record.get("selection_group_id")
+    if selection_group:
+        return f"immutable:{selection_group}"
     explicit = record.get("bilingual_group_id") or record.get("_bilingual_group_id")
     if explicit:
         return f"variant:{explicit}"
@@ -260,6 +261,7 @@ def select_evidence_manifest(
                 "candidate_observation_ids": [],
                 "relation_observation_ids": [],
                 "packet_source_urls": [],
+                "rejections": [],
                 "selected": None,
             },
         )
@@ -286,6 +288,7 @@ def select_evidence_manifest(
                 "candidate_observation_ids": [],
                 "relation_observation_ids": [],
                 "packet_source_urls": [],
+                "rejections": [],
                 "selected": None,
             },
         )
@@ -305,10 +308,33 @@ def select_evidence_manifest(
             group["selected"] = stable
 
     for group in groups.values():
+        for source_url in group["candidate_source_urls"]:
+            candidate = next(
+                (record for record in candidates if _source_url(record) == source_url),
+                None,
+            )
+            if candidate is None or source_url in group["packet_source_urls"]:
+                continue
+            group["rejections"].append(
+                {
+                    **(
+                        {"candidate_observation_id": candidate["candidate_observation_id"]}
+                        if candidate.get("candidate_observation_id")
+                        else {}
+                    ),
+                    "reason": str(candidate.get("rejection_reason") or "not_selected_by_manifest"),
+                }
+            )
         group["candidate_source_urls"].sort()
         group["candidate_observation_ids"].sort()
         group["relation_observation_ids"].sort()
         group["packet_source_urls"].sort()
+        group["rejections"].sort(
+            key=lambda rejection: (
+                str(rejection.get("candidate_observation_id") or ""),
+                str(rejection["reason"]),
+            )
+        )
     selected_urls = {url for group in groups.values() for url in group["packet_source_urls"]}
     considered_urls = {_source_url(record) for record in candidates}
     candidate_by_url = {_source_url(record): record for record in candidates}
@@ -316,11 +342,7 @@ def select_evidence_manifest(
         {
             "source_url": url,
             **(
-                {
-                    "candidate_observation_id": candidate_by_url[url][
-                        "candidate_observation_id"
-                    ]
-                }
+                {"candidate_observation_id": candidate_by_url[url]["candidate_observation_id"]}
                 if candidate_by_url.get(url, {}).get("candidate_observation_id")
                 else {}
             ),
