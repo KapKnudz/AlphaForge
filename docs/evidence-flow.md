@@ -145,8 +145,11 @@ mutating history.
 this history. Checksum metadata may create an artifact and existing extracted
 pages may be copied with a `legacy_source_without_retained_bytes` limitation,
 but the backfill creates no retained-object claim or asserted relationship;
-legacy `duplicate_of` links remain unresolved audit entries. Imported candidate
-observations are therefore `incomplete`. Repeating an unchanged snapshot is
+legacy `duplicate_of` links remain unresolved audit entries. The
+asserted-relation boundary rejects provider-event and checksum corroboration
+from these metadata-only imports; only proof recomputed from persisted page
+content can qualify. Imported candidate observations are therefore
+`incomplete`. Repeating an unchanged snapshot is
 idempotent, while a changed or reverted legacy snapshot appends another
 occurrence. Historical packet and manifest rows remain untouched, and
 `write_legacy_backfill_audit()` can persist the returned counts, unresolved

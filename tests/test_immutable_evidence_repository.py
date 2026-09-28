@@ -864,7 +864,14 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
                    '2026-07-15T10:00:00.123Z', 'en', ?, ?, 'legacy-rules')""",
         (
             "a" * 64,
-            json.dumps({"report_kind": "quarterly", "bilingual_group_id": "q2"}),
+            json.dumps(
+                {
+                    "report_kind": "quarterly",
+                    "fiscal_period": "Q2-2026",
+                    "bilingual_group_id": "q2",
+                    "provider_event_id": "legacy-event",
+                }
+            ),
         ),
     )
     parent_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -898,11 +905,20 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
             json.dumps(
                 {
                     "report_kind": "quarterly",
+                    "fiscal_period": "Q2-2026",
                     "bilingual_group_id": "q2",
+                    "provider_event_id": "legacy-event",
                     "relationship": "TRANSLATION",
                 }
             ),
         ),
+    )
+    child_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """INSERT INTO research_attachments
+           (document_id, source_url, content_type, byte_size, sha256, magic_valid, http_status)
+           VALUES (?, 'https://example.test/sv.pdf', 'application/pdf', 100, ?, 1, 200)""",
+        (child_id, "a" * 64),
     )
     conn.execute(
         """INSERT INTO evidence_packets
@@ -939,10 +955,10 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     assert counts == second_counts
     assert first == second
     assert first_path.read_bytes() == second_path.read_bytes()
-    assert first["metadata_only_artifacts"] == 1
+    assert first["metadata_only_artifacts"] == 2
     assert first["asserted_relations"] == 0
     assert first["unresolved_relations"] == [
-        {"document_id": parent_id + 1, "duplicate_of": parent_id}
+        {"document_id": child_id, "duplicate_of": parent_id}
     ]
     assert (
         conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
@@ -967,6 +983,45 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     )
     assert make_candidate_key(1, "https://example.test/en")
     assert make_batch_id(_batch(1, "one", "2026-09-24T10:00:00Z"))
+
+    relation_batch = append_observation_batch(
+        conn,
+        replace(
+            _batch(1, "legacy-relation-attempt", "2031-01-01T00:00:00Z"),
+            as_of="2026-07-15",
+            report_rules_fingerprint="legacy-rules",
+        ),
+    )
+    legacy_observations = current_candidate_observations(
+        conn, company_id=1, as_of="2026-07-15"
+    )
+    en_observation = next(row for row in legacy_observations if row["language"] == "en")
+    sv_observation = next(row for row in legacy_observations if row["language"] == "sv")
+    compatible_signals = ["fiscal_period", "publication_date"]
+    for strong_corroborator in (
+        {"kind": "shared_provider_event_id", "value": "legacy-event"},
+        {"kind": "shared_attachment_checksum", "value": "a" * 64},
+    ):
+        with pytest.raises(ValueError, match="strong corroborator"):
+            append_relation_observation(
+                conn,
+                RelationObservationInput(
+                    relation_batch["batch_id"],
+                    en_observation["candidate_observation_id"],
+                    sv_observation["candidate_observation_id"],
+                    "TRANSLATION",
+                    "asserted",
+                    {
+                        "strong_corroborator": strong_corroborator,
+                        "compatible_signals": compatible_signals,
+                    },
+                    "relation-rules-1",
+                ),
+            )
+    assert (
+        conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
+        == 0
+    )
 
     extraction_count = conn.execute(
         "SELECT count(*) FROM evidence_artifact_extractions"

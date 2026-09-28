@@ -652,8 +652,12 @@ def _require_assertion_corroboration(
         raise ValueError("asserted relation requires structured corroboration")
     kind = strong.get("kind")
     value = strong.get("value")
+    metadata_only_legacy = any(
+        bool(_json_object(observation["raw_metadata"]).get("legacy_import"))
+        for observation in (left, right)
+    )
     if kind == "shared_provider_event_id":
-        valid_strong = bool(value) and all(
+        valid_strong = not metadata_only_legacy and bool(value) and all(
             observation["feed_report_identity"] == value for observation in (left, right)
         )
     elif kind == "shared_attachment_checksum":
@@ -665,7 +669,7 @@ def _require_assertion_corroboration(
             ).fetchone()
             for observation in (left, right)
         ]
-        valid_strong = bool(value) and all(
+        valid_strong = not metadata_only_legacy and bool(value) and all(
             checksum is not None and checksum[0] == str(value).lower() for checksum in checksums
         )
     else:
