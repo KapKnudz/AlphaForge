@@ -975,6 +975,71 @@ def test_v2_feed_revocation_does_not_require_legacy_document(tmp_path):
     assert revoked.packet is None
 
 
+def test_v2_feed_revocation_supersedes_incomplete_observation_without_legacy_document(
+    tmp_path,
+):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/incomplete-revoked",
+        "title": "Flow AB Annual Report 2025",
+        "published_at": None,
+        "report_kind": "annual",
+    }
+
+    class _IncompleteFeed(_FakeScraper):
+        def scrape_details(self, entries, *, reports_only=True):
+            self.scrape_calls.append(list(entries))
+            return []
+
+        def drain_detail_dispositions(self):
+            return {
+                article["source_url"]: {
+                    **article,
+                    "eligibility": "incomplete",
+                    "eligibility_reason": "missing_detail_title",
+                }
+            }
+
+    first = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_IncompleteFeed([article]),
+        artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+    ).run(company_id, as_of="2026-09-20")
+
+    assert first.status == "evidence_incomplete"
+    assert conn.execute("SELECT count(*) FROM research_documents").fetchone()[0] == 0
+    assert current_candidate_observations(
+        conn, company_id=company_id, as_of="2026-09-20"
+    )[0]["eligibility"] == "incomplete"
+
+    class _RevokedFeed(_FakeScraper):
+        def __init__(self):
+            super().__init__([])
+
+        def drain_discovery_dispositions(self):
+            return {
+                article["source_url"]: {
+                    "source_url": article["source_url"],
+                    "title": "Flow AB general update",
+                    "title_admitted": False,
+                    "feed_report_identity": None,
+                    "invitation_veto": False,
+                }
+            }
+
+    revoked = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_RevokedFeed(),
+        artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+    ).run(company_id, as_of="2026-09-20")
+
+    assert revoked.status == "no_evidence"
+    current = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
+    assert current[0]["eligibility"] == "revoked"
+    assert revoked.packet is None
+
+
 def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
     conn = _connection()
     company_id = _mapped_company(conn)

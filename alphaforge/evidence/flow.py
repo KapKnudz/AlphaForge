@@ -1471,16 +1471,15 @@ class OneCompanyEvidenceFlow:
                 max_pages=self.limits.max_pages,
                 max_pdf_bytes=self.limits.max_pdf_bytes,
             )
-            admitted_immutable_urls = {
+            observed_immutable_urls = {
                 str(observation["release_source_url"])
                 for observation in current_candidate_observations(
                     self.conn, company_id=company_id, as_of=as_of[:10]
                 )
-                if observation["eligibility"] == "eligible"
             }
             for source_url in sorted(revoked_feed_urls):
                 if (
-                    source_url not in admitted_immutable_urls
+                    source_url not in observed_immutable_urls
                     and find_complete_evidence_document(self.conn, company_id, source_url) is None
                 ):
                     continue
