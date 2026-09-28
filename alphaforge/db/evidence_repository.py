@@ -1130,6 +1130,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             audit["candidates"] += 1
             current_attachment = None
             for legacy_attachment in ordered_semantic_attachments:
+                current_attachment = None
                 digest = str(legacy_attachment.get("sha256") or "").lower()
                 if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                     continue

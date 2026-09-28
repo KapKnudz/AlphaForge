@@ -1304,6 +1304,53 @@ def test_legacy_backfill_preserves_attachment_acquisition_order(conn):
     assert extraction[0] == "b" * 64
 
 
+def test_legacy_backfill_does_not_fallback_when_current_attachment_is_malformed(conn):
+    document_id = _insert_legacy_document(
+        conn, title="Malformed current attachment", fetched_at="2026-07-15T10:00:00Z"
+    )
+    for source_url, digest in (
+        ("https://example.test/old-valid.pdf", "a" * 64),
+        ("https://example.test/current-invalid.pdf", "not-a-checksum"),
+    ):
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status)
+               VALUES (?, ?, 'application/pdf', 100, ?, 1, 200)""",
+            (document_id, source_url, digest),
+        )
+    conn.execute(
+        """INSERT INTO document_extractions
+           (document_id, extractor, text_checksum, page_count, pages_included,
+            page_truncated, scanned, limitations)
+           VALUES (?, 'pypdf', 'current-text', 1, '1', 0, 0, '[]')""",
+        (document_id,),
+    )
+    extraction_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """INSERT INTO document_pages
+           (extraction_id, page_number, anchor, text, text_checksum)
+           VALUES (?, 1, ?, 'Current attachment page', 'current-page')""",
+        (extraction_id, f"document:{document_id}#page:1"),
+    )
+    conn.commit()
+
+    audit = backfill_legacy_evidence(conn)
+
+    assert [
+        row[0]
+        for row in conn.execute(
+            "SELECT attachment_source_url FROM evidence_attachment_observations"
+        )
+    ] == ["https://example.test/old-valid.pdf"]
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")[0]
+    assert current["attachment_observation_id"] is None
+    assert current["extraction_id"] is None
+    assert conn.execute("SELECT count(*) FROM evidence_artifact_extractions").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM evidence_artifact_pages").fetchone()[0] == 0
+    assert audit["unbound_extractions"] == [document_id]
+
+
 def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
     digest = hashlib.sha256(b"shared legacy PDF").hexdigest()
     for index, content_type in enumerate(
