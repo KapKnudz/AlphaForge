@@ -855,6 +855,94 @@ def test_extraction_insert_is_atomic_when_a_page_is_invalid(conn):
     assert conn.execute("SELECT count(*) FROM evidence_artifact_pages").fetchone()[0] == 0
 
 
+def test_legacy_persisted_pages_can_corroborate_numeric_relation(conn):
+    pages = {
+        "en": "Revenue 100 MSEK; EBIT 10 MSEK.",
+        "sv": "Omsättning 100 MSEK; EBIT 10 MSEK.",
+    }
+    for index, (language, text) in enumerate(pages.items(), start=1):
+        metadata = json.dumps(
+            {"report_kind": "quarterly", "fiscal_period": "Q2-2026"}
+        )
+        conn.execute(
+            """INSERT INTO research_documents
+               (company_id, source_url, source_type, title, published_at, fetched_at,
+                ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+               VALUES (1, ?, 'mfn', ?, '2026-07-15', ?, ?, ?, ?, 'legacy-rules')""",
+            (
+                f"https://example.test/numeric-{language}",
+                "Q2 report" if language == "en" else "Q2 rapport",
+                f"2026-07-15T10:0{index}:00Z",
+                language,
+                hashlib.sha256(f"pdf-{language}".encode()).hexdigest(),
+                metadata,
+            ),
+        )
+        document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        artifact_digest = hashlib.sha256(f"artifact-{language}".encode()).hexdigest()
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status)
+               VALUES (?, ?, 'application/pdf', 100, ?, 1, 200)""",
+            (document_id, f"https://example.test/numeric-{language}.pdf", artifact_digest),
+        )
+        text_digest = hashlib.sha256(text.encode()).hexdigest()
+        conn.execute(
+            """INSERT INTO document_extractions
+               (document_id, extractor, text_checksum, page_count, pages_included,
+                page_truncated, scanned, limitations)
+               VALUES (?, 'pypdf', ?, 1, '1', 0, 0, '[]')""",
+            (document_id, text_digest),
+        )
+        extraction_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """INSERT INTO document_pages
+               (extraction_id, page_number, anchor, text, text_checksum)
+               VALUES (?, 1, 'p1', ?, ?)""",
+            (extraction_id, text, text_digest),
+        )
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+    observations = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    en_observation = next(row for row in observations if row["language"] == "en")
+    sv_observation = next(row for row in observations if row["language"] == "sv")
+    relation_batch = append_observation_batch(
+        conn,
+        replace(
+            _batch(1, "legacy-numeric-relation", "2027-01-01T00:00:00Z"),
+            as_of="2026-07-15",
+            report_rules_fingerprint="legacy-rules",
+        ),
+    )
+
+    relation = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            relation_batch["batch_id"],
+            en_observation["candidate_observation_id"],
+            sv_observation["candidate_observation_id"],
+            "TRANSLATION",
+            "asserted",
+            {
+                "strong_corroborator": {
+                    "kind": "numeric_key_figure_jaccard",
+                    "value": 1.0,
+                },
+                "compatible_signals": ["fiscal_period", "publication_date"],
+            },
+            "relation-rules-1",
+        ),
+    )
+
+    assert relation["disposition"] == "asserted"
+    assert json.loads(relation["corroboration"])["strong_corroborator"] == {
+        "kind": "numeric_key_figure_jaccard",
+        "value": 1.0,
+    }
+
+
 def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, tmp_path):
     conn.execute(
         """INSERT INTO research_documents
