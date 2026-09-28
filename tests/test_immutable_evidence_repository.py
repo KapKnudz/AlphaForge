@@ -418,12 +418,18 @@ def test_current_state_prefers_newest_cutoff_before_acquisition_time(conn):
         ),
     )
 
-    assert current_candidate_observations(conn, company_id=1, as_of="2026-09-24")[0][
-        "candidate_observation_id"
-    ] == eligible["candidate_observation_id"]
-    assert current_candidate_observations(conn, company_id=1, as_of="2026-09-20")[0][
-        "candidate_observation_id"
-    ] == revoked["candidate_observation_id"]
+    assert (
+        current_candidate_observations(conn, company_id=1, as_of="2026-09-24")[0][
+            "candidate_observation_id"
+        ]
+        == eligible["candidate_observation_id"]
+    )
+    assert (
+        current_candidate_observations(conn, company_id=1, as_of="2026-09-20")[0][
+            "candidate_observation_id"
+        ]
+        == revoked["candidate_observation_id"]
+    )
 
 
 def test_relation_state_prefers_newest_cutoff_before_acquisition_time(conn):
@@ -483,12 +489,18 @@ def test_relation_state_prefers_newest_cutoff_before_acquisition_time(conn):
         ),
     )
 
-    assert current_relation_observations(conn, company_id=1, as_of="2026-09-24")[0][
-        "relation_observation_id"
-    ] == asserted["relation_observation_id"]
-    assert current_relation_observations(conn, company_id=1, as_of="2026-09-20")[0][
-        "relation_observation_id"
-    ] == withdrawn["relation_observation_id"]
+    assert (
+        current_relation_observations(conn, company_id=1, as_of="2026-09-24")[0][
+            "relation_observation_id"
+        ]
+        == asserted["relation_observation_id"]
+    )
+    assert (
+        current_relation_observations(conn, company_id=1, as_of="2026-09-20")[0][
+            "relation_observation_id"
+        ]
+        == withdrawn["relation_observation_id"]
+    )
 
 
 def test_independent_candidates_and_explicit_relation_withdrawal(conn):
@@ -932,14 +944,18 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     assert first["unresolved_relations"] == [
         {"document_id": parent_id + 1, "duplicate_of": parent_id}
     ]
-    assert conn.execute(
-        "SELECT count(*) FROM evidence_candidate_relation_observations"
-    ).fetchone()[0] == 0
-    assert conn.execute(
-        """SELECT effective_at FROM evidence_observation_batches
+    assert (
+        conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
+        == 0
+    )
+    assert (
+        conn.execute(
+            """SELECT effective_at FROM evidence_observation_batches
            WHERE source_input_fingerprint != 'source-staged-v2'
            ORDER BY effective_at LIMIT 1"""
-    ).fetchone()[0] == "2026-07-15T10:00:00.123000Z"
+        ).fetchone()[0]
+        == "2026-07-15T10:00:00.123000Z"
+    )
     assert conn.execute("SELECT count(*) FROM evidence_artifact_objects").fetchone()[0] == 0
     assert {
         row[0] for row in conn.execute("SELECT eligibility FROM evidence_candidate_observations")
@@ -986,8 +1002,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     }
     assert backfill_legacy_evidence(conn) == reverted
     assert {
-        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-        for table in NEW_TABLES
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in NEW_TABLES
     } == reverted_counts
     assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == (
         batch_count + 2

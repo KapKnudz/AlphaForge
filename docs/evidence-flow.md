@@ -127,6 +127,29 @@ post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
 gate — shortfalls return `evidence_incomplete` with no frozen packet instead
 of a green `complete`.
 
+### Immutable history and legacy backfill
+
+Schema version 10 adds an SQLite-only, additive history layer in
+`alphaforge/db/evidence_repository.py`; it does not replace the legacy tables,
+acquire evidence, or select manifest slots. Each MFN release URL remains an
+independent candidate. Content-addressed artifacts and verified object
+locations are recorded separately from append-only attachment, extraction/page,
+candidate-classification, and relation observations. Stable identities make
+identical retries idempotent and reject conflicting payloads, while relation
+withdrawals and later candidate states append new observations rather than
+mutating history.
+
+`backfill_legacy_evidence()` explicitly snapshots current legacy MFN rows into
+this history. Checksum metadata may create an artifact and existing extracted
+pages may be copied with a `legacy_source_without_retained_bytes` limitation,
+but the backfill creates no retained-object claim or asserted relationship;
+legacy `duplicate_of` links remain unresolved audit entries. Imported candidate
+observations are therefore `incomplete`. Repeating an unchanged snapshot is
+idempotent, while a changed or reverted legacy snapshot appends another
+occurrence. Historical packet and manifest rows remain untouched, and
+`write_legacy_backfill_audit()` can persist the returned counts, unresolved
+links, and packet and manifest digests for operator review.
+
 ### Evidence-selection manifest
 
 Selection is centralized in a pure, side-effect-free manifest

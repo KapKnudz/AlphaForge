@@ -545,10 +545,13 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
     existing = _row(conn, "evidence_candidate_observations", "candidate_observation_id", identity)
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
-    if conn.execute(
-        "SELECT 1 FROM evidence_candidate_observations WHERE candidate_id=? AND batch_id=?",
-        (candidate["id"], batch["id"]),
-    ).fetchone() is not None:
+    if (
+        conn.execute(
+            "SELECT 1 FROM evidence_candidate_observations WHERE candidate_id=? AND batch_id=?",
+            (candidate["id"], batch["id"]),
+        ).fetchone()
+        is not None
+    ):
         raise ImmutableEvidenceConflict(
             "observation batch already contains a different state for this candidate"
         )
@@ -628,7 +631,9 @@ def _require_assertion_corroboration(
         for observation in (left, right)
     )
     if relation_type == "TRANSLATION" and (len(languages) != 2 or has_revision):
-        raise ValueError("translation relation requires opposite languages without revision markers")
+        raise ValueError(
+            "translation relation requires opposite languages without revision markers"
+        )
     if relation_type == "REVISION" and not has_revision:
         raise ValueError("revision relation requires persisted revision evidence")
 
@@ -660,9 +665,7 @@ def _require_assertion_corroboration(
         )
     else:
         numeric_fingerprints = [
-            _numeric_key_figure_fingerprint(
-                _extraction_text(conn, observation["extraction_id"])
-            )
+            _numeric_key_figure_fingerprint(_extraction_text(conn, observation["extraction_id"]))
             for observation in (left, right)
         ]
         numeric_similarity = _numeric_similarity(*numeric_fingerprints)
@@ -788,11 +791,14 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
     )
     if existing is not None:
         return _require_same(existing, expected, identity=identity)
-    if conn.execute(
-        """SELECT 1 FROM evidence_candidate_relation_observations
+    if (
+        conn.execute(
+            """SELECT 1 FROM evidence_candidate_relation_observations
            WHERE relation_key=? AND batch_id=?""",
-        (relation_key, batch["id"]),
-    ).fetchone() is not None:
+            (relation_key, batch["id"]),
+        ).fetchone()
+        is not None
+    ):
         raise ImmutableEvidenceConflict(
             "observation batch already contains a different state for this relation"
         )
@@ -964,9 +970,9 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             }
             source_fingerprint = _stable_hash({"legacy_current_state": snapshot})
             rules = str(document.get("report_rules_fingerprint") or "legacy")
-            as_of = str(
-                document.get("published_at") or document.get("fetched_at") or "1970-01-01"
-            )[:10]
+            as_of = str(document.get("published_at") or document.get("fetched_at") or "1970-01-01")[
+                :10
+            ]
             candidate_key = make_candidate_key(company_id, str(document["source_url"]))
             prior_import = conn.execute(
                 """SELECT b.*
@@ -981,8 +987,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             previous = company_previous.get(company_id)
             if prior_import is not None and (
                 previous is None
-                or _legacy_datetime(str(prior_import["effective_at"]))
-                > _legacy_datetime(previous)
+                or _legacy_datetime(str(prior_import["effective_at"])) > _legacy_datetime(previous)
             ):
                 previous = str(prior_import["effective_at"])
             same_occurrence = (
