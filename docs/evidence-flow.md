@@ -67,10 +67,13 @@ revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) produce
 a `REVISION` relation rather than a translation; other grouped cross-language
 pairs are labelled `TRANSLATION`. Same-language documents merge only when a
 revision marker identifies the relation; ambiguous or semantic-only pairs
-remain separate and may receive an optional shadow-only review. The preferred
-variant is unconditionally English when available, otherwise Swedish. On the
-V2 path, suppression exists only in the manifest: both candidates retain their
-independent attachments, artifacts, extractions, pages, and observations. The
+remain separate and may receive an optional shadow-only review. A
+translation-only component prefers English when available, otherwise Swedish.
+A revision component first selects the latest applicable publication; a
+revision marker, English, and source URL are deterministic tie-breakers in that
+order. On the V2 path, suppression exists only in the manifest: both candidates
+retain their independent attachments, artifacts, extractions, pages, and
+observations. The
 mutable `duplicate_of` representation remains a legacy compatibility view and
 is not a V2 selection authority.
 
@@ -85,9 +88,11 @@ hint may remain an explicit fallback as `release_hint:<case>`, never as PDF
 verification; fallback documents remain outside automatic language-based
 grouping and add `pdf_language_fallback:N` to packet limitations. The evidence
 and source used are stored as `pdf_language` / `language_evidence`. Identity
-dates (`period_start` / `period_end`) are resolved once per article from
-provider metadata or the release body and carried into packet sources next to
-`observation_date`.
+dates (`period_start` / `period_end`) and derived fiscal periods are resolved
+once per article from provider metadata, title, or release body, then persisted
+on immutable candidate observations and carried into packet sources next to
+`observation_date`. A current observation missing a now-derivable fiscal period
+is reacquired and superseded before relation construction.
 
 An explicit `observation_date`, `period_end`, or `report_period_end` is used
 first. Otherwise the flow extracts an unambiguous covered-period end date from
@@ -149,7 +154,9 @@ the highest applicable tier refuse as ambiguous.
 Invitation/presentation/webcast-titled pages never contribute evidence. V2
 records terminal detail dispositions: invitations and confirmed non-reports are
 rejected without reducing completeness, while missing authoritative detail
-metadata is incomplete and blocks a complete result.
+metadata is incomplete and blocks a complete result across reruns. A later feed
+reclassification appends a revoked observation from any current candidate
+state, so a superseded incomplete classification no longer blocks completeness.
 Diagnostics split into `discovered`, `filtered_before_download`,
 `download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
 the CLI output); per-class `completeness` (annual vs quarterly over
@@ -246,7 +253,9 @@ window: once any current V2 observation exists, projection uses only current
 append-only candidate and relation observations. Missing retained objects or
 untouched candidates make the run incomplete rather than mixing V1 rows into a
 V2 packet. Latest revoked, rejected, or incomplete observations block fallback
-to an older eligible observation.
+to an older eligible observation. History-window filtering precedes retained
+object lookup and verification, so an expired artifact cannot block a current
+read.
 
 New PDF bytes are retained by `LocalPdfArtifactStore` below
 `data/evidence/objects/sha256/` under their lowercase SHA-256. Writes use a
@@ -272,13 +281,16 @@ publication/ingestion dates, source/page anchors, limitations, and a SHA-256
 hash over the packet without its own `packet_hash`. V2 packet sources copy the
 exact candidate, candidate-observation, attachment-observation, artifact,
 extraction, relation, and object identities selected by the manifest. Legacy
-database-local document IDs are projected to stable source identities derived from source URL, publication
-date, and attachment checksum for hashing; stored IDs remain available for
-provenance and citations. Run timestamps (`issuer.verified_at`, per-source
-`ingestion_date`) stay in the stored JSON for auditability but are excluded
-from the hash, so identical artifacts hash identically across databases built
-at different times; packets hashed before this change keep validating against
-their stored hash. Every packet also stamps `evidence_rules_version` (currently
+database-local document IDs are projected to stable source identities derived
+from source URL, publication date, and attachment checksum for hashing; stored
+IDs remain available for provenance and citations. The V2 stable projection
+retains artifact, extraction, and object identities, the stored
+`acquisition_max_pdf_bytes`, and relation type/key plus both endpoint URLs;
+database-local observation and relation IDs are normalized. Run timestamps
+(`issuer.verified_at`, per-source `ingestion_date`) stay in the stored JSON for
+auditability but are excluded from the hash, so identical artifacts hash
+identically across databases built at different times; packets hashed before
+this change keep validating against their stored hash. Every packet also stamps `evidence_rules_version` (currently
 v6 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale

@@ -510,19 +510,14 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     )
     set_user_version(conn, 10)
     migrate(conn)
-    with patch(
-        "alphaforge.evidence.flow.request_with_retry", return_value=response
-    ) as reacquire:
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response) as reacquire:
         enriched = flow.run(company_id, as_of="2026-09-20")
     assert enriched.status == "complete"
     assert enriched.packet_hash == first.packet_hash
     assert reacquire.called
-    assert (
-        conn.execute(
-            "SELECT acquisition_max_pdf_bytes FROM evidence_artifact_objects"
-        ).fetchone()[0]
-        == len(response.content)
-    )
+    assert conn.execute(
+        "SELECT acquisition_max_pdf_bytes FROM evidence_artifact_objects"
+    ).fetchone()[0] == len(response.content)
 
     with pytest.raises(ArtifactUnavailableError, match="artifact_verifier_unavailable"):
         build_frozen_evidence_packet(conn, company_id=company_id, as_of="2026-09-20")
@@ -910,9 +905,7 @@ def test_v2_intentional_rejections_do_not_block_complete_evidence(tmp_path):
         ).run(company_id, as_of="2026-09-20")
 
     assert result.status == "complete"
-    assert [source["source_url"] for source in result.packet["sources"]] == [
-        valid["source_url"]
-    ]
+    assert [source["source_url"] for source in result.packet["sources"]] == [valid["source_url"]]
     assert result.completeness == {"quarterly": {"expected": 1, "retained": 1}}
     observations = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
     assert {row["release_source_url"]: row["eligibility"] for row in observations} == {
@@ -1009,9 +1002,12 @@ def test_v2_feed_revocation_supersedes_incomplete_observation_without_legacy_doc
 
     assert first.status == "evidence_incomplete"
     assert conn.execute("SELECT count(*) FROM research_documents").fetchone()[0] == 0
-    assert current_candidate_observations(
-        conn, company_id=company_id, as_of="2026-09-20"
-    )[0]["eligibility"] == "incomplete"
+    assert (
+        current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")[0][
+            "eligibility"
+        ]
+        == "incomplete"
+    )
 
     class _RevokedFeed(_FakeScraper):
         def __init__(self):
