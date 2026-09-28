@@ -939,6 +939,14 @@ def _table_digest(conn: Any, table: str, columns: str) -> str:
     return _stable_hash(rows)
 
 
+def _legacy_semantic_attachment(attachment: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in attachment.items()
+        if key not in {"id", "document_id", "fetched_at"}
+    }
+
+
 def _legacy_semantic_state(
     document: Mapping[str, Any],
     attachments: Sequence[Mapping[str, Any]],
@@ -951,12 +959,7 @@ def _legacy_semantic_state(
     }
     semantic_document["duplicate_of_source_url"] = duplicate_source_url
     semantic_attachments = [
-        {
-            key: value
-            for key, value in attachment.items()
-            if key not in {"id", "document_id", "fetched_at"}
-        }
-        for attachment in attachments
+        _legacy_semantic_attachment(attachment) for attachment in attachments
     ]
     semantic_attachments.sort(key=_canonical_json)
     semantic_extraction = (
@@ -1062,7 +1065,9 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 duplicate_source,
             )
             source_fingerprint = _stable_hash({"legacy_current_state": snapshot})
-            semantic_attachments = snapshot["attachments"]
+            ordered_semantic_attachments = [
+                _legacy_semantic_attachment(attachment) for attachment in attachments
+            ]
             semantic_extraction = snapshot["extraction"]
             semantic_pages = snapshot["pages"]
             rules = str(document.get("report_rules_fingerprint") or "legacy")
@@ -1124,7 +1129,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             )
             audit["candidates"] += 1
             current_attachment = None
-            for legacy_attachment in semantic_attachments:
+            for legacy_attachment in ordered_semantic_attachments:
                 digest = str(legacy_attachment.get("sha256") or "").lower()
                 if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                     continue

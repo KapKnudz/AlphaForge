@@ -1252,6 +1252,58 @@ def test_legacy_recurrence_requires_changed_source_timestamp(conn):
     assert current[0]["effective_at"] == "2026-07-15T10:05:00.000000Z"
 
 
+def test_legacy_backfill_preserves_attachment_acquisition_order(conn):
+    document_id = _insert_legacy_document(
+        conn, title="Ordered attachments", fetched_at="2026-07-15T10:00:00Z"
+    )
+    for source_url, digest in (
+        ("https://example.test/z-old.pdf", "a" * 64),
+        ("https://example.test/a-current.pdf", "b" * 64),
+    ):
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status)
+               VALUES (?, ?, 'application/pdf', 100, ?, 1, 200)""",
+            (document_id, source_url, digest),
+        )
+    conn.execute(
+        """INSERT INTO document_extractions
+           (document_id, extractor, text_checksum, page_count, pages_included,
+            page_truncated, scanned, limitations)
+           VALUES (?, 'pypdf', 'current-text', 0, '', 0, 0, '[]')""",
+        (document_id,),
+    )
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+
+    assert [
+        row[0]
+        for row in conn.execute(
+            """SELECT attachment_source_url
+               FROM evidence_attachment_observations ORDER BY id"""
+        )
+    ] == ["https://example.test/z-old.pdf", "https://example.test/a-current.pdf"]
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")[0]
+    attachment = conn.execute(
+        """SELECT ao.attachment_source_url, a.sha256
+           FROM evidence_attachment_observations ao
+           JOIN evidence_artifacts a ON a.id=ao.artifact_id
+           WHERE ao.attachment_observation_id=?""",
+        (current["attachment_observation_id"],),
+    ).fetchone()
+    extraction = conn.execute(
+        """SELECT a.sha256
+           FROM evidence_artifact_extractions e
+           JOIN evidence_artifacts a ON a.id=e.artifact_id
+           WHERE e.extraction_id=?""",
+        (current["extraction_id"],),
+    ).fetchone()
+    assert tuple(attachment) == ("https://example.test/a-current.pdf", "b" * 64)
+    assert extraction[0] == "b" * 64
+
+
 def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
     digest = hashlib.sha256(b"shared legacy PDF").hexdigest()
     for index, content_type in enumerate(
