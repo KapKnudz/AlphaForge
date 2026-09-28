@@ -54,7 +54,8 @@ at least two compatible derived signals (fiscal period, resolved observation
 date, publication date, or translation-neutral title). Immutable asserted
 relations persist that proof as `strong_corroborator` (`kind` and `value`) plus
 a `compatible_signals` list; the repository checks identity claims and signals
-against both candidate observations and recomputes numeric similarity from the
+against both candidate observations, applies the ingestion title normalization
+to persisted issuer/title data, and recomputes numeric similarity from the
 persisted extraction pages. It also enforces matching report kinds,
 opposite-language translations, and revision-marker evidence for revisions;
 withdrawals need only record their reason. Either side carrying a
@@ -133,7 +134,9 @@ Selection is centralized in a pure, side-effect-free manifest
 evidence-selection-manifest-v1`). Immutable observation batches use canonical
 `YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; candidate and
 relation observations may reuse older facts but cannot reference a later batch,
-and candidate rules must match their batch. `select_evidence_manifest()` derives every
+and candidate rules must match their batch. Current-state reads rank the newest
+eligible cutoff before acquisition chronology, so a later replay of an older
+cutoff cannot regress a newer view. `select_evidence_manifest()` derives every
 evidence role — audit history, cache, reuse, deduplication groups, packet
 inputs, typed rejections — from immutable facts plus one rule input set
 (`alphaforge/evidence/report_rules.py`, fingerprinted). Completeness, packet

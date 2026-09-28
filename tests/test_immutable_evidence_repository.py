@@ -394,6 +394,103 @@ def test_batch_children_cannot_reference_future_facts(conn):
     assert withdrawal["disposition"] == "withdrawn"
 
 
+def test_current_state_prefers_newest_cutoff_before_acquisition_time(conn):
+    candidate = append_candidate(
+        conn, CandidateInput(1, "https://example.test/cutoff", "2026-09-24T10:00:00Z")
+    )
+    current_batch = append_observation_batch(
+        conn, _batch(1, "current-cutoff", "2026-09-24T10:00:00Z")
+    )
+    eligible = append_candidate_observation(
+        conn, _observation(candidate["candidate_key"], current_batch["batch_id"])
+    )
+    historical_batch = append_observation_batch(
+        conn,
+        replace(
+            _batch(1, "historical-cutoff", "2026-09-24T11:00:00Z"),
+            as_of="2026-09-20",
+        ),
+    )
+    revoked = append_candidate_observation(
+        conn,
+        _observation(
+            candidate["candidate_key"], historical_batch["batch_id"], eligibility="revoked"
+        ),
+    )
+
+    assert current_candidate_observations(conn, company_id=1, as_of="2026-09-24")[0][
+        "candidate_observation_id"
+    ] == eligible["candidate_observation_id"]
+    assert current_candidate_observations(conn, company_id=1, as_of="2026-09-20")[0][
+        "candidate_observation_id"
+    ] == revoked["candidate_observation_id"]
+
+
+def test_relation_state_prefers_newest_cutoff_before_acquisition_time(conn):
+    source_batch = append_observation_batch(
+        conn,
+        replace(_batch(1, "relation-source", "2026-09-24T09:00:00Z"), as_of="2026-09-20"),
+    )
+    en = append_candidate(
+        conn, CandidateInput(1, "https://example.test/cutoff-en", "2026-09-24T09:00:00Z")
+    )
+    sv = append_candidate(
+        conn, CandidateInput(1, "https://example.test/cutoff-sv", "2026-09-24T09:00:00Z")
+    )
+    en_observation = append_candidate_observation(
+        conn, _observation(en["candidate_key"], source_batch["batch_id"])
+    )
+    sv_observation = append_candidate_observation(
+        conn,
+        replace(_observation(sv["candidate_key"], source_batch["batch_id"]), language="sv"),
+    )
+    current_batch = append_observation_batch(
+        conn, _batch(1, "relation-current", "2026-09-24T10:00:00Z")
+    )
+    proof = {
+        "strong_corroborator": {"kind": "shared_provider_event_id", "value": "event-1"},
+        "compatible_signals": ["fiscal_period", "publication_date"],
+    }
+    asserted = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            current_batch["batch_id"],
+            en_observation["candidate_observation_id"],
+            sv_observation["candidate_observation_id"],
+            "TRANSLATION",
+            "asserted",
+            proof,
+            "relation-rules-1",
+        ),
+    )
+    historical_batch = append_observation_batch(
+        conn,
+        replace(
+            _batch(1, "relation-historical", "2026-09-24T11:00:00Z"),
+            as_of="2026-09-20",
+        ),
+    )
+    withdrawn = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            historical_batch["batch_id"],
+            en_observation["candidate_observation_id"],
+            sv_observation["candidate_observation_id"],
+            "TRANSLATION",
+            "withdrawn",
+            {"reason": "historical-replay"},
+            "relation-rules-1",
+        ),
+    )
+
+    assert current_relation_observations(conn, company_id=1, as_of="2026-09-24")[0][
+        "relation_observation_id"
+    ] == asserted["relation_observation_id"]
+    assert current_relation_observations(conn, company_id=1, as_of="2026-09-20")[0][
+        "relation_observation_id"
+    ] == withdrawn["relation_observation_id"]
+
+
 def test_independent_candidates_and_explicit_relation_withdrawal(conn):
     en = append_candidate(
         conn, CandidateInput(1, "https://example.test/en", "2026-09-24T10:00:00Z")
@@ -520,7 +617,14 @@ def test_independent_candidates_and_explicit_relation_withdrawal(conn):
 def test_asserted_relation_type_compatibility_uses_persisted_observations(conn):
     batch = append_observation_batch(conn, _batch(1, "relations", "2026-09-24T10:00:00Z"))
 
-    def observed(url: str, *, language: str, kind: str, title: str):
+    def observed(
+        url: str,
+        *,
+        language: str,
+        kind: str,
+        title: str,
+        published_at: str = "2026-09-20T08:00:00Z",
+    ):
         candidate = append_candidate(conn, CandidateInput(1, url, "2026-09-24T10:00:00Z"))
         return append_candidate_observation(
             conn,
@@ -528,6 +632,7 @@ def test_asserted_relation_type_compatibility_uses_persisted_observations(conn):
                 _observation(candidate["candidate_key"], batch["batch_id"], title=title),
                 language=language,
                 report_kind=kind,
+                published_at=published_at,
             ),
         )
 
@@ -603,6 +708,40 @@ def test_asserted_relation_type_compatibility_uses_persisted_observations(conn):
         ),
     )
     assert revision["disposition"] == "asserted"
+
+    titled_en = observed(
+        "https://example.test/titled-en",
+        language="en",
+        kind="quarterly",
+        title="Acme Interim Report Q2",
+        published_at="2026-09-20T08:00:00Z",
+    )
+    titled_sv = observed(
+        "https://example.test/titled-sv",
+        language="sv",
+        kind="quarterly",
+        title="Acme Delårsrapport Q2",
+        published_at="2026-09-21T08:00:00Z",
+    )
+    title_relation = append_relation_observation(
+        conn,
+        RelationObservationInput(
+            batch["batch_id"],
+            titled_en["candidate_observation_id"],
+            titled_sv["candidate_observation_id"],
+            "TRANSLATION",
+            "asserted",
+            {
+                "strong_corroborator": {
+                    "kind": "shared_provider_event_id",
+                    "value": "event-1",
+                },
+                "compatible_signals": ["fiscal_period", "translation_neutral_title"],
+            },
+            "relation-rules-1",
+        ),
+    )
+    assert title_relation["disposition"] == "asserted"
 
 
 def test_numeric_relation_corroboration_is_recomputed_from_persisted_pages(conn):

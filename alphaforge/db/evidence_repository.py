@@ -601,11 +601,13 @@ def _require_assertion_corroboration(
     corroboration: Mapping[str, Any],
     left: Mapping[str, Any],
     right: Mapping[str, Any],
+    issuer: str,
 ) -> None:
     from alphaforge.evidence.ingest import (
         _has_revision_markers,
         _numeric_key_figure_fingerprint,
         _numeric_similarity,
+        _translation_neutral_title,
     )
 
     if (
@@ -671,6 +673,10 @@ def _require_assertion_corroboration(
             and numeric_similarity >= 0.5
             and abs(float(value) - numeric_similarity) < 1e-12
         )
+    normalized_titles = [
+        _translation_neutral_title(_relation_document(conn, observation), issuer)
+        for observation in (left, right)
+    ]
     actual_signals = {
         "fiscal_period": bool(left["fiscal_period"])
         and left["fiscal_period"] == right["fiscal_period"],
@@ -678,8 +684,8 @@ def _require_assertion_corroboration(
         and left["period_end"] == right["period_end"],
         "publication_date": bool(left["published_at"])
         and str(left["published_at"])[:10] == str(right["published_at"])[:10],
-        "translation_neutral_title": bool(left["detail_title"])
-        and str(left["detail_title"]).casefold() == str(right["detail_title"]).casefold(),
+        "translation_neutral_title": bool(normalized_titles[0])
+        and normalized_titles[0] == normalized_titles[1],
     }
     distinct_signals = {
         signal
@@ -719,10 +725,6 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
         for source_batch in source_batches
     ):
         raise ValueError("relation candidate observation postdates its batch")
-    if value.disposition == "asserted":
-        _require_assertion_corroboration(
-            conn, value.relation_type, value.corroboration, left, right
-        )
     left_candidate = conn.execute(
         "SELECT candidate_key, company_id FROM evidence_candidates WHERE id=?",
         (left["candidate_id"],),
@@ -735,6 +737,16 @@ def append_relation_observation(conn: Any, value: RelationObservationInput) -> d
         raise ValueError("relation candidate is missing")
     if left_candidate[1] != right_candidate[1] or left_candidate[1] != batch["company_id"]:
         raise ValueError("relation candidates and batch must belong to one company")
+    company = conn.execute(
+        "SELECT name, ticker FROM companies WHERE id=?", (left_candidate[1],)
+    ).fetchone()
+    if company is None:
+        raise ValueError("relation company is missing")
+    if value.disposition == "asserted":
+        issuer = " ".join(str(part) for part in company if part)
+        _require_assertion_corroboration(
+            conn, value.relation_type, value.corroboration, left, right, issuer
+        )
     if left_candidate[0] == right_candidate[0]:
         raise ValueError("relation requires two independent candidates")
     if left_candidate[0] > right_candidate[0]:
@@ -813,12 +825,12 @@ def current_candidate_observations(
                       b.batch_id AS stable_batch_id, b.effective_at,
                       ROW_NUMBER() OVER (
                           PARTITION BY o.candidate_id
-                          ORDER BY b.effective_at DESC, b.batch_id DESC
+                          ORDER BY b.as_of DESC, b.effective_at DESC, b.batch_id DESC
                       ) AS precedence_rank
                FROM evidence_candidate_observations o
                JOIN evidence_candidates c ON c.id=o.candidate_id
                JOIN evidence_observation_batches b ON b.id=o.batch_id
-               WHERE c.company_id=? AND substr(b.as_of, 1, 10) <= substr(?, 1, 10)
+               WHERE c.company_id=? AND b.as_of <= ?
            )
            SELECT * FROM ranked WHERE precedence_rank=1 ORDER BY candidate_key""",
         (company_id, as_of),
@@ -835,11 +847,11 @@ def current_relation_observations(
                SELECT r.*, b.batch_id AS stable_batch_id, b.effective_at,
                       ROW_NUMBER() OVER (
                           PARTITION BY r.relation_key
-                          ORDER BY b.effective_at DESC, b.batch_id DESC
+                          ORDER BY b.as_of DESC, b.effective_at DESC, b.batch_id DESC
                       ) AS precedence_rank
                FROM evidence_candidate_relation_observations r
                JOIN evidence_observation_batches b ON b.id=r.batch_id
-               WHERE b.company_id=? AND substr(b.as_of, 1, 10) <= substr(?, 1, 10)
+               WHERE b.company_id=? AND b.as_of <= ?
            )
            SELECT * FROM ranked WHERE precedence_rank=1 ORDER BY relation_key""",
         (company_id, as_of),
