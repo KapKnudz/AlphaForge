@@ -983,7 +983,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 :10
             ]
             candidate_key = make_candidate_key(company_id, str(document["source_url"]))
-            prior_import = conn.execute(
+            latest_import = conn.execute(
                 """SELECT b.*
                    FROM evidence_candidate_observations o
                    JOIN evidence_candidates c ON c.id=o.candidate_id
@@ -993,24 +993,35 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                    ORDER BY b.effective_at DESC, b.batch_id DESC LIMIT 1""",
                 (candidate_key,),
             ).fetchone()
+            matching_import = conn.execute(
+                """SELECT b.*
+                   FROM evidence_candidate_observations o
+                   JOIN evidence_candidates c ON c.id=o.candidate_id
+                   JOIN evidence_observation_batches b ON b.id=o.batch_id
+                   WHERE c.candidate_key=?
+                     AND json_extract(o.raw_metadata, '$.legacy_import')=1
+                     AND b.source_input_fingerprint=?
+                     AND b.report_rules_fingerprint=?
+                     AND b.as_of=?
+                   ORDER BY b.effective_at, b.batch_id LIMIT 1""",
+                (candidate_key, source_fingerprint, rules, as_of),
+            ).fetchone()
             previous = company_previous.get(company_id)
-            if prior_import is not None and (
+            if latest_import is not None and (
                 previous is None
-                or _legacy_datetime(str(prior_import["effective_at"])) > _legacy_datetime(previous)
+                or _legacy_datetime(str(latest_import["effective_at"]))
+                > _legacy_datetime(previous)
             ):
-                previous = str(prior_import["effective_at"])
-            same_occurrence = (
-                prior_import is not None
-                and str(prior_import["source_input_fingerprint"]) == source_fingerprint
-                and str(prior_import["report_rules_fingerprint"]) == rules
-                and str(prior_import["as_of"]) == as_of
-            )
+                previous = str(latest_import["effective_at"])
             effective_at = (
-                str(prior_import["effective_at"])
-                if same_occurrence
+                str(matching_import["effective_at"])
+                if matching_import is not None
                 else _legacy_effective_at(document.get("fetched_at"), previous)
             )
-            company_previous[company_id] = effective_at
+            if previous is None or _legacy_datetime(effective_at) > _legacy_datetime(previous):
+                company_previous[company_id] = effective_at
+            else:
+                company_previous[company_id] = previous
             batch_value = ObservationBatchInput(
                 company_id=company_id,
                 as_of=as_of,

@@ -943,6 +943,62 @@ def test_legacy_persisted_pages_can_corroborate_numeric_relation(conn):
     }
 
 
+def _insert_legacy_document(conn, *, title: str, fetched_at: str) -> int:
+    conn.execute(
+        """INSERT INTO research_documents
+           (company_id, source_url, source_type, title, published_at, fetched_at,
+            ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+           VALUES (1, 'https://example.test/replay', 'mfn', ?, '2026-07-15', ?,
+                   'en', ?, '{}', 'legacy-rules')""",
+        (title, fetched_at, hashlib.sha256(title.encode()).hexdigest()),
+    )
+    document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    return document_id
+
+
+def test_legacy_stale_replay_reuses_first_occurrence(conn):
+    document_id = _insert_legacy_document(
+        conn, title="State A", fetched_at="2026-07-15T10:00:00Z"
+    )
+    backfill_legacy_evidence(conn)
+    conn.execute("UPDATE research_documents SET title='State B' WHERE id=?", (document_id,))
+    conn.commit()
+    backfill_legacy_evidence(conn)
+    conn.execute("UPDATE research_documents SET title='State A' WHERE id=?", (document_id,))
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == 2
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    assert current[0]["authoritative_feed_title"] == "State B"
+
+
+def test_legacy_recurrence_requires_changed_source_timestamp(conn):
+    document_id = _insert_legacy_document(
+        conn, title="State A", fetched_at="2026-07-15T10:00:00Z"
+    )
+    backfill_legacy_evidence(conn)
+    conn.execute("UPDATE research_documents SET title='State B' WHERE id=?", (document_id,))
+    conn.commit()
+    backfill_legacy_evidence(conn)
+    conn.execute(
+        """UPDATE research_documents
+           SET title='State A', fetched_at='2026-07-15T10:05:00Z'
+           WHERE id=?""",
+        (document_id,),
+    )
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+
+    assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == 3
+    current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    assert current[0]["authoritative_feed_title"] == "State A"
+    assert current[0]["effective_at"] == "2026-07-15T10:05:00.000000Z"
+
+
 def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
     digest = hashlib.sha256(b"shared legacy PDF").hexdigest()
     for index, content_type in enumerate(
@@ -1220,7 +1276,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
         table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in NEW_TABLES
     } == reverted_counts
     assert conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0] == (
-        batch_count + 2
+        batch_count + 1
     )
     current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
     en_current = next(row for row in current if row["release_source_url"].endswith("/en"))
@@ -1228,4 +1284,4 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
         "SELECT text FROM evidence_artifact_pages WHERE extraction_id=?",
         (en_current["extraction_id"],),
     ).fetchone()
-    assert page[0] == "hello"
+    assert page[0] == "corrected"
