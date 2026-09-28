@@ -743,9 +743,13 @@ def _require_assertion_corroboration(
             is not None
             for attachment in attachments
         )
-        valid_strong = not (directly_legacy or inherited_legacy) and bool(value) and all(
-            attachment is not None and attachment["sha256"] == str(value).lower()
-            for attachment in attachments
+        valid_strong = (
+            not (directly_legacy or inherited_legacy)
+            and bool(value)
+            and all(
+                attachment is not None and attachment["sha256"] == str(value).lower()
+                for attachment in attachments
+            )
         )
     else:
         numeric_fingerprints = [
@@ -1006,9 +1010,7 @@ def _legacy_semantic_state(
         key: value for key, value in document.items() if key not in {"id", "duplicate_of"}
     }
     semantic_document["duplicate_of_source_url"] = duplicate_source_url
-    semantic_attachments = [
-        _legacy_semantic_attachment(attachment) for attachment in attachments
-    ]
+    semantic_attachments = [_legacy_semantic_attachment(attachment) for attachment in attachments]
     semantic_attachments.sort(key=_canonical_json)
     semantic_extraction = (
         {
@@ -1022,9 +1024,7 @@ def _legacy_semantic_state(
     semantic_pages = []
     for page in pages:
         semantic_page = {
-            key: value
-            for key, value in page.items()
-            if key not in {"id", "extraction_id"}
+            key: value for key, value in page.items() if key not in {"id", "extraction_id"}
         }
         anchor = str(semantic_page["anchor"])
         if anchor.startswith("document:") and "#page:" in anchor:
@@ -1149,8 +1149,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             previous = company_previous.get(company_id)
             if latest_import is not None and (
                 previous is None
-                or _legacy_datetime(str(latest_import["effective_at"]))
-                > _legacy_datetime(previous)
+                or _legacy_datetime(str(latest_import["effective_at"])) > _legacy_datetime(previous)
             ):
                 previous = str(latest_import["effective_at"])
             effective_at = (

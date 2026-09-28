@@ -1105,12 +1105,15 @@ def test_unbound_legacy_attachment_provenance_blocks_checksum_relation(conn):
         "SELECT artifact_id FROM evidence_artifacts WHERE sha256=?", (legacy_digest,)
     ).fetchone()
     assert artifact is not None
-    assert conn.execute(
-        """SELECT count(*) FROM evidence_candidate_observations o
+    assert (
+        conn.execute(
+            """SELECT count(*) FROM evidence_candidate_observations o
            JOIN evidence_attachment_observations ao ON ao.id=o.attachment_observation_id
            WHERE ao.artifact_id=?""",
-        (artifact[0],),
-    ).fetchone()[0] == 0
+            (artifact[0],),
+        ).fetchone()[0]
+        == 0
+    )
     later_batch = append_observation_batch(
         conn, _batch(1, "unbound-legacy-artifact", "2026-09-24T11:00:00Z")
     )
@@ -1207,9 +1210,7 @@ def test_legacy_persisted_pages_can_corroborate_numeric_relation(conn):
         "sv": "Omsättning 100 MSEK; EBIT 10 MSEK.",
     }
     for index, (language, text) in enumerate(pages.items(), start=1):
-        metadata = json.dumps(
-            {"report_kind": "quarterly", "fiscal_period": "Q2-2026"}
-        )
+        metadata = json.dumps({"report_kind": "quarterly", "fiscal_period": "Q2-2026"})
         conn.execute(
             """INSERT INTO research_documents
                (company_id, source_url, source_type, title, published_at, fetched_at,
@@ -1304,9 +1305,7 @@ def _insert_legacy_document(conn, *, title: str, fetched_at: str) -> int:
 
 
 def test_legacy_stale_replay_reuses_first_occurrence(conn):
-    document_id = _insert_legacy_document(
-        conn, title="State A", fetched_at="2026-07-15T10:00:00Z"
-    )
+    document_id = _insert_legacy_document(conn, title="State A", fetched_at="2026-07-15T10:00:00Z")
     backfill_legacy_evidence(conn)
     conn.execute("UPDATE research_documents SET title='State B' WHERE id=?", (document_id,))
     conn.commit()
@@ -1376,9 +1375,7 @@ def test_legacy_child_recreation_does_not_create_recurrence(conn):
 
 
 def test_legacy_recurrence_requires_changed_source_timestamp(conn):
-    document_id = _insert_legacy_document(
-        conn, title="State A", fetched_at="2026-07-15T10:00:00Z"
-    )
+    document_id = _insert_legacy_document(conn, title="State A", fetched_at="2026-07-15T10:00:00Z")
     backfill_legacy_evidence(conn)
     conn.execute("UPDATE research_documents SET title='State B' WHERE id=?", (document_id,))
     conn.commit()
@@ -1500,9 +1497,7 @@ def test_legacy_backfill_does_not_fallback_when_current_attachment_is_malformed(
 
 def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
     digest = hashlib.sha256(b"shared legacy PDF").hexdigest()
-    for index, content_type in enumerate(
-        ("application/octet-stream", "application/pdf"), start=1
-    ):
+    for index, content_type in enumerate(("application/octet-stream", "application/pdf"), start=1):
         conn.execute(
             """INSERT INTO research_documents
                (company_id, source_url, source_type, title, published_at, fetched_at,
@@ -1532,9 +1527,9 @@ def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
 
     backfill_legacy_evidence(conn)
 
-    assert [
-        row[0] for row in conn.execute("SELECT content_type FROM evidence_artifacts")
-    ] == ["application/pdf"]
+    assert [row[0] for row in conn.execute("SELECT content_type FROM evidence_artifacts")] == [
+        "application/pdf"
+    ]
     assert [
         row[0]
         for row in conn.execute(
@@ -1642,9 +1637,7 @@ def test_legacy_backfill_reuses_later_live_identities_without_rewriting_them(con
     assert historical[0]["effective_at"] == "2026-07-15T10:00:00.000000Z"
     current = current_candidate_observations(conn, company_id=1, as_of="2030-01-01")
     assert len(current) == 1
-    assert current[0]["candidate_observation_id"] == live_observation[
-        "candidate_observation_id"
-    ]
+    assert current[0]["candidate_observation_id"] == live_observation["candidate_observation_id"]
 
 
 def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, tmp_path):
@@ -1749,9 +1742,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     assert first_path.read_bytes() == second_path.read_bytes()
     assert first["metadata_only_artifacts"] == 2
     assert first["asserted_relations"] == 0
-    assert first["unresolved_relations"] == [
-        {"document_id": child_id, "duplicate_of": parent_id}
-    ]
+    assert first["unresolved_relations"] == [{"document_id": child_id, "duplicate_of": parent_id}]
     assert (
         conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
         == 0
@@ -1784,9 +1775,7 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
             report_rules_fingerprint="legacy-rules",
         ),
     )
-    legacy_observations = current_candidate_observations(
-        conn, company_id=1, as_of="2026-07-15"
-    )
+    legacy_observations = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
     en_observation = next(row for row in legacy_observations if row["language"] == "en")
     sv_observation = next(row for row in legacy_observations if row["language"] == "sv")
     compatible_signals = ["fiscal_period", "publication_date"]
@@ -1829,18 +1818,20 @@ def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, t
     }
     assert backfill_legacy_evidence(conn) == metadata_corrected
     assert {
-        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-        for table in NEW_TABLES
+        table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in NEW_TABLES
     } == metadata_counts
     assert conn.execute("SELECT count(*) FROM evidence_artifact_extractions").fetchone()[0] == (
         extraction_count + 1
     )
     current = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
     en_current = next(row for row in current if row["release_source_url"].endswith("/en"))
-    assert conn.execute(
-        "SELECT page_truncated FROM evidence_artifact_extractions WHERE id=?",
-        (en_current["extraction_id"],),
-    ).fetchone()[0] == 1
+    assert (
+        conn.execute(
+            "SELECT page_truncated FROM evidence_artifact_extractions WHERE id=?",
+            (en_current["extraction_id"],),
+        ).fetchone()[0]
+        == 1
+    )
 
     batch_count = conn.execute("SELECT count(*) FROM evidence_observation_batches").fetchone()[0]
     conn.execute(
