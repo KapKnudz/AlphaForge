@@ -1163,6 +1163,9 @@ class OneCompanyEvidenceFlow:
         shadow_missing_item: str | Mapping[str, Any] | None = None,
         shadow_specialist_requirement: str | None = None,
     ) -> EvidenceFlowResult:
+        reset_scraper = getattr(self.scraper, "reset_run_state", None)
+        if callable(reset_scraper):
+            reset_scraper()
         row = self.conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
         if row is None:
             result = EvidenceFlowResult(
@@ -1597,7 +1600,7 @@ class OneCompanyEvidenceFlow:
             for disposition in detail_dispositions.values():
                 revision_recorder.record(
                     disposition,
-                    eligibility="incomplete",
+                    eligibility=str(disposition.get("eligibility") or "incomplete"),
                     eligibility_reason=str(
                         disposition.get("eligibility_reason") or "detail_candidate_incomplete"
                     ),
@@ -1617,7 +1620,12 @@ class OneCompanyEvidenceFlow:
         blocked_candidates: list[dict[str, Any]] = []
         pre_cutoff_report = False
         hard_blocks = int(discovery_truncated) + (
-            len(detail_dispositions) if revision_recorder is not None else 0
+            sum(
+                disposition.get("eligibility") == "incomplete"
+                for disposition in detail_dispositions.values()
+            )
+            if revision_recorder is not None
+            else 0
         )
         if discovery_truncated:
             result.skipped["discovery_truncated"] = 1

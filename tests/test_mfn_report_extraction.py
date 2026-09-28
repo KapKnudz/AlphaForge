@@ -1137,6 +1137,9 @@ def test_authoritative_feed_title_does_not_override_detail_invitation_veto():
     ):
         assert scraper.scrape_details([seed]) == []
     assert scraper.drain_detail_skips() == {"invitation_or_presentation_release": 1}
+    disposition = scraper.drain_detail_dispositions()[seed["url"]]
+    assert disposition["eligibility"] == "rejected"
+    assert disposition["published_at"] is None
 
 
 def test_corroborated_narrative_report_keeps_distinct_attachments_ambiguous():

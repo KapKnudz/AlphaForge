@@ -365,7 +365,18 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
             for key, field_value in expected.items()
             if key not in {"stored_at", "acquisition_max_pdf_bytes"}
         }
-        return _require_same(existing, stable_expected, identity=identity)
+        result = _require_same(existing, stable_expected, identity=identity)
+        if (
+            result["acquisition_max_pdf_bytes"] is None
+            and value.acquisition_max_pdf_bytes is not None
+        ):
+            conn.execute(
+                """UPDATE evidence_artifact_objects
+                   SET acquisition_max_pdf_bytes=? WHERE id=?""",
+                (value.acquisition_max_pdf_bytes, result["id"]),
+            )
+            return _row(conn, "evidence_artifact_objects", "id", result["id"]) or {}
+        return result
     conn.execute(
         """INSERT INTO evidence_artifact_objects
            (object_record_id, artifact_id, object_uri, storage_kind,

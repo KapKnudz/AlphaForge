@@ -526,6 +526,13 @@ class MfnScraper:
         self._discovery_dispositions: dict[str, dict[str, Any]] = {}
         self._discovery_truncated = False
 
+    def reset_run_state(self) -> None:
+        self._discovery_skips = {}
+        self._detail_skips = {}
+        self._detail_dispositions = {}
+        self._discovery_dispositions = {}
+        self._discovery_truncated = False
+
     def _count_discovery(self, reason: str) -> None:
         self._discovery_skips[reason] = self._discovery_skips.get(reason, 0) + 1
 
@@ -872,6 +879,8 @@ class MfnScraper:
                 self._detail_dispositions[str(url)] = {
                     **seed,
                     "source_url": str(url),
+                    "published_at": None,
+                    "eligibility": "incomplete",
                     "eligibility_reason": "missing_detail_title",
                 }
                 continue
@@ -883,6 +892,8 @@ class MfnScraper:
                     **seed,
                     "source_url": str(url),
                     "detail_title": detail_title,
+                    "published_at": None,
+                    "eligibility": "rejected",
                     "eligibility_reason": "non_report_detail_title",
                 }
                 continue
@@ -896,7 +907,9 @@ class MfnScraper:
                     **seed,
                     "source_url": str(url),
                     "detail_title": detail_title,
+                    "published_at": None,
                     "invitation_veto": True,
+                    "eligibility": "rejected",
                     "eligibility_reason": "invitation_veto",
                 }
                 continue

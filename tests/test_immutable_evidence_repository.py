@@ -284,6 +284,21 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     assert conn.execute("SELECT count(*) FROM evidence_artifact_objects").fetchone()[0] == 1
     assert object1["verified_sha256"] == digest1
     assert object1["acquisition_max_pdf_bytes"] is None
+    enriched_object = append_artifact_object(
+        conn,
+        replace(
+            ArtifactObjectInput(
+                artifact1["artifact_id"],
+                f"file:evidence/{digest1}.pdf",
+                "local_cas",
+                digest1,
+                9,
+                "2026-09-24T10:00:02Z",
+            ),
+            acquisition_max_pdf_bytes=30,
+        ),
+    )
+    assert enriched_object["acquisition_max_pdf_bytes"] == 30
     with pytest.raises(ImmutableEvidenceConflict):
         append_artifact(conn, ArtifactInput(digest1, 99, "application/pdf", "later"))
 
