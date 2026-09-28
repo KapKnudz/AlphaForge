@@ -51,7 +51,14 @@ A match requires one strong corroborator (a shared provider event ID, shared
 PDF/attachment checksum, or ≥ 0.5 Jaccard similarity over normalized numeric
 key-figure tokens — similarity below threshold is neutral, never a veto) plus
 at least two compatible derived signals (fiscal period, resolved observation
-date, publication date, or translation-neutral title). Either side carrying a
+date, publication date, or translation-neutral title). Immutable asserted
+relations persist that proof as `strong_corroborator` (`kind` and `value`) plus
+a `compatible_signals` list; the repository checks identity claims and signals
+against both candidate observations, applies the ingestion title normalization
+to persisted issuer/title data, and recomputes numeric similarity from the
+persisted extraction pages. It also enforces matching report kinds,
+opposite-language translations, and revision-marker evidence for revisions;
+withdrawals need only record their reason. Either side carrying a
 revision marker (`correct`, `revis`, `rättelse`, `uppdaterad`, `amend`) produces
 a `REVISION` relation rather than a translation; other grouped cross-language
 pairs are labelled `TRANSLATION`. Same-language documents merge only when a
@@ -144,11 +151,51 @@ post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
 gate — shortfalls return `evidence_incomplete` with no frozen packet instead
 of a green `complete`.
 
+### Immutable history and legacy backfill
+
+Schema version 10 adds an SQLite-only, additive history layer in
+`alphaforge/db/evidence_repository.py`; it does not replace the legacy tables,
+acquire evidence, or select manifest slots. Each MFN release URL remains an
+independent candidate. Content-addressed artifacts and verified object
+locations are recorded separately from append-only attachment, extraction/page,
+candidate-classification, and relation observations. Extraction identities
+cover the complete extraction metadata and ordered page payload, so corrections
+append a distinct snapshot while identical retries remain idempotent. Other
+stable identities reject conflicting payloads, while relation withdrawals and
+later candidate states append new observations rather than
+mutating history.
+
+`backfill_legacy_evidence()` explicitly snapshots current legacy MFN rows into
+this history. Checksum metadata may create an artifact and existing extracted
+pages may be copied with a `legacy_source_without_retained_bytes` limitation,
+but the backfill creates no retained-object claim or asserted relationship;
+legacy `duplicate_of` links remain unresolved audit entries. The
+asserted-relation boundary rejects provider-event and checksum corroboration
+from these metadata-only imports, including later observations and different
+candidate URLs that reuse the same imported event or artifact; only proof
+recomputed from persisted page content can qualify. Imported candidate
+observations are therefore `incomplete`. Semantic snapshot and child payload
+identity exclude surrogate legacy row IDs, generated row-based anchors, and
+attachment or extraction processing timestamps, so replacement-generated rows
+do not look like new evidence. Each snapshot at an unchanged legacy source
+timestamp reuses its first immutable occurrence, so stale A-after-B replay
+cannot supersede B. A changed source timestamp establishes
+a new occurrence and can represent a legitimate recurrence. Historical packet and manifest rows remain untouched, and
+`write_legacy_backfill_audit()` can persist the returned counts, unresolved
+links, and packet and manifest digests for operator review.
+
 ### Evidence-selection manifest
 
 Selection is centralized in a pure, side-effect-free manifest
 (`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
-evidence-selection-manifest-v1`): `select_evidence_manifest()` derives every
+evidence-selection-manifest-v1`). Immutable observation batches use canonical
+`YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; live candidate and
+relation observations may reuse older facts but cannot reference a later batch.
+Deterministic legacy backfill may attach a historical observation to an unchanged
+stable candidate or artifact identity first seen by a later live batch, without
+rewriting that identity. Candidate rules must match their batch. Current-state
+reads rank the newest eligible cutoff before acquisition chronology, so a later replay of an older
+cutoff cannot regress a newer view. `select_evidence_manifest()` derives every
 evidence role — audit history, cache, reuse, deduplication groups, packet
 inputs, typed rejections — from immutable facts plus one rule input set
 (`alphaforge/evidence/report_rules.py`, fingerprinted). Completeness, packet
