@@ -657,16 +657,16 @@ def _require_assertion_corroboration(
         for observation in (left, right)
     )
     if kind == "shared_provider_event_id":
-        inherited_legacy = isinstance(value, str) and any(
-            conn.execute(
+        inherited_legacy = (
+            isinstance(value, str)
+            and conn.execute(
                 """SELECT 1 FROM evidence_candidate_observations
-                   WHERE candidate_id=? AND feed_report_identity=?
+                   WHERE feed_report_identity=?
                      AND json_extract(raw_metadata, '$.legacy_import')=1
                    LIMIT 1""",
-                (observation["candidate_id"], value),
+                (value,),
             ).fetchone()
             is not None
-            for observation in (left, right)
         )
         valid_strong = (
             isinstance(value, str)
@@ -689,13 +689,13 @@ def _require_assertion_corroboration(
                 """SELECT 1 FROM evidence_candidate_observations o
                    JOIN evidence_attachment_observations ao
                      ON ao.id=o.attachment_observation_id
-                   WHERE o.candidate_id=? AND ao.artifact_id=?
+                   WHERE ao.artifact_id=?
                      AND json_extract(o.raw_metadata, '$.legacy_import')=1
                    LIMIT 1""",
-                (observation["candidate_id"], attachment["artifact_id"]),
+                (attachment["artifact_id"],),
             ).fetchone()
             is not None
-            for observation, attachment in zip((left, right), attachments, strict=True)
+            for attachment in attachments
         )
         valid_strong = not (directly_legacy or inherited_legacy) and bool(value) and all(
             attachment is not None and attachment["sha256"] == str(value).lower()
@@ -941,6 +941,55 @@ def _table_digest(conn: Any, table: str, columns: str) -> str:
     return _stable_hash(rows)
 
 
+def _legacy_semantic_state(
+    document: Mapping[str, Any],
+    attachments: Sequence[Mapping[str, Any]],
+    extraction: Mapping[str, Any] | None,
+    pages: Sequence[Mapping[str, Any]],
+    duplicate_source_url: str | None,
+) -> dict[str, Any]:
+    semantic_document = {
+        key: value for key, value in document.items() if key not in {"id", "duplicate_of"}
+    }
+    semantic_document["duplicate_of_source_url"] = duplicate_source_url
+    semantic_attachments = [
+        {
+            key: value
+            for key, value in attachment.items()
+            if key not in {"id", "document_id", "fetched_at"}
+        }
+        for attachment in attachments
+    ]
+    semantic_attachments.sort(key=_canonical_json)
+    semantic_extraction = (
+        {
+            key: value
+            for key, value in extraction.items()
+            if key not in {"id", "document_id", "extracted_at"}
+        }
+        if extraction is not None
+        else None
+    )
+    semantic_pages = []
+    for page in pages:
+        semantic_page = {
+            key: value
+            for key, value in page.items()
+            if key not in {"id", "extraction_id"}
+        }
+        anchor = str(semantic_page["anchor"])
+        if anchor.startswith("document:") and "#page:" in anchor:
+            semantic_page["anchor"] = f"legacy-document#page:{semantic_page['page_number']}"
+        semantic_pages.append(semantic_page)
+    semantic_pages.sort(key=lambda page: (page["page_number"], _canonical_json(page)))
+    return {
+        "document": semantic_document,
+        "attachments": semantic_attachments,
+        "extraction": semantic_extraction,
+        "pages": semantic_pages,
+    }
+
+
 def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
     """Idempotently snapshot current legacy MFN rows without inventing retained bytes."""
     documents = [
@@ -1000,40 +1049,24 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 if legacy_extraction is not None
                 else []
             )
-            semantic_attachments = [
-                {
-                    key: value
-                    for key, value in attachment.items()
-                    if key not in {"id", "document_id"}
-                }
-                for attachment in attachments
-            ]
-            semantic_attachments.sort(key=_canonical_json)
-            semantic_extraction = (
-                {
-                    key: value
-                    for key, value in legacy_extraction.items()
-                    if key not in {"id", "document_id"}
-                }
-                if legacy_extraction is not None
-                else None
+            duplicate_source = None
+            if document.get("duplicate_of") is not None:
+                duplicate_row = conn.execute(
+                    "SELECT source_url FROM research_documents WHERE id=?",
+                    (document["duplicate_of"],),
+                ).fetchone()
+                duplicate_source = str(duplicate_row[0]) if duplicate_row is not None else None
+            snapshot = _legacy_semantic_state(
+                document,
+                attachments,
+                legacy_extraction,
+                legacy_pages,
+                duplicate_source,
             )
-            semantic_pages = [
-                {
-                    key: value
-                    for key, value in page.items()
-                    if key not in {"id", "extraction_id"}
-                }
-                for page in legacy_pages
-            ]
-            semantic_pages.sort(key=lambda page: (page["page_number"], _canonical_json(page)))
-            snapshot = {
-                "document": {key: value for key, value in document.items() if key != "id"},
-                "attachments": semantic_attachments,
-                "extraction": semantic_extraction,
-                "pages": semantic_pages,
-            }
             source_fingerprint = _stable_hash({"legacy_current_state": snapshot})
+            semantic_attachments = snapshot["attachments"]
+            semantic_extraction = snapshot["extraction"]
+            semantic_pages = snapshot["pages"]
             rules = str(document.get("report_rules_fingerprint") or "legacy")
             as_of = str(document.get("published_at") or document.get("fetched_at") or "1970-01-01")[
                 :10
@@ -1093,7 +1126,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
             )
             audit["candidates"] += 1
             current_attachment = None
-            for legacy_attachment in attachments:
+            for legacy_attachment in semantic_attachments:
                 digest = str(legacy_attachment.get("sha256") or "").lower()
                 if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
                     continue
@@ -1103,7 +1136,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                         digest,
                         int(legacy_attachment["byte_size"]),
                         "application/pdf",
-                        str(legacy_attachment.get("fetched_at") or effective_at),
+                        effective_at,
                     ),
                 )
                 audit["metadata_only_artifacts"] += 1
@@ -1121,7 +1154,6 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                         feed_attachment_attested=bool(legacy_attachment.get("magic_valid")),
                         raw_metadata={
                             "legacy_import": True,
-                            "legacy_attachment_id": legacy_attachment["id"],
                             "legacy_raw_metadata": _json_object(
                                 legacy_attachment.get("raw_metadata")
                             ),
@@ -1130,7 +1162,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 )
                 audit["attachment_observations"] += 1
             extraction_record = None
-            if legacy_extraction is not None and current_attachment is not None:
+            if semantic_extraction is not None and current_attachment is not None:
                 artifact_row = conn.execute(
                     "SELECT artifact_id FROM evidence_artifacts WHERE id=?",
                     (current_attachment["artifact_id"],),
@@ -1142,30 +1174,30 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                         text=str(page["text"]),
                         text_checksum=str(page["text_checksum"]),
                     )
-                    for page in legacy_pages
+                    for page in semantic_pages
                 )
-                limitations = list(json.loads(legacy_extraction.get("limitations") or "[]"))
+                limitations = list(json.loads(semantic_extraction.get("limitations") or "[]"))
                 if "legacy_source_without_retained_bytes" not in limitations:
                     limitations.append("legacy_source_without_retained_bytes")
                 extraction_record = append_extraction(
                     conn,
                     ExtractionInput(
                         artifact_id=str(artifact_row[0]),
-                        extractor=str(legacy_extraction["extractor"]),
+                        extractor=str(semantic_extraction["extractor"]),
                         extractor_version="legacy-unknown",
                         config_fingerprint="legacy-unknown",
-                        text_checksum=str(legacy_extraction.get("text_checksum") or ""),
-                        page_count=int(legacy_extraction["page_count"]),
-                        pages_included=legacy_extraction.get("pages_included"),
-                        page_truncated=bool(legacy_extraction["page_truncated"]),
-                        scanned=bool(legacy_extraction["scanned"]),
+                        text_checksum=str(semantic_extraction.get("text_checksum") or ""),
+                        page_count=int(semantic_extraction["page_count"]),
+                        pages_included=semantic_extraction.get("pages_included"),
+                        page_truncated=bool(semantic_extraction["page_truncated"]),
+                        scanned=bool(semantic_extraction["scanned"]),
                         limitations=limitations,
-                        extracted_at=str(legacy_extraction["extracted_at"]),
+                        extracted_at=effective_at,
                         pages=pages,
                     ),
                 )
                 audit["extraction_snapshots"] += 1
-            elif legacy_extraction is not None:
+            elif semantic_extraction is not None:
                 audit["unbound_extractions"].append(int(document["id"]))
             append_candidate_observation(
                 conn,

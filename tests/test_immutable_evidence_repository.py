@@ -826,7 +826,7 @@ def test_numeric_relation_corroboration_is_recomputed_from_persisted_pages(conn)
         )
 
 
-def test_legacy_metadata_provenance_survives_later_observations(conn):
+def test_legacy_metadata_provenance_survives_cross_candidate_reuse(conn):
     legacy_batch = append_observation_batch(
         conn, _batch(1, "legacy-metadata", "2026-09-24T10:00:00Z")
     )
@@ -834,7 +834,6 @@ def test_legacy_metadata_provenance_survives_later_observations(conn):
         conn,
         ArtifactInput("a" * 64, 100, "application/pdf", "2026-09-24T10:00:00Z"),
     )
-    candidates = []
     for language in ("en", "sv"):
         candidate = append_candidate(
             conn,
@@ -869,13 +868,20 @@ def test_legacy_metadata_provenance_survives_later_observations(conn):
                 raw_metadata={"legacy_import": True},
             ),
         )
-        candidates.append(candidate)
 
     later_batch = append_observation_batch(
         conn, _batch(1, "laundered-metadata", "2026-09-24T11:00:00Z")
     )
     later_observations = []
-    for language, candidate in zip(("en", "sv"), candidates, strict=True):
+    for language in ("en", "sv"):
+        candidate = append_candidate(
+            conn,
+            CandidateInput(
+                1,
+                f"https://example.test/rekeyed-{language}",
+                "2026-09-24T11:00:00Z",
+            ),
+        )
         attachment = append_attachment_observation(
             conn,
             AttachmentObservationInput(
@@ -1074,45 +1080,48 @@ def test_legacy_stale_replay_reuses_first_occurrence(conn):
     assert current[0]["authoritative_feed_title"] == "State B"
 
 
-def test_legacy_page_reinsertion_does_not_create_recurrence(conn):
+def test_legacy_child_recreation_does_not_create_recurrence(conn):
     document_id = _insert_legacy_document(
-        conn, title="Page replay", fetched_at="2026-07-15T10:00:00Z"
+        conn, title="Child replay", fetched_at="2026-07-15T10:00:00Z"
     )
-    conn.execute(
-        """INSERT INTO research_attachments
-           (document_id, source_url, content_type, byte_size, sha256,
-            magic_valid, http_status)
-           VALUES (?, 'https://example.test/replay.pdf', 'application/pdf', 100, ?, 1, 200)""",
-        (document_id, "a" * 64),
-    )
-    conn.execute(
-        """INSERT INTO document_extractions
-           (document_id, extractor, text_checksum, page_count, pages_included,
-            page_truncated, scanned, limitations)
-           VALUES (?, 'pypdf', 'text-a', 1, '1', 0, 0, '[]')""",
-        (document_id,),
-    )
-    extraction_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    def replace_page(state: str) -> None:
-        conn.execute("DELETE FROM document_pages WHERE extraction_id=?", (extraction_id,))
+    def replace_children(state: str, processing_time: str) -> None:
+        conn.execute("DELETE FROM document_extractions WHERE document_id=?", (document_id,))
+        conn.execute("DELETE FROM research_attachments WHERE document_id=?", (document_id,))
+        conn.execute(
+            """INSERT INTO research_attachments
+               (document_id, source_url, content_type, byte_size, sha256,
+                magic_valid, http_status, fetched_at)
+               VALUES (?, 'https://example.test/replay.pdf', 'application/pdf', 100,
+                       ?, 1, 200, ?)""",
+            (document_id, state.lower() * 64, processing_time),
+        )
+        conn.execute(
+            """INSERT INTO document_extractions
+               (document_id, extractor, text_checksum, page_count, pages_included,
+                page_truncated, scanned, limitations, extracted_at)
+               VALUES (?, 'pypdf', ?, 1, '1', 0, 0, '[]', ?)""",
+            (document_id, f"text-{state.lower()}", processing_time),
+        )
+        extraction_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
             """INSERT INTO document_pages
                (extraction_id, page_number, anchor, text, text_checksum)
-               VALUES (?, 1, 'p1', ?, ?)""",
-            (extraction_id, state, f"page-{state.lower()}"),
-        )
-        conn.execute(
-            "UPDATE document_extractions SET text_checksum=? WHERE id=?",
-            (f"text-{state.lower()}", extraction_id),
+               VALUES (?, 1, ?, ?, ?)""",
+            (
+                extraction_id,
+                f"document:{document_id}#page:1",
+                state,
+                f"page-{state.lower()}",
+            ),
         )
         conn.commit()
 
-    replace_page("A")
+    replace_children("A", "2026-07-15T10:00:01Z")
     backfill_legacy_evidence(conn)
-    replace_page("B")
+    replace_children("B", "2026-07-15T10:00:02Z")
     backfill_legacy_evidence(conn)
-    replace_page("A")
+    replace_children("A", "2026-07-15T10:00:03Z")
 
     backfill_legacy_evidence(conn)
 
