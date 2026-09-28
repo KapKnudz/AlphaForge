@@ -1094,9 +1094,7 @@ def manifest_v2_projection(
                 if metadata.get("observation_date_authoritative")
                 else None
             ),
-            "observation_date_authoritative": bool(
-                metadata.get("observation_date_authoritative")
-            ),
+            "observation_date_authoritative": bool(metadata.get("observation_date_authoritative")),
             "candidate_key": observation["candidate_key"],
             "candidate_observation_id": stable_observation_id,
             "eligibility": observation["eligibility"],
@@ -1156,9 +1154,7 @@ def manifest_v2_projection(
             str(bound["sha256"]),
             expected_size=int(bound["byte_size"]),
             max_pdf_bytes=(
-                int(acquisition_limit)
-                if acquisition_limit is not None
-                else DEFAULT_MAX_PDF_BYTES
+                int(acquisition_limit) if acquisition_limit is not None else DEFAULT_MAX_PDF_BYTES
             ),
         )
         pages = [
@@ -1224,9 +1220,7 @@ def manifest_v2_projection(
                 key=lambda row: (
                     _has_revision_markers(
                         {
-                            "title": " ".join(
-                                (str(row["title"]), str(row["detail_title"] or ""))
-                            ),
+                            "title": " ".join((str(row["title"]), str(row["detail_title"] or ""))),
                             "attachment_url": row.get("attachment_url"),
                             "raw_metadata": row.get("raw_metadata"),
                         }

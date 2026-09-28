@@ -159,9 +159,7 @@ class LocalPdfArtifactStore:
             raise ArtifactValidationError(
                 "invalid_size", "expected_size must be a non-negative integer"
             )
-        effective_max_pdf_bytes = (
-            self.max_pdf_bytes if max_pdf_bytes is None else max_pdf_bytes
-        )
+        effective_max_pdf_bytes = self.max_pdf_bytes if max_pdf_bytes is None else max_pdf_bytes
         if (
             not isinstance(effective_max_pdf_bytes, int)
             or isinstance(effective_max_pdf_bytes, bool)

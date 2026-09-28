@@ -118,8 +118,10 @@ Call `read_pdf(sha256, expected_size=...)` before use. It returns bytes only
 after streaming verification and raises `artifact_unavailable` or
 `artifact_checksum_mismatch` typed errors rather than falling back to a URL or
 another object. The store itself performs no database writes or deletion; the
-revision recorder persists its returned identity in the append-only evidence
-tables.
+revision recorder persists its returned identity in the evidence history.
+Schema version 11 stores each object's acquisition byte limit so replay verifies
+it under the limit that originally admitted it. Migrated objects with no stored
+limit use the default until exact reacquisition safely fills that one field.
 
 A run with no model-ready source returns `no_evidence` with one of
 `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source`;
@@ -143,7 +145,10 @@ with corroborating report title (`attachment_tier` in
 anchors with exactly the same PDF href string count as one attachment before
 ranking. Distinct target URLs remain separate candidates; unresolved ties at
 the highest applicable tier refuse as ambiguous.
-Invitation/presentation/webcast-titled pages never contribute evidence.
+Invitation/presentation/webcast-titled pages never contribute evidence. V2
+records terminal detail dispositions: invitations and confirmed non-reports are
+rejected without reducing completeness, while missing authoritative detail
+metadata is incomplete and blocks a complete result.
 Diagnostics split into `discovered`, `filtered_before_download`,
 `download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
 the CLI output); per-class `completeness` (annual vs quarterly over

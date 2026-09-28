@@ -487,9 +487,7 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
         artifact_store=verifier,
     )
     assert read_packet is not None
-    assert [row["source_url"] for row in read_manifest.packet_contents()] == [
-        article["source_url"]
-    ]
+    assert [row["source_url"] for row in read_manifest.packet_contents()] == [article["source_url"]]
 
     with patch(
         "alphaforge.evidence.flow.request_with_retry",
@@ -554,9 +552,7 @@ def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
 
     assert result.status == "evidence_incomplete"
     assert result.packet is None
-    observations = current_candidate_observations(
-        conn, company_id=company_id, as_of="2026-09-20"
-    )
+    observations = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
     assert {row["release_source_url"]: row["eligibility"] for row in observations} == {
         articles[0]["source_url"]: "eligible",
         articles[1]["source_url"]: "incomplete",
@@ -606,9 +602,9 @@ def test_v2_feed_revocation_does_not_require_legacy_document(tmp_path):
                 }
             }
 
-    revoked = OneCompanyEvidenceFlow(
-        conn, scraper=_RevokedFeed(), artifact_store=store
-    ).run(company_id, as_of="2026-09-20")
+    revoked = OneCompanyEvidenceFlow(conn, scraper=_RevokedFeed(), artifact_store=store).run(
+        company_id, as_of="2026-09-20"
+    )
 
     assert revoked.status == "no_evidence"
     current = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")

@@ -29,10 +29,6 @@ def load_evidence_view(
         company_id=company_id,
         as_of=as_of[:10],
         report_rules=rules,
-        artifact_store=(
-            artifact_store
-            if artifact_store is not None
-            else LocalPdfArtifactStore()
-        ),
+        artifact_store=(artifact_store if artifact_store is not None else LocalPdfArtifactStore()),
     )
     return packet, manifest

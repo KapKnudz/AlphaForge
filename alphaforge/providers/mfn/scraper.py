@@ -605,7 +605,9 @@ class MfnScraper:
                 "source_url": absolute,
                 "title": normalized_title,
                 "title_admitted": admitted_by_title,
-                "report_kind": feed_identity[0] if feed_identity is not None else report_kind(title),
+                "report_kind": feed_identity[0]
+                if feed_identity is not None
+                else report_kind(title),
                 "document_type": (
                     feed_identity[1] if feed_identity is not None else document_type(title)
                 ),

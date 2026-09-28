@@ -274,9 +274,9 @@ def test_corroborated_feed_pdf_mismatch_fails_lane_before_download():
         return _pdf_response(_pdf())
 
     with patch("alphaforge.evidence.flow.request_with_retry", side_effect=transport):
-        result = OneCompanyEvidenceFlow(
-            conn, scraper=_FakeCisionScraper([article], [article])
-        ).run(company_id, as_of="2026-09-20")
+        result = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper([article], [article])).run(
+            company_id, as_of="2026-09-20"
+        )
 
     assert result.status == "evidence_incomplete"
     assert result.skipped == {"mfn_report_attachment_mismatch": 1}
@@ -479,9 +479,9 @@ def test_current_feed_revocation_never_falls_back_to_old_complete_evidence():
         "alphaforge.evidence.flow.request_with_retry",
         return_value=_pdf_response(_pdf()),
     ):
-        first = OneCompanyEvidenceFlow(
-            conn, scraper=_FakeCisionScraper([article], [article])
-        ).run(company_id, as_of="2026-09-20")
+        first = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper([article], [article])).run(
+            company_id, as_of="2026-09-20"
+        )
 
     revoked = {
         article["source_url"]: {
@@ -495,20 +495,23 @@ def test_current_feed_revocation_never_falls_back_to_old_complete_evidence():
             "invitation_veto": False,
         }
     }
-    second = OneCompanyEvidenceFlow(
-        conn, scraper=_FakeCisionScraper([], [], revoked)
-    ).run(company_id, as_of="2026-09-20")
+    second = OneCompanyEvidenceFlow(conn, scraper=_FakeCisionScraper([], [], revoked)).run(
+        company_id, as_of="2026-09-20"
+    )
 
     assert first.status == "complete"
     assert second.status == "no_evidence"
     assert second.packet is None
     assert load_evidence_packet(conn, company_id, "2026-09-20") is None
-    assert conn.execute(
-        "SELECT COUNT(*) FROM research_attachments a "
-        "JOIN research_documents d ON d.id=a.document_id "
-        "WHERE d.company_id=? AND d.source_url=?",
-        (company_id, article["source_url"]),
-    ).fetchone()[0] == 1
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM research_attachments a "
+            "JOIN research_documents d ON d.id=a.document_id "
+            "WHERE d.company_id=? AND d.source_url=?",
+            (company_id, article["source_url"]),
+        ).fetchone()[0]
+        == 1
+    )
 
 
 def test_empty_feed_stays_no_published_release():
