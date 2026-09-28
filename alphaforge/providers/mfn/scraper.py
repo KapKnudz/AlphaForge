@@ -870,10 +870,9 @@ class MfnScraper:
                 )
             feed_title = " ".join(str(seed.get("title") or "").split())
             feed_report_identity = bool(seed.get("feed_report_identity"))
-            feed_title_admitted = is_report(feed_title)
             parsed = _parse_html(resp.text, corroborated_report=False)
             detail_title = parsed["title"] or ""
-            if detail_title and (feed_report_identity or feed_title_admitted):
+            if detail_title and feed_report_identity:
                 parsed = _parse_html(resp.text, corroborated_report=True)
                 detail_title = parsed["title"] or ""
             if not detail_title:
@@ -884,19 +883,6 @@ class MfnScraper:
                     "published_at": None,
                     "eligibility": "incomplete",
                     "eligibility_reason": "missing_detail_title",
-                }
-                continue
-            if reports_only and not (
-                is_report(detail_title) or feed_title_admitted or feed_report_identity
-            ):
-                self._count_detail("non_report_title")
-                self._detail_dispositions[str(url)] = {
-                    **seed,
-                    "source_url": str(url),
-                    "detail_title": detail_title,
-                    "published_at": None,
-                    "eligibility": "rejected",
-                    "eligibility_reason": "non_report_detail_title",
                 }
                 continue
             if is_invitation_or_presentation(feed_title) or is_invitation_or_presentation(
@@ -913,6 +899,17 @@ class MfnScraper:
                     "invitation_veto": True,
                     "eligibility": "rejected",
                     "eligibility_reason": "invitation_veto",
+                }
+                continue
+            if reports_only and not (is_report(detail_title) or feed_report_identity):
+                self._count_detail("non_report_title")
+                self._detail_dispositions[str(url)] = {
+                    **seed,
+                    "source_url": str(url),
+                    "detail_title": detail_title,
+                    "published_at": None,
+                    "eligibility": "rejected",
+                    "eligibility_reason": "non_report_detail_title",
                 }
                 continue
             body = parsed["body"]

@@ -987,6 +987,7 @@ def manifest_v2_projection(
     *,
     company_id: int,
     as_of: str,
+    publication_cutoffs: dict[str, str],
     artifact_store: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Project current immutable observations into manifest candidates and packet rows.
@@ -1111,6 +1112,14 @@ def manifest_v2_projection(
         candidates.append(base)
         if observation["eligibility"] != "eligible":
             continue
+        published_at = str(observation["published_at"] or "")[:10]
+        report_class = "annual" if observation["report_kind"] == "annual" else "quarterly"
+        if (
+            not published_at
+            or published_at > as_of[:10]
+            or published_at < publication_cutoffs[report_class]
+        ):
+            continue
         if observation["attachment_observation_id"] is None or observation["extraction_id"] is None:
             base["rejection_reason"] = "immutable_binding_incomplete"
             continue
@@ -1202,7 +1211,7 @@ def manifest_v2_projection(
 
     # Relations are manifest inputs only. Select one independently retained
     # edition per asserted relation component; English wins translations and
-    # revision-marked/latest observations win revisions.
+    # the latest observation wins revisions, with markers breaking date ties.
     from alphaforge.evidence.ingest import _has_revision_markers
 
     selected: list[dict[str, Any]] = []
@@ -1218,6 +1227,7 @@ def manifest_v2_projection(
         if "REVISION" in relation_types:
             rows.sort(
                 key=lambda row: (
+                    str(row["published_at"] or ""),
                     _has_revision_markers(
                         {
                             "title": " ".join((str(row["title"]), str(row["detail_title"] or ""))),
@@ -1225,7 +1235,6 @@ def manifest_v2_projection(
                             "raw_metadata": row.get("raw_metadata"),
                         }
                     ),
-                    str(row["published_at"] or ""),
                     str(row.get("language") or "").lower() == "en",
                     str(row["source_url"]),
                 ),

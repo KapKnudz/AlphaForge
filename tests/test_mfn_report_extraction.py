@@ -1088,7 +1088,7 @@ def test_corroborated_narrative_identity_authorizes_detail_attachment_selection(
     assert replay == scraper._parse_json_feed_items(payload)
 
 
-def test_authoritative_report_feed_title_admits_narrative_detail_title():
+def test_report_feed_title_does_not_admit_non_report_detail_page():
     feed_title = "Acme Interim Report Q2 2026"
     detail_title = "Second-quarter results"
     pdf_url = "https://storage.mfn.se/acme/q2.pdf"
@@ -1110,11 +1110,11 @@ def test_authoritative_report_feed_title_admits_narrative_detail_title():
     ):
         details = scraper.scrape_details([seed])
 
-    assert len(details) == 1
-    assert details[0]["title"] == feed_title
-    assert details[0]["detail_title"] == detail_title
-    assert details[0]["attachment_url"] == pdf_url
-    assert details[0]["attachment_tier"] == "mfn-primary"
+    assert details == []
+    assert scraper.drain_detail_skips() == {"non_report_title": 1}
+    disposition = scraper.drain_detail_dispositions()[seed["url"]]
+    assert disposition["eligibility"] == "rejected"
+    assert disposition["eligibility_reason"] == "non_report_detail_title"
 
 
 def test_authoritative_feed_title_does_not_override_detail_invitation_veto():

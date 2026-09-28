@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-EVIDENCE_RULES_VERSION = 5
+EVIDENCE_RULES_VERSION = 6
 """Monotonic version of the evidence/filter/completeness rule set.
 
 Stamped on every frozen packet as ``evidence_rules_version``. Bump it when a
@@ -189,7 +189,12 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
             source["immutable_evidence"] = {
                 **{
                     key: immutable.get(key)
-                    for key in ("artifact_id", "extraction_id", "object_uri")
+                    for key in (
+                        "artifact_id",
+                        "extraction_id",
+                        "object_uri",
+                        "acquisition_max_pdf_bytes",
+                    )
                     if key in immutable
                 },
                 **(

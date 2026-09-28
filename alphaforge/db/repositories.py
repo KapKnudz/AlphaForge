@@ -1002,6 +1002,14 @@ def load_evidence_selection_manifest(
         raise ValueError("selection manifest requires an active history window")
     window = ReportHistoryWindow(**history_values)
 
+    def cutoff(kind: str) -> str:
+        years = window.annual_lookback_years if kind == "annual" else window.interim_lookback_years
+        value = date.fromisoformat(as_of[:10])
+        try:
+            return value.replace(year=value.year - years).isoformat()
+        except ValueError:
+            return value.replace(year=value.year - years, day=28).isoformat()
+
     # Strict company/window cutover: as soon as immutable observations exist,
     # V2 facts are the whole input. Legacy rows are never mixed into a V2
     # packet, even while bounded reacquisition leaves the run incomplete.
@@ -1015,6 +1023,7 @@ def load_evidence_selection_manifest(
             conn,
             company_id=company_id,
             as_of=as_of,
+            publication_cutoffs={"annual": cutoff("annual"), "quarterly": cutoff("quarterly")},
             artifact_store=artifact_store,
         )
         return select_evidence_manifest(
@@ -1026,14 +1035,6 @@ def load_evidence_selection_manifest(
             packet_inputs=immutable_packet_rows,
             source_input_fingerprint=source_input_fingerprint,
         )
-
-    def cutoff(kind: str) -> str:
-        years = window.annual_lookback_years if kind == "annual" else window.interim_lookback_years
-        value = date.fromisoformat(as_of[:10])
-        try:
-            return value.replace(year=value.year - years).isoformat()
-        except ValueError:
-            return value.replace(year=value.year - years, day=28).isoformat()
 
     def metadata(value: Any) -> dict[str, Any]:
         if isinstance(value, dict):

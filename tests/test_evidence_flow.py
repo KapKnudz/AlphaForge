@@ -516,6 +516,148 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     )
 
 
+def test_v2_replay_does_not_verify_artifacts_outside_history_window(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    old_url = "https://mfn.test/a/flow/annual-2020"
+    current_url = "https://mfn.test/a/flow/q2-2026"
+    articles = [
+        {
+            "source_url": old_url,
+            "title": "Flow AB Annual Report 2020",
+            "published_at": "2020-03-01T08:00:00Z",
+            "report_kind": "annual",
+            "attachment_url": "https://storage.mfn.test/flow/annual-2020.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+        {
+            "source_url": current_url,
+            "title": "Flow AB Interim Report Q2 2026",
+            "published_at": "2026-07-15T08:00:00Z",
+            "report_kind": "quarterly",
+            "attachment_url": "https://storage.mfn.test/flow/q2-2026.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+    ]
+    responses = {
+        articles[0]["attachment_url"]: SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "application/pdf"},
+            content=_pdf(pages=2),
+        ),
+        articles[1]["attachment_url"]: SimpleNamespace(
+            status_code=200,
+            headers={"Content-Type": "application/pdf"},
+            content=_pdf(),
+        ),
+    }
+    store = LocalPdfArtifactStore(tmp_path / "objects")
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=responses[articles[0]["attachment_url"]],
+    ):
+        historical = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper([articles[0]]),
+            artifact_store=store,
+            now=lambda: datetime(2021, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2021-09-20")
+    assert historical.status == "complete"
+
+    flow = OneCompanyEvidenceFlow(
+        conn,
+        scraper=_FakeScraper(articles),
+        artifact_store=store,
+        now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+    )
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        return_value=responses[articles[1]["attachment_url"]],
+    ):
+        current = flow.run(company_id, as_of="2026-09-20")
+
+    assert current.status == "complete"
+    assert [source["source_url"] for source in current.packet["sources"]] == [current_url]
+    old_sha = conn.execute(
+        """SELECT a.sha256
+           FROM evidence_candidates c
+           JOIN evidence_attachment_observations ao ON ao.candidate_id=c.id
+           JOIN evidence_artifacts a ON a.id=ao.artifact_id
+           WHERE c.release_source_url=?""",
+        (old_url,),
+    ).fetchone()[0]
+    (store.root / "sha256" / old_sha[:2] / f"{old_sha}.pdf").unlink()
+
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        side_effect=AssertionError("replay must not reacquire expired evidence"),
+    ):
+        replay = flow.run(company_id, as_of="2026-09-20")
+
+    assert replay.status == "complete"
+    assert replay.packet_hash == current.packet_hash
+
+
+def test_v2_revision_selection_prefers_newer_edition_over_older_correction(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    articles = [
+        {
+            "source_url": "https://mfn.test/a/flow/q2-correction",
+            "title": "Corrected Flow AB Interim Report Q2 2026",
+            "published_at": "2026-07-01T08:00:00Z",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q2-2026",
+            "period_end": "2026-06-30",
+            "provider_event_id": "flow-q2-2026",
+            "attachment_url": "https://storage.mfn.test/flow/q2-correction.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+        {
+            "source_url": "https://mfn.test/a/flow/q2-latest",
+            "title": "Flow AB Interim Report Q2 2026",
+            "published_at": "2026-07-15T08:00:00Z",
+            "report_kind": "quarterly",
+            "fiscal_period": "Q2-2026",
+            "period_end": "2026-06-30",
+            "provider_event_id": "flow-q2-2026",
+            "attachment_url": "https://storage.mfn.test/flow/q2-latest.pdf",
+            "attachment_tier": "mfn-primary",
+            "lang": "en",
+        },
+    ]
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with (
+        patch("alphaforge.evidence.flow.request_with_retry", return_value=response),
+        patch(
+            "alphaforge.evidence.flow.resolve_document_language",
+            return_value=("en", "pdf_text:en"),
+        ),
+    ):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper(articles),
+            artifact_store=LocalPdfArtifactStore(tmp_path / "objects"),
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "complete"
+    assert (
+        conn.execute("SELECT count(*) FROM evidence_candidate_relation_observations").fetchone()[0]
+        == 1
+    )
+    assert [source["source_url"] for source in result.packet["sources"]] == [
+        "https://mfn.test/a/flow/q2-latest"
+    ]
+
+
 def test_v2_missing_publication_timestamp_is_recorded_and_blocks(tmp_path):
     conn = _connection()
     company_id = _mapped_company(conn)
@@ -1404,6 +1546,7 @@ def test_packet_hash_excludes_immutable_database_identities():
                 }
             ],
             "object_uri": "file:database-one",
+            "acquisition_max_pdf_bytes": 30_000_000,
         },
     }
     first = {"company_id": 1, "sources": [source]}
@@ -1423,6 +1566,7 @@ def test_packet_hash_excludes_immutable_database_identities():
         ("artifact_id", "sha256:different-pdf"),
         ("extraction_id", "different-extraction"),
         ("object_uri", "file:sha256/ff/different.pdf"),
+        ("acquisition_max_pdf_bytes", 40_000_000),
     ):
         tampered = json.loads(json.dumps(first))
         tampered["sources"][0]["immutable_evidence"][field] = replacement
