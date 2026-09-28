@@ -1,10 +1,3 @@
-ALTER TABLE evidence_artifact_objects
-ADD COLUMN acquisition_max_pdf_bytes INTEGER
-CHECK (
-    acquisition_max_pdf_bytes IS NULL
-    OR acquisition_max_pdf_bytes >= verified_size
-);
-
 DROP TRIGGER evidence_artifact_objects_no_update;
 CREATE TRIGGER evidence_artifact_objects_no_update
 BEFORE UPDATE ON evidence_artifact_objects

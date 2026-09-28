@@ -234,6 +234,18 @@ def migrate(conn: sqlite3.Connection) -> None:
             raise FileNotFoundError(
                 f"artifact acquisition-limit migration not found (tried {candidates})"
             )
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(evidence_artifact_objects);")
+        }
+        if "acquisition_max_pdf_bytes" not in columns:
+            conn.execute(
+                """ALTER TABLE evidence_artifact_objects
+                   ADD COLUMN acquisition_max_pdf_bytes INTEGER
+                   CHECK (
+                       acquisition_max_pdf_bytes IS NULL
+                       OR acquisition_max_pdf_bytes >= verified_size
+                   )"""
+            )
         conn.executescript(migration_path.read_text(encoding="utf-8"))
         set_user_version(conn, 11)
         conn.commit()
