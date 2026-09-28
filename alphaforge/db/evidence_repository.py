@@ -371,6 +371,15 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
 
 
 def append_attachment_observation(conn: Any, value: AttachmentObservationInput) -> dict[str, Any]:
+    return _append_attachment_observation(conn, value, allow_later_identity=False)
+
+
+def _append_attachment_observation(
+    conn: Any,
+    value: AttachmentObservationInput,
+    *,
+    allow_later_identity: bool,
+) -> dict[str, Any]:
     candidate = _row(conn, "evidence_candidates", "candidate_key", value.candidate_key)
     artifact = _row(conn, "evidence_artifacts", "artifact_id", value.artifact_id)
     batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
@@ -378,9 +387,15 @@ def append_attachment_observation(conn: Any, value: AttachmentObservationInput) 
         raise ValueError("attachment observation references an unknown identity")
     if candidate["company_id"] != batch["company_id"]:
         raise ValueError("attachment candidate and batch belong to different companies")
-    if _timestamp_postdates(str(candidate["first_observed_at"]), str(batch["effective_at"])):
+    candidate_postdates = _timestamp_postdates(
+        str(candidate["first_observed_at"]), str(batch["effective_at"])
+    )
+    artifact_postdates = _timestamp_postdates(
+        str(artifact["first_observed_at"]), str(batch["effective_at"])
+    )
+    if not allow_later_identity and candidate_postdates:
         raise ValueError("attachment candidate postdates its batch")
-    if _timestamp_postdates(str(artifact["first_observed_at"]), str(batch["effective_at"])):
+    if not allow_later_identity and artifact_postdates:
         raise ValueError("attachment artifact postdates its batch")
     metadata = _canonical_json(value.raw_metadata) if value.raw_metadata is not None else None
     identity = _stable_hash(
@@ -503,13 +518,25 @@ def append_extraction(conn: Any, value: ExtractionInput) -> dict[str, Any]:
 
 
 def append_candidate_observation(conn: Any, value: CandidateObservationInput) -> dict[str, Any]:
+    return _append_candidate_observation(conn, value, allow_later_identity=False)
+
+
+def _append_candidate_observation(
+    conn: Any,
+    value: CandidateObservationInput,
+    *,
+    allow_later_identity: bool,
+) -> dict[str, Any]:
     candidate = _row(conn, "evidence_candidates", "candidate_key", value.candidate_key)
     batch = _row(conn, "evidence_observation_batches", "batch_id", value.batch_id)
     if candidate is None or batch is None:
         raise ValueError("candidate observation references an unknown candidate or batch")
     if candidate["company_id"] != batch["company_id"]:
         raise ValueError("candidate observation candidate and batch belong to different companies")
-    if _timestamp_postdates(str(candidate["first_observed_at"]), str(batch["effective_at"])):
+    candidate_postdates = _timestamp_postdates(
+        str(candidate["first_observed_at"]), str(batch["effective_at"])
+    )
+    if not allow_later_identity and candidate_postdates:
         raise ValueError("candidate observation candidate postdates its batch")
     attachment = None
     if value.attachment_observation_id is not None:
@@ -1165,7 +1192,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                     ),
                 )
                 audit["metadata_only_artifacts"] += 1
-                current_attachment = append_attachment_observation(
+                current_attachment = _append_attachment_observation(
                     conn,
                     AttachmentObservationInput(
                         candidate_key=str(candidate["candidate_key"]),
@@ -1184,6 +1211,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                             ),
                         },
                     ),
+                    allow_later_identity=True,
                 )
                 audit["attachment_observations"] += 1
             extraction_record = None
@@ -1224,7 +1252,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                 audit["extraction_snapshots"] += 1
             elif semantic_extraction is not None:
                 audit["unbound_extractions"].append(int(document["id"]))
-            append_candidate_observation(
+            _append_candidate_observation(
                 conn,
                 CandidateObservationInput(
                     candidate_key=str(candidate["candidate_key"]),
@@ -1256,6 +1284,7 @@ def backfill_legacy_evidence(conn: Any) -> dict[str, Any]:
                     report_rules_fingerprint=rules,
                     raw_metadata={"legacy_import": True, "legacy_metadata": metadata},
                 ),
+                allow_later_identity=True,
             )
             audit["candidate_observations"] += 1
 

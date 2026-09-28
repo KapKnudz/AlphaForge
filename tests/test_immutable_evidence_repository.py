@@ -1543,6 +1543,104 @@ def test_legacy_backfill_deduplicates_bytes_across_observed_content_types(conn):
     ] == ["application/octet-stream", "application/pdf"]
 
 
+def test_legacy_backfill_reuses_later_live_identities_without_rewriting_them(conn):
+    source_url = "https://example.test/shared-release"
+    digest = hashlib.sha256(b"shared PDF").hexdigest()
+    live_batch = append_observation_batch(
+        conn,
+        replace(
+            _batch(1, "live", "2030-01-01T10:00:00Z"),
+            as_of="2030-01-01",
+        ),
+    )
+    candidate = append_candidate(
+        conn,
+        CandidateInput(1, source_url, "2030-01-01T10:00:00Z"),
+    )
+    artifact = append_artifact(
+        conn,
+        ArtifactInput(digest, 10, "application/pdf", "2030-01-01T10:00:00Z"),
+    )
+    live_attachment = append_attachment_observation(
+        conn,
+        AttachmentObservationInput(
+            candidate["candidate_key"],
+            artifact["artifact_id"],
+            live_batch["batch_id"],
+            f"{source_url}.pdf",
+            "application/pdf",
+            200,
+            True,
+        ),
+    )
+    live_observation = append_candidate_observation(
+        conn,
+        replace(
+            _observation(
+                candidate["candidate_key"],
+                live_batch["batch_id"],
+                title="Live report",
+                attachment_id=live_attachment["attachment_observation_id"],
+            ),
+            published_at="2030-01-01T09:00:00Z",
+        ),
+    )
+    candidate_before = dict(
+        conn.execute(
+            "SELECT * FROM evidence_candidates WHERE candidate_key=?",
+            (candidate["candidate_key"],),
+        ).fetchone()
+    )
+    artifact_before = dict(
+        conn.execute(
+            "SELECT * FROM evidence_artifacts WHERE artifact_id=?",
+            (artifact["artifact_id"],),
+        ).fetchone()
+    )
+    conn.execute(
+        """INSERT INTO research_documents
+           (company_id, source_url, source_type, title, published_at, fetched_at,
+            ingested_lang, checksum, raw_metadata, report_rules_fingerprint)
+           VALUES (1, ?, 'mfn', 'Legacy report', '2026-07-15',
+                   '2026-07-15T10:00:00Z', 'en', ?, '{}', 'legacy-rules')""",
+        (source_url, digest),
+    )
+    document_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """INSERT INTO research_attachments
+           (document_id, source_url, content_type, byte_size, sha256, magic_valid, http_status)
+           VALUES (?, ?, 'application/pdf', 10, ?, 1, 200)""",
+        (document_id, f"{source_url}.pdf", digest),
+    )
+    conn.commit()
+
+    backfill_legacy_evidence(conn)
+
+    candidate_after = dict(
+        conn.execute(
+            "SELECT * FROM evidence_candidates WHERE candidate_key=?",
+            (candidate["candidate_key"],),
+        ).fetchone()
+    )
+    artifact_after = dict(
+        conn.execute(
+            "SELECT * FROM evidence_artifacts WHERE artifact_id=?",
+            (artifact["artifact_id"],),
+        ).fetchone()
+    )
+    assert candidate_after == candidate_before
+    assert artifact_after == artifact_before
+    historical = current_candidate_observations(conn, company_id=1, as_of="2026-07-15")
+    assert len(historical) == 1
+    assert historical[0]["authoritative_feed_title"] == "Legacy report"
+    assert historical[0]["effective_at"] == "2026-07-15T10:00:00.000000Z"
+    current = current_candidate_observations(conn, company_id=1, as_of="2030-01-01")
+    assert len(current) == 1
+    assert current[0]["candidate_observation_id"] == live_observation[
+        "candidate_observation_id"
+    ]
+
+
 def test_legacy_backfill_is_idempotent_metadata_only_and_audit_is_stable(conn, tmp_path):
     conn.execute(
         """INSERT INTO research_documents

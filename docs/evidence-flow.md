@@ -165,10 +165,12 @@ links, and packet and manifest digests for operator review.
 Selection is centralized in a pure, side-effect-free manifest
 (`alphaforge/evidence/manifest.py`, `MANIFEST_VERSION =
 evidence-selection-manifest-v1`). Immutable observation batches use canonical
-`YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; candidate and
-relation observations may reuse older facts but cannot reference a later batch,
-and candidate rules must match their batch. Current-state reads rank the newest
-eligible cutoff before acquisition chronology, so a later replay of an older
+`YYYY-MM-DD` cutoffs and fixed-microsecond UTC timestamps; live candidate and
+relation observations may reuse older facts but cannot reference a later batch.
+Deterministic legacy backfill may attach a historical observation to an unchanged
+stable candidate or artifact identity first seen by a later live batch, without
+rewriting that identity. Candidate rules must match their batch. Current-state
+reads rank the newest eligible cutoff before acquisition chronology, so a later replay of an older
 cutoff cannot regress a newer view. `select_evidence_manifest()` derives every
 evidence role — audit history, cache, reuse, deduplication groups, packet
 inputs, typed rejections — from immutable facts plus one rule input set
