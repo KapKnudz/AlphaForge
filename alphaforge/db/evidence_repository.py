@@ -159,10 +159,10 @@ def _require_canonical_batch(value: ObservationBatchInput) -> None:
 def _timestamp_postdates(timestamp: str, canonical_batch_timestamp: str) -> bool:
     try:
         observed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return False
+    except ValueError as exc:
+        raise ValueError("referenced timestamp must be timezone-aware ISO 8601") from exc
     if observed_at.tzinfo is None:
-        return False
+        raise ValueError("referenced timestamp must be timezone-aware ISO 8601")
     batch_at = datetime.strptime(canonical_batch_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
         tzinfo=UTC
     )
@@ -509,6 +509,8 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
         raise ValueError("candidate observation references an unknown candidate or batch")
     if candidate["company_id"] != batch["company_id"]:
         raise ValueError("candidate observation candidate and batch belong to different companies")
+    if _timestamp_postdates(str(candidate["first_observed_at"]), str(batch["effective_at"])):
+        raise ValueError("candidate observation candidate postdates its batch")
     attachment = None
     if value.attachment_observation_id is not None:
         attachment = _row(

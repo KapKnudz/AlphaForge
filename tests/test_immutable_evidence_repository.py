@@ -292,7 +292,9 @@ def test_batch_children_cannot_reference_future_facts(conn):
     first = append_candidate(
         conn, CandidateInput(1, "https://example.test/first", "2026-09-24T10:00:00Z")
     )
-    artifact = append_artifact(conn, ArtifactInput("a" * 64, 1, "application/pdf", "now"))
+    artifact = append_artifact(
+        conn, ArtifactInput("a" * 64, 1, "application/pdf", "2026-09-24T10:00:00Z")
+    )
     future_candidate = append_candidate(
         conn, CandidateInput(1, "https://example.test/future-candidate", "2026-09-24T12:00:00Z")
     )
@@ -304,6 +306,26 @@ def test_batch_children_cannot_reference_future_facts(conn):
                 artifact["artifact_id"],
                 batch1["batch_id"],
                 "https://example.test/future-candidate.pdf",
+                "application/pdf",
+                200,
+                True,
+            ),
+        )
+    with pytest.raises(ValueError, match="candidate postdates"):
+        append_candidate_observation(
+            conn, _observation(future_candidate["candidate_key"], batch1["batch_id"])
+        )
+    malformed_candidate = append_candidate(
+        conn, CandidateInput(1, "https://example.test/malformed-candidate", "not-a-time")
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                malformed_candidate["candidate_key"],
+                artifact["artifact_id"],
+                batch1["batch_id"],
+                "https://example.test/malformed-candidate.pdf",
                 "application/pdf",
                 200,
                 True,
@@ -321,6 +343,23 @@ def test_batch_children_cannot_reference_future_facts(conn):
                 future_artifact["artifact_id"],
                 batch1["batch_id"],
                 "https://example.test/future-artifact.pdf",
+                "application/pdf",
+                200,
+                True,
+            ),
+        )
+    assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 0
+    naive_artifact = append_artifact(
+        conn, ArtifactInput("c" * 64, 1, "application/pdf", "2026-09-24T12:00:00")
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                first["candidate_key"],
+                naive_artifact["artifact_id"],
+                batch1["batch_id"],
+                "https://example.test/naive-artifact.pdf",
                 "application/pdf",
                 200,
                 True,
@@ -387,6 +426,34 @@ def test_batch_children_cannot_reference_future_facts(conn):
                 batch1["batch_id"],
                 attachment_id=extracted_attachment["attachment_observation_id"],
                 extraction_id=future_extraction["extraction_id"],
+            ),
+        )
+    assert conn.execute("SELECT count(*) FROM evidence_candidate_observations").fetchone()[0] == 1
+    naive_extraction = append_extraction(
+        conn,
+        ExtractionInput(
+            artifact["artifact_id"],
+            "fixture",
+            "1",
+            "cfg",
+            "naive-text",
+            1,
+            "1",
+            False,
+            False,
+            (),
+            "2026-09-24T12:00:00",
+            (ExtractionPage(1, "p1", "naive text", "naive-checksum"),),
+        ),
+    )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        append_candidate_observation(
+            conn,
+            _observation(
+                extracted_candidate["candidate_key"],
+                batch1["batch_id"],
+                attachment_id=extracted_attachment["attachment_observation_id"],
+                extraction_id=naive_extraction["extraction_id"],
             ),
         )
     assert conn.execute("SELECT count(*) FROM evidence_candidate_observations").fetchone()[0] == 1
@@ -839,7 +906,10 @@ def test_numeric_relation_corroboration_is_recomputed_from_persisted_pages(conn)
     def extracted(url: str, language: str, text: str):
         candidate = append_candidate(conn, CandidateInput(1, url, "2026-09-24T10:00:00Z"))
         digest = hashlib.sha256(text.encode()).hexdigest()
-        artifact = append_artifact(conn, ArtifactInput(digest, len(text), "application/pdf", "now"))
+        artifact = append_artifact(
+            conn,
+            ArtifactInput(digest, len(text), "application/pdf", "2026-09-24T10:00:00Z"),
+        )
         attachment = append_attachment_observation(
             conn,
             AttachmentObservationInput(
