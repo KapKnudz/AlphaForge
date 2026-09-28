@@ -156,6 +156,19 @@ def _require_canonical_batch(value: ObservationBatchInput) -> None:
             raise ValueError(f"observation batch {field} must be canonical UTC")
 
 
+def _timestamp_postdates(timestamp: str, canonical_batch_timestamp: str) -> bool:
+    try:
+        observed_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed_at.tzinfo is None:
+        return False
+    batch_at = datetime.strptime(canonical_batch_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+        tzinfo=UTC
+    )
+    return observed_at.astimezone(UTC) > batch_at
+
+
 def make_batch_id(value: ObservationBatchInput) -> str:
     _require_canonical_batch(value)
     return _stable_hash(
@@ -365,6 +378,10 @@ def append_attachment_observation(conn: Any, value: AttachmentObservationInput) 
         raise ValueError("attachment observation references an unknown identity")
     if candidate["company_id"] != batch["company_id"]:
         raise ValueError("attachment candidate and batch belong to different companies")
+    if _timestamp_postdates(str(candidate["first_observed_at"]), str(batch["effective_at"])):
+        raise ValueError("attachment candidate postdates its batch")
+    if _timestamp_postdates(str(artifact["first_observed_at"]), str(batch["effective_at"])):
+        raise ValueError("attachment artifact postdates its batch")
     metadata = _canonical_json(value.raw_metadata) if value.raw_metadata is not None else None
     identity = _stable_hash(
         {
@@ -520,6 +537,8 @@ def append_candidate_observation(conn: Any, value: CandidateObservationInput) ->
             raise ValueError("candidate observation references an unknown extraction")
         if attachment is None or extraction["artifact_id"] != attachment["artifact_id"]:
             raise ValueError("candidate observation extraction and attachment artifacts differ")
+        if _timestamp_postdates(str(extraction["extracted_at"]), str(batch["effective_at"])):
+            raise ValueError("candidate observation extraction postdates its batch")
     if value.report_rules_fingerprint != batch["report_rules_fingerprint"]:
         raise ValueError("candidate observation rules fingerprint differs from its batch")
     metadata = _canonical_json(value.raw_metadata)

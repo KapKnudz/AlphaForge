@@ -164,7 +164,7 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     )
     digest1 = hashlib.sha256(b"first PDF").hexdigest()
     artifact1 = append_artifact(
-        conn, ArtifactInput(digest1, 9, "application/pdf", "2026-09-24T10:00:01Z")
+        conn, ArtifactInput(digest1, 9, "application/pdf", "2026-09-24T10:00:00Z")
     )
     object1 = append_artifact_object(
         conn,
@@ -203,7 +203,7 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
             False,
             False,
             (),
-            "2026-09-24T10:00:03Z",
+            "2026-09-24T10:00:00Z",
             (ExtractionPage(1, "p1", "page one", hashlib.sha256(b"page one").hexdigest()),),
         ),
     )
@@ -221,7 +221,7 @@ def test_append_history_is_idempotent_and_preserves_same_url_revisions(conn):
     batch2 = append_observation_batch(conn, _batch(1, "two", "2026-09-24T11:00:00Z"))
     digest2 = hashlib.sha256(b"second PDF").hexdigest()
     artifact2 = append_artifact(
-        conn, ArtifactInput(digest2, 10, "application/pdf", "2026-09-24T11:00:01Z")
+        conn, ArtifactInput(digest2, 10, "application/pdf", "2026-09-24T11:00:00Z")
     )
     attachment2 = append_attachment_observation(
         conn,
@@ -293,6 +293,40 @@ def test_batch_children_cannot_reference_future_facts(conn):
         conn, CandidateInput(1, "https://example.test/first", "2026-09-24T10:00:00Z")
     )
     artifact = append_artifact(conn, ArtifactInput("a" * 64, 1, "application/pdf", "now"))
+    future_candidate = append_candidate(
+        conn, CandidateInput(1, "https://example.test/future-candidate", "2026-09-24T12:00:00Z")
+    )
+    with pytest.raises(ValueError, match="candidate postdates"):
+        append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                future_candidate["candidate_key"],
+                artifact["artifact_id"],
+                batch1["batch_id"],
+                "https://example.test/future-candidate.pdf",
+                "application/pdf",
+                200,
+                True,
+            ),
+        )
+    assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 0
+    future_artifact = append_artifact(
+        conn, ArtifactInput("b" * 64, 1, "application/pdf", "2026-09-24T12:00:00Z")
+    )
+    with pytest.raises(ValueError, match="artifact postdates"):
+        append_attachment_observation(
+            conn,
+            AttachmentObservationInput(
+                first["candidate_key"],
+                future_artifact["artifact_id"],
+                batch1["batch_id"],
+                "https://example.test/future-artifact.pdf",
+                "application/pdf",
+                200,
+                True,
+            ),
+        )
+    assert conn.execute("SELECT count(*) FROM evidence_attachment_observations").fetchone()[0] == 0
     old_attachment = append_attachment_observation(
         conn,
         AttachmentObservationInput(
@@ -313,6 +347,49 @@ def test_batch_children_cannot_reference_future_facts(conn):
             attachment_id=old_attachment["attachment_observation_id"],
         ),
     )
+    extracted_candidate = append_candidate(
+        conn, CandidateInput(1, "https://example.test/extracted", "2026-09-24T10:00:00Z")
+    )
+    extracted_attachment = append_attachment_observation(
+        conn,
+        AttachmentObservationInput(
+            extracted_candidate["candidate_key"],
+            artifact["artifact_id"],
+            batch1["batch_id"],
+            "https://example.test/extracted.pdf",
+            "application/pdf",
+            200,
+            True,
+        ),
+    )
+    future_extraction = append_extraction(
+        conn,
+        ExtractionInput(
+            artifact["artifact_id"],
+            "fixture",
+            "1",
+            "cfg",
+            "text",
+            1,
+            "1",
+            False,
+            False,
+            (),
+            "2026-09-24T12:00:00Z",
+            (ExtractionPage(1, "p1", "text", "checksum"),),
+        ),
+    )
+    with pytest.raises(ValueError, match="extraction postdates"):
+        append_candidate_observation(
+            conn,
+            _observation(
+                extracted_candidate["candidate_key"],
+                batch1["batch_id"],
+                attachment_id=extracted_attachment["attachment_observation_id"],
+                extraction_id=future_extraction["extraction_id"],
+            ),
+        )
+    assert conn.execute("SELECT count(*) FROM evidence_candidate_observations").fetchone()[0] == 1
     batch2 = append_observation_batch(conn, _batch(1, "two", "2026-09-24T11:00:00Z"))
     second = append_candidate(
         conn, CandidateInput(1, "https://example.test/second", "2026-09-24T11:00:00Z")
