@@ -72,7 +72,7 @@ def canonical_packet_hash(packet_without_hash: dict[str, Any]) -> str:
 # stay in the stored packet JSON for auditability, but identical artifacts
 # must hash identically across databases built at different times.
 HASH_EXCLUDED_ISSUER_KEYS = ("verified_at",)
-HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date", "immutable_evidence")
+HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date",)
 
 
 def _stable_source_id(source: dict[str, Any]) -> str:
@@ -145,10 +145,37 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
         projected["source_id"] = stable_source_id
         projected_sources.append(projected)
 
+    relation_members: dict[str, list[str]] = {}
+    for source in projected_sources:
+        if not isinstance(source, dict):
+            continue
+        immutable = source.get("immutable_evidence")
+        if not isinstance(immutable, dict):
+            continue
+        for relation_id in immutable.get("relation_observation_ids") or ():
+            relation_members.setdefault(str(relation_id), []).append(str(source["source_id"]))
+    stable_relations = {
+        relation_id: f"relation:{canonical_packet_hash({'source_ids': sorted(set(source_ids))})}"
+        for relation_id, source_ids in relation_members.items()
+    }
+
     references_ready = references
     for source in projected_sources:
         if not isinstance(source, dict):
             continue
+        immutable = source.get("immutable_evidence")
+        if isinstance(immutable, dict):
+            source["immutable_evidence"] = {
+                **{
+                    key: immutable.get(key)
+                    for key in ("artifact_id", "extraction_id", "object_uri")
+                    if key in immutable
+                },
+                "relation_observation_ids": sorted(
+                    stable_relations[str(relation_id)]
+                    for relation_id in immutable.get("relation_observation_ids") or ()
+                ),
+            }
         body_value = source.get("body")
         if isinstance(body_value, dict) and isinstance(body_value.get("paragraphs"), list):
             source["body"] = {

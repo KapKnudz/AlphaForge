@@ -28,7 +28,11 @@ from alphaforge.db.repositories import (
     upsert_company,
     upsert_mfn_issuer_mapping,
 )
-from alphaforge.evidence.artifact_store import ArtifactUnavailableError, LocalPdfArtifactStore
+from alphaforge.evidence.artifact_store import (
+    ArtifactUnavailableError,
+    ArtifactValidationError,
+    LocalPdfArtifactStore,
+)
 from alphaforge.evidence.flow import (
     EvidenceResourceLimits,
     NoEvidenceReason,
@@ -449,6 +453,9 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     assert source["period_end"] == "2026-06-30"
     assert source["observation_date"] == "2026-06-30"
     assert immutable["artifact_id"] == f"sha256:{source['attachment']['sha256']}"
+    tampered_packet = json.loads(json.dumps(first.packet))
+    tampered_packet["sources"][0]["immutable_evidence"]["artifact_id"] = "sha256:tampered"
+    assert not validate_frozen_packet(tampered_packet)
     assert (
         store.read_pdf(
             source["attachment"]["sha256"],
@@ -463,8 +470,18 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, 
     )
     assert manifest["manifest_version"] == "evidence-selection-manifest-v2"
     assert manifest["deduplication"][0]["selected"]["artifact_id"] == immutable["artifact_id"]
+    with pytest.raises(ArtifactValidationError, match="resource_limit"):
+        load_evidence_view(
+            conn,
+            company_id=company_id,
+            as_of="2026-09-20",
+            max_pdf_bytes=len(response.content) - 1,
+        )
     read_packet, read_manifest = load_evidence_view(
-        conn, company_id=company_id, as_of="2026-09-20"
+        conn,
+        company_id=company_id,
+        as_of="2026-09-20",
+        max_pdf_bytes=len(response.content),
     )
     assert read_packet is not None
     assert [row["source_url"] for row in read_manifest.packet_contents()] == [
@@ -1344,12 +1361,21 @@ def test_packet_hash_excludes_immutable_database_identities():
         "candidate_key": "database-two-candidate",
         "candidate_observation_id": "database-two-observation",
         "attachment_observation_id": "database-two-attachment",
-        "extraction_id": "database-two-extraction",
         "relation_observation_ids": ["database-two-relation"],
-        "object_uri": "file:database-two",
     }
 
     assert stable_packet_hash(first) == stable_packet_hash(second)
+    for field, replacement in (
+        ("artifact_id", "sha256:different-pdf"),
+        ("extraction_id", "different-extraction"),
+        ("object_uri", "file:sha256/ff/different.pdf"),
+    ):
+        tampered = json.loads(json.dumps(first))
+        tampered["sources"][0]["immutable_evidence"][field] = replacement
+        assert stable_packet_hash(tampered) != stable_packet_hash(first)
+    unrelated = json.loads(json.dumps(first))
+    unrelated["sources"][0]["immutable_evidence"]["relation_observation_ids"] = []
+    assert stable_packet_hash(unrelated) != stable_packet_hash(first)
 
 
 def test_packet_hash_stable_across_run_timestamps():
