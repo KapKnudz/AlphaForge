@@ -996,6 +996,34 @@ def test_json_discovery_accepts_corroborated_narrative_inwido_reports_only():
     assert dispositions[commentary["url"]]["feed_report_identity"] is None
 
 
+def test_json_discovery_rejects_conflicting_report_subtypes():
+    payload = {
+        "items": [
+            {
+                "url": "https://mfn.se/a/acme/conflicting-report",
+                "content": {
+                    "title": "Acme financial update",
+                    "attachments": [
+                        {
+                            "url": "https://storage.mfn.se/acme/report.pdf",
+                            "content_type": "application/pdf",
+                            "tags": ["archive:report:pdf"],
+                        }
+                    ],
+                },
+                "properties": {
+                    "tags": ["sub:report", "sub:report:annual", "sub:report:interim:q4"]
+                },
+            }
+        ]
+    }
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+
+    assert scraper._parse_json_feed_items(payload) == []
+    disposition = scraper.drain_discovery_dispositions()[payload["items"][0]["url"]]
+    assert disposition["feed_report_identity"] is None
+
+
 def test_json_discovery_records_all_dispositions_after_article_limit():
     payload = json.loads(
         (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
@@ -1006,6 +1034,7 @@ def test_json_discovery_records_all_dispositions_after_article_limit():
     dispositions = scraper.drain_discovery_dispositions()
 
     assert len(articles) == 2
+    assert scraper.drain_discovery_truncated() is True
     assert set(dispositions) == {item["url"] for item in payload["items"]}
     commentary = payload["items"][-2]
     assert dispositions[commentary["url"]]["title_admitted"] is False

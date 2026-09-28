@@ -100,6 +100,47 @@ def test_v2_manifest_binds_exact_immutable_selection_and_slot():
     }
 
 
+def test_v2_packet_inputs_outside_history_window_are_not_retained():
+    rules = {
+        "fingerprint": "rules-v2",
+        "history_window": {
+            "interim_lookback_years": 2,
+            "annual_lookback_years": 5,
+            "max_offsets": 12,
+            "max_detail_fetches": 60,
+            "limit_per_offset": 48,
+        },
+    }
+    old = {
+        "source_url": "https://mfn.test/a/annual-2020",
+        "published_at": "2020-03-01T08:00:00Z",
+        "report_kind": "annual",
+        "candidate_observation_id": "old-observation",
+        "attachment_observation_id": "old-attachment",
+        "artifact_id": "sha256:old",
+        "immutable_extraction_id": "old-extraction",
+    }
+
+    manifest = select_evidence_manifest(
+        company_id=1,
+        as_of="2026-09-20",
+        report_rules=rules,
+        audit_history=[old],
+        candidate_records=[old],
+        packet_inputs=[old],
+    )
+
+    assert packet_contents(manifest) == ()
+    assert manifest.completeness == {}
+    assert manifest.rejected == (
+        {
+            "source_url": old["source_url"],
+            "candidate_observation_id": "old-observation",
+            "reason": "outside_history_window",
+        },
+    )
+
+
 def test_v2_packet_contents_does_not_substitute_same_url_old_observation():
     current = {
         "source_url": "https://mfn.test/a/q2-en",

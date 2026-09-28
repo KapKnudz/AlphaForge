@@ -13,9 +13,10 @@ from pypdf import PdfWriter
 
 from alphaforge.cli.main import cmd_mfn_map
 from alphaforge.config import Settings
-from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION
+from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, stable_packet_hash
 from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.db.connection import get_connection
+from alphaforge.db.evidence_repository import current_candidate_observations
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     describe_evidence_state,
@@ -37,6 +38,7 @@ from alphaforge.evidence.flow import (
     download_pdf,
     validate_frozen_packet,
 )
+from alphaforge.evidence.manifest_store import load_evidence_view
 from alphaforge.evidence.report_rules import report_rules_metadata
 from alphaforge.providers.mfn.issuer import (
     IssuerResolution,
@@ -405,7 +407,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert conn.execute("SELECT count(*) FROM evidence_packets").fetchone()[0] == 1
 
 
-def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
+def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path, monkeypatch):
     conn = _connection()
     company_id = _mapped_company(conn)
     article = {
@@ -424,7 +426,8 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
         "lang": "en",
     }
     scraper = _FakeScraper([article])
-    store = LocalPdfArtifactStore(tmp_path / "objects")
+    monkeypatch.chdir(tmp_path)
+    store = LocalPdfArtifactStore(tmp_path / "data" / "evidence" / "objects")
     response = SimpleNamespace(
         status_code=200,
         headers={"Content-Type": "application/pdf"},
@@ -460,6 +463,13 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
     )
     assert manifest["manifest_version"] == "evidence-selection-manifest-v2"
     assert manifest["deduplication"][0]["selected"]["artifact_id"] == immutable["artifact_id"]
+    read_packet, read_manifest = load_evidence_view(
+        conn, company_id=company_id, as_of="2026-09-20"
+    )
+    assert read_packet is not None
+    assert [row["source_url"] for row in read_manifest.packet_contents()] == [
+        article["source_url"]
+    ]
 
     with patch(
         "alphaforge.evidence.flow.request_with_retry",
@@ -486,6 +496,59 @@ def test_v2_flow_selects_exact_immutable_artifact_and_replays_offline(tmp_path):
         ).fetchone()[0]
         == 0
     )
+
+
+def test_v2_feed_revocation_does_not_require_legacy_document(tmp_path):
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/revoked-v2",
+        "title": "Flow AB Interim Report Q2 2026",
+        "published_at": "2026-07-15T08:00:00Z",
+        "report_kind": "quarterly",
+        "document_type": "INTERIM_Q2",
+        "attachment_url": "https://storage.mfn.test/flow/revoked-v2.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    store = LocalPdfArtifactStore(tmp_path / "objects")
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        first = OneCompanyEvidenceFlow(
+            conn, scraper=_FakeScraper([article]), artifact_store=store
+        ).run(company_id, as_of="2026-09-20")
+    assert first.status == "complete"
+    conn.execute("DELETE FROM research_documents WHERE company_id=?", (company_id,))
+    conn.execute("DELETE FROM mfn_feed_checks WHERE company_id=?", (company_id,))
+    conn.commit()
+
+    class _RevokedFeed(_FakeScraper):
+        def __init__(self):
+            super().__init__([])
+
+        def drain_discovery_dispositions(self):
+            return {
+                article["source_url"]: {
+                    "source_url": article["source_url"],
+                    "title": "Flow AB general update",
+                    "title_admitted": False,
+                    "feed_report_identity": None,
+                    "invitation_veto": False,
+                }
+            }
+
+    revoked = OneCompanyEvidenceFlow(
+        conn, scraper=_RevokedFeed(), artifact_store=store
+    ).run(company_id, as_of="2026-09-20")
+
+    assert revoked.status == "no_evidence"
+    current = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
+    assert current[0]["eligibility"] == "revoked"
+    assert revoked.packet is None
 
 
 def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
@@ -1256,6 +1319,39 @@ def test_packet_hash_stable_across_database_document_ids():
     assert first["packet_hash"] == second["packet_hash"]
 
 
+def test_packet_hash_excludes_immutable_database_identities():
+    source = {
+        "source_id": "candidate-observation:first",
+        "source_url": "https://mfn.test/a/flow/q2",
+        "publication_date": "2026-07-15T08:00:00Z",
+        "attachment": {"sha256": "same-pdf"},
+        "immutable_evidence": {
+            "candidate_key": "database-one-candidate",
+            "candidate_observation_id": "database-one-observation",
+            "attachment_observation_id": "database-one-attachment",
+            "artifact_id": "sha256:same-pdf",
+            "extraction_id": "database-one-extraction",
+            "relation_observation_ids": ["database-one-relation"],
+            "object_uri": "file:database-one",
+        },
+    }
+    first = {"company_id": 1, "sources": [source]}
+    second = json.loads(json.dumps(first))
+    second["company_id"] = 99
+    second["sources"][0]["source_id"] = "candidate-observation:second"
+    second["sources"][0]["immutable_evidence"] = {
+        **second["sources"][0]["immutable_evidence"],
+        "candidate_key": "database-two-candidate",
+        "candidate_observation_id": "database-two-observation",
+        "attachment_observation_id": "database-two-attachment",
+        "extraction_id": "database-two-extraction",
+        "relation_observation_ids": ["database-two-relation"],
+        "object_uri": "file:database-two",
+    }
+
+    assert stable_packet_hash(first) == stable_packet_hash(second)
+
+
 def test_packet_hash_stable_across_run_timestamps():
     conn = _connection()
     company_id = _mapped_company(conn)
@@ -1556,6 +1652,47 @@ def test_flow_paginated_history_retrieves_multiple_reports():
     assert "Flow AB Interim Report Q1 2026" in titles
     assert "Flow AB Interim Report Q3 2025" in titles
     assert "Flow AB Annual Report 2024" in titles
+
+
+def test_flow_marks_exhausted_discovery_offsets_incomplete():
+    conn = _connection()
+    company_id = _mapped_company(conn)
+    article = {
+        "source_url": "https://mfn.test/a/flow/q1-2026",
+        "title": "Flow AB Interim Report Q1 2026",
+        "published_at": "2026-05-01T08:00:00Z",
+        "attachment_url": "https://storage.mfn.test/q1-2026.pdf",
+        "storage_url": "https://storage.mfn.test/q1-2026.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+        "report_kind": "quarterly",
+    }
+
+    class _NeverEndingFeed(_PaginatedFakeScraper):
+        def __init__(self):
+            super().__init__({0: [article]})
+
+        def discover_feed_paginated(self, mfn_slug, offset=0, limit=48, reports_only=True):
+            return [dict(article)], offset + limit
+
+        def scrape_details(self, entries, reports_only=True):
+            return [dict(article)]
+
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"Content-Type": "application/pdf"},
+        content=_pdf(),
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        result = OneCompanyEvidenceFlow(
+            conn,
+            scraper=_NeverEndingFeed(),
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+        ).run(company_id, as_of="2026-09-20")
+
+    assert result.status == "evidence_incomplete"
+    assert result.skipped["discovery_truncated"] == 1
+    assert result.packet is None
 
 
 def test_flow_history_window_truncates_old_reports():

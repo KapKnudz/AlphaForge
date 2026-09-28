@@ -983,7 +983,7 @@ def _discover_historical_feed(
     as_of: str,
     window: ReportHistoryWindow,
     today_iso: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Collect paginated report feed within ``window``.
 
     Prefers ``discover_feed_paginated(offset, limit)`` (JSON feed) when
@@ -996,6 +996,7 @@ def _discover_historical_feed(
     if callable(paginated):
         out: list[dict[str, Any]] = []
         offset = 0
+        next_offset: int | None = offset
         limit = window.limit_per_offset
         for _ in range(window.max_offsets):
             try:
@@ -1024,15 +1025,15 @@ def _discover_historical_feed(
                     )
                     if pub < cutoff or pub > as_of[:10] or pub > today_iso:
                         continue
-                out.append(art)
                 if len(out) >= window.max_detail_fetches:
-                    return out
+                    return out, True
+                out.append(art)
             if page_max is not None and page_max < deepest_cutoff:
-                return out
+                return out, False
             if next_offset is None:
                 break
             offset = next_offset
-        return out
+        return out, next_offset is not None
     # Fallback: legacy page-based HTML discovery.  Preserve the Sunday
     # page-2 backstop for fakes that implement ``page=`` pagination (the
     # weekly sweep that catches FY reports pushed off page 1).
@@ -1048,7 +1049,7 @@ def _discover_historical_feed(
         except Exception:
             pass
     except Exception:
-        return []
+        return [], False
     # Window-filter the legacy feed as well.
     filtered: list[dict[str, Any]] = []
     for art in feed:
@@ -1061,7 +1062,7 @@ def _discover_historical_feed(
                 # page-based feed is single-page, so no early break needed
                 continue
         filtered.append(art)
-    return filtered
+    return filtered, False
 
 
 class OneCompanyEvidenceFlow:
@@ -1336,9 +1337,10 @@ class OneCompanyEvidenceFlow:
         # Bounded historical retrieval: paginated offset/limit feed under
         # the authoritative history window, with the single-page plus
         # Sunday page-2 contract when paginated discovery is unavailable.
+        discovery_truncated = False
         try:
             if hasattr(self.scraper, "discover_feed_paginated"):
-                feed = _discover_historical_feed(
+                feed, discovery_truncated = _discover_historical_feed(
                     self.scraper,
                     mapping["mfn_slug"],
                     as_of=as_of,
@@ -1365,6 +1367,12 @@ class OneCompanyEvidenceFlow:
                 feed = self.scraper.discover_feed(mapping["mfn_slug"], reports_only=True)
                 if now.weekday() == 6:
                     feed.extend(_discover_feed_page(self.scraper, mapping["mfn_slug"], 2))
+            if len(feed) > window.max_detail_fetches:
+                feed = feed[: window.max_detail_fetches]
+                discovery_truncated = True
+            drain_truncated = getattr(self.scraper, "drain_discovery_truncated", None)
+            if callable(drain_truncated):
+                discovery_truncated = bool(drain_truncated()) or discovery_truncated
         except MfnAcquisitionError as exc:
             return finish(
                 EvidenceFlowResult(
@@ -1441,6 +1449,7 @@ class OneCompanyEvidenceFlow:
         ).hexdigest()
         revision_recorder = None
         if self.artifact_store is not None and not dry_run:
+            from alphaforge.db.evidence_repository import current_candidate_observations
             from alphaforge.evidence.revision_flow import RevisionRecorder
 
             revision_recorder = RevisionRecorder(
@@ -1453,8 +1462,18 @@ class OneCompanyEvidenceFlow:
                 effective_at=now.isoformat().replace("+00:00", "Z"),
                 max_pages=self.limits.max_pages,
             )
+            admitted_immutable_urls = {
+                str(observation["release_source_url"])
+                for observation in current_candidate_observations(
+                    self.conn, company_id=company_id, as_of=as_of[:10]
+                )
+                if observation["eligibility"] == "eligible"
+            }
             for source_url in sorted(revoked_feed_urls):
-                if find_complete_evidence_document(self.conn, company_id, source_url) is None:
+                if (
+                    source_url not in admitted_immutable_urls
+                    and find_complete_evidence_document(self.conn, company_id, source_url) is None
+                ):
                     continue
                 disposition = feed_dispositions[source_url]
                 revision_recorder.record(
@@ -1582,7 +1601,9 @@ class OneCompanyEvidenceFlow:
         eligible: list[dict[str, Any]] = []
         blocked_candidates: list[dict[str, Any]] = []
         pre_cutoff_report = False
-        hard_blocks = 0
+        hard_blocks = int(discovery_truncated)
+        if discovery_truncated:
+            result.skipped["discovery_truncated"] = 1
         for article in details:
             title = article.get("title") or ""
             corroborated_feed_report = bool(article.get("feed_report_identity")) and article.get(
@@ -2156,6 +2177,7 @@ class OneCompanyEvidenceFlow:
                             or related_url in revision_observations
                         ):
                             from alphaforge.db.evidence_repository import (
+                                _extraction_text,
                                 current_candidate_observations,
                             )
                             from alphaforge.evidence.ingest import (
@@ -2164,6 +2186,22 @@ class OneCompanyEvidenceFlow:
                                 _translation_neutral_title,
                             )
 
+                            current_by_url = {
+                                str(row["release_source_url"]): row
+                                for row in current_candidate_observations(
+                                    self.conn,
+                                    company_id=company_id,
+                                    as_of=as_of[:10],
+                                )
+                            }
+                            left_observation = revision_observations.get(
+                                anchor_url
+                            ) or current_by_url.get(anchor_url)
+                            right_observation = revision_observations.get(
+                                related_url
+                            ) or current_by_url.get(related_url)
+                            if left_observation is None or right_observation is None:
+                                continue
                             left_event = relation_anchor.get(
                                 "provider_event_id"
                             ) or relation_anchor.get("mfn_event_id")
@@ -2184,17 +2222,17 @@ class OneCompanyEvidenceFlow:
                                     "value": left_checksum,
                                 }
                             else:
-                                left_text = str(
-                                    relation_anchor.get("content_text")
-                                    or relation_anchor.get("body")
-                                    or ""
-                                )
-                                right_text = str(
-                                    related.get("content_text") or related.get("body") or ""
-                                )
                                 similarity = _numeric_similarity(
-                                    _numeric_key_figure_fingerprint(left_text),
-                                    _numeric_key_figure_fingerprint(right_text),
+                                    _numeric_key_figure_fingerprint(
+                                        _extraction_text(
+                                            self.conn, left_observation.get("extraction_id")
+                                        )
+                                    ),
+                                    _numeric_key_figure_fingerprint(
+                                        _extraction_text(
+                                            self.conn, right_observation.get("extraction_id")
+                                        )
+                                    ),
                                 )
                                 strong = {"kind": "numeric_key_figure_jaccard", "value": similarity}
                             compatible = []
@@ -2218,24 +2256,19 @@ class OneCompanyEvidenceFlow:
                                 relation_anchor, issuer
                             ) == _translation_neutral_title(related, issuer):
                                 compatible.append("translation_neutral_title")
-                            current_by_url = {
-                                str(row["release_source_url"]): row
-                                for row in current_candidate_observations(
-                                    self.conn,
-                                    company_id=company_id,
-                                    as_of=as_of[:10],
+                            try:
+                                revision_recorder.record_relation(
+                                    left_observation,
+                                    right_observation,
+                                    relation_type=relation,
+                                    disposition="asserted",
+                                    corroboration={
+                                        "strong_corroborator": strong,
+                                        "compatible_signals": compatible,
+                                    },
                                 )
-                            }
-                            revision_recorder.record_relation(
-                                revision_observations.get(anchor_url, current_by_url[anchor_url]),
-                                revision_observations.get(related_url, current_by_url[related_url]),
-                                relation_type=relation,
-                                disposition="asserted",
-                                corroboration={
-                                    "strong_corroborator": strong,
-                                    "compatible_signals": compatible,
-                                },
-                            )
+                            except ValueError:
+                                continue
 
             def persist_option(
                 article: dict[str, Any],

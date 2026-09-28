@@ -489,9 +489,11 @@ def _feed_report_identity(entry: dict[str, Any]) -> tuple[str, str | None] | Non
     report_pdf_url = _feed_report_attachment_url(entry)
     if REPORT_FEED_TAG not in tags or report_pdf_url is None:
         return None
-    if REPORT_ANNUAL_TAG in tags and not any(
-        tag.startswith(REPORT_INTERIM_TAG_PREFIX) for tag in tags
-    ):
+    has_annual = REPORT_ANNUAL_TAG in tags
+    has_interim = any(tag.startswith(REPORT_INTERIM_TAG_PREFIX) for tag in tags)
+    if has_annual and has_interim:
+        return None
+    if has_annual:
         return "annual", "ANNUAL_REPORT"
     quarters = sorted(
         tag.removeprefix(REPORT_INTERIM_TAG_PREFIX)
@@ -521,6 +523,7 @@ class MfnScraper:
         self._discovery_skips: dict[str, int] = {}
         self._detail_skips: dict[str, int] = {}
         self._discovery_dispositions: dict[str, dict[str, Any]] = {}
+        self._discovery_truncated = False
 
     def _count_discovery(self, reason: str) -> None:
         self._discovery_skips[reason] = self._discovery_skips.get(reason, 0) + 1
@@ -545,6 +548,11 @@ class MfnScraper:
         drained = {url: dict(value) for url, value in self._discovery_dispositions.items()}
         self._discovery_dispositions = {}
         return drained
+
+    def drain_discovery_truncated(self) -> bool:
+        truncated = self._discovery_truncated
+        self._discovery_truncated = False
+        return truncated
 
     def _parse_json_feed_items(
         self, payload: Any, *, reports_only: bool = True
@@ -616,6 +624,8 @@ class MfnScraper:
             article.update(_report_identity_seed(article))
             if len(articles) < self.max_articles:
                 articles.append(article)
+            else:
+                self._discovery_truncated = True
         return articles
 
     def discover_feed(
@@ -677,9 +687,10 @@ class MfnScraper:
                 "published_at": None,
             }
             article.update(_report_identity_seed(article))
-            articles.append(article)
-            if len(articles) >= self.max_articles:
-                break
+            if len(articles) < self.max_articles:
+                articles.append(article)
+            else:
+                self._discovery_truncated = True
         return articles
 
     def discover_feed_paginated(
@@ -797,9 +808,10 @@ class MfnScraper:
                     "published_at": None,
                 }
                 article.update(_report_identity_seed(article))
-                articles.append(article)
-                if len(articles) >= self.max_articles:
-                    break
+                if len(articles) < self.max_articles:
+                    articles.append(article)
+                else:
+                    self._discovery_truncated = True
             # HTML fragments have no JSON next_url; infer tail via link count.
             # If fewer raw links than limit, we are at tail.
             raw_links = len(parser.links)

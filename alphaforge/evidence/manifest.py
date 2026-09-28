@@ -239,7 +239,9 @@ def select_evidence_manifest(
     group_records = [
         record for record in candidates if _in_window(record, as_of=as_of, window=window)
     ]
-    selected_packet_rows = _packet_rows(packet_inputs)
+    selected_packet_rows = _packet_rows(
+        [record for record in packet_inputs if _in_window(record, as_of=as_of, window=window)]
+    )
     packet_urls = {_source_url(row) for row in selected_packet_rows}
     # A persisted selected variant may gain a bilingual group id after the
     # discovery candidate was assembled. Its URL still denotes one edition,

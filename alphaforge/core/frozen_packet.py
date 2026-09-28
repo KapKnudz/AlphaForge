@@ -72,7 +72,7 @@ def canonical_packet_hash(packet_without_hash: dict[str, Any]) -> str:
 # stay in the stored packet JSON for auditability, but identical artifacts
 # must hash identically across databases built at different times.
 HASH_EXCLUDED_ISSUER_KEYS = ("verified_at",)
-HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date",)
+HASH_EXCLUDED_SOURCE_KEYS = ("ingestion_date", "immutable_evidence")
 
 
 def _stable_source_id(source: dict[str, Any]) -> str:
