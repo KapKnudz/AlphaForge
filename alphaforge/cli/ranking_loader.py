@@ -280,17 +280,36 @@ def _rejection_is_current(
     ):
         return False
 
-    admitted_years = {
-        parsed
+    period_value = item.get("report_period")
+    if period_value is None:
+        period_value = next(
+            (
+                value
+                for key, value in raw.items()
+                if REPORT_FIELD_MAP.get(key) == "report_period" and value is not None
+            ),
+            None,
+        )
+    period = str(period_value).strip() if period_value is not None else None
+    if not period:
+        period = None
+
+    has_slot_identity = year is not None or end is not None or period is not None
+    superseded = has_slot_identity and any(
+        (year is None or _fiscal_year(row["report_year"]) == year)
+        and (end is None or _verified_fiscal_end(row) == end)
+        and (
+            period is None
+            or (
+                str(row["report_period"]).strip()
+                if row["report_period"] is not None
+                else None
+            )
+            == period
+        )
         for row in admitted_annuals
-        if (parsed := _fiscal_year(row["report_year"])) is not None
-    }
-    admitted_ends = {
-        parsed
-        for row in admitted_annuals
-        if (parsed := _verified_fiscal_end(row)) is not None
-    }
-    if year in admitted_years or end in admitted_ends:
+    )
+    if superseded:
         return False
 
     if latest_annual is None:

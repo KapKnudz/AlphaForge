@@ -720,7 +720,9 @@ def test_all_selection_refusals_retain_provenance_and_reach_exports(
     assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
-def test_annual_rejections_block_only_while_unresolved_and_applicable():
+def test_annual_rejections_block_only_while_unresolved_and_applicable(
+    monkeypatch, tmp_path
+):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2026)]
     conn, cid = setup(periods=rows)
     rejected = annual(2026, 133.1)
@@ -766,6 +768,57 @@ def test_annual_rejections_block_only_while_unresolved_and_applicable():
         reason.startswith("report rejection:")
         for reason in corrected["selection"]["refusal_reasons"]
     )
+
+    packet(conn, cid)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported_rejections = [
+        item
+        for item in score["input_selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    ]
+    assert score["revenue_growth_years"] == 3
+    assert not any(item["current_refusal"] for item in exported_rejections)
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+
+def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
+    monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    transition = annual(
+        2026,
+        140,
+        period_end="2026-04-30",
+        report_Date=None,
+    )
+    assert upsert_financial_periods(conn, cid, [transition]) == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    transition_rejection = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "financial_periods"
+        and item["period_end"] == "2026-04-30"
+    )
+    assert transition_rejection["report_year"] == 2026
+    assert transition_rejection["current_refusal"]
+    assert loaded["selection"]["annual_history"]["period_ends"] == []
+    assert loaded["financial"].revenue_growth is None
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert score["revenue_growth"] is None
+    assert score["revenue_growth_years"] == 0
+    assert any(
+        item.get("period_end") == "2026-04-30" and item["current_refusal"]
+        for item in exported["rejected_reports"]
+    )
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
 
 
 @pytest.mark.parametrize("interior_revenue", [None, 0, -100])
