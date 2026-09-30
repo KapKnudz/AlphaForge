@@ -154,7 +154,7 @@ class RankingEngine:
     # v11 wires the auditable DCF (policy + engine) into the loader and
     # exports, so valuation_score remains a heuristic while DCF fair-value
     # is presented separately with provenance.
-    RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v12"
+    RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v13"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository

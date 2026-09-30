@@ -9,7 +9,7 @@ from enum import StrEnum
 from math import isfinite
 from typing import Any
 
-DIVIDEND_YIELD_POLICY_VERSION = "calendar-ttm-verified-v1"
+DIVIDEND_YIELD_POLICY_VERSION = "calendar-ttm-verified-v2"
 
 
 class DividendYieldReason(StrEnum):

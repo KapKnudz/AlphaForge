@@ -6,11 +6,11 @@ import json
 import sqlite3
 from datetime import date, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-from alphaforge.cli.main import cmd_rank, export_ranking_files
+from alphaforge.cli.main import cmd_rank, cmd_sync, export_ranking_files
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.core.ranking.engine import RankingEngine
@@ -100,6 +100,152 @@ def component(ranking):
         for c in ranking.scores[0].scoring_audit["valuation"]["components"]
         if c["name"] == "dividend_yield"
     )
+
+
+def migrated_dividend(currency="SEK"):
+    """Replay the actual v12 -> v13 upgrade with an assumed legacy tag."""
+    conn, cid = seeded()
+    conn.execute("ALTER TABLE dividends DROP COLUMN currency_conflicted")
+    conn.execute("ALTER TABLE dividends DROP COLUMN currency_verified")
+    conn.execute("DROP TABLE dividend_window_coverage")
+    conn.execute(
+        "INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type) "
+        "VALUES (?, '2025-06-01', 1, ?, 0)",
+        (cid, currency),
+    )
+    conn.execute("PRAGMA user_version=12")
+    conn.commit()
+    migrate(conn)
+    upsert_prices(conn, cid, [{"d": AS_OF, "c": 10, "currency": "USD"}])
+    assert dividend_state(conn) == (currency, 0, 0)
+    return conn, cid
+
+
+def dividend_state(conn):
+    return conn.execute(
+        "SELECT currency, currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:]
+
+
+def dividend_sync_adapter(currency):
+    adapter = Mock(spec=BorsdataAdapter)
+    for name in (
+        "get_instruments",
+        "get_sectors",
+        "get_branches",
+        "get_countries",
+        "get_translation_metadata",
+        "get_kpi_metadata",
+        "get_report_metadata",
+        "get_reports",
+        "get_stock_prices",
+        "get_kpi_history",
+        "get_stock_splits",
+        "get_report_calendar",
+        "get_shorts",
+    ):
+        getattr(adapter, name).return_value = []
+    adapter.get_kpi_summary.return_value = {"kpis": []}
+    adapter.get_dividends.return_value = [
+        {"insId": 1, "exDate": "2025-06-01", "amount": 1, "currency": currency}
+    ]
+    return adapter
+
+
+@pytest.mark.parametrize("legacy_currency", ["SEK", "EUR", "USD"])
+def test_first_authoritative_currency_replaces_unverified_legacy_tag(legacy_currency):
+    conn, cid = migrated_dividend(legacy_currency)
+    coverage(conn, cid)
+    before, before_rank = rank(conn, cid)
+    assert before["valuation"].dividend_yield is None
+    row = {"exDate": "2025-06-01", "amount": 1, "currency": "USD"}
+    for _ in range(2):
+        upsert_dividends(conn, cid, [row])
+        after, after_rank = rank(conn, cid)
+        assert dividend_state(conn) == ("USD", 1, 0)
+        assert after["valuation"].dividend_yield == 10
+        assert after["dividend_yield"]["reason"] is None
+        assert after_rank.scores[0].valuation_score != before_rank.scores[0].valuation_score
+        assert after["reverse_dcf"]["status"] == "unavailable"
+    assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("window_status", ["complete", "partial", None])
+@pytest.mark.parametrize("incoming_currency", ["USD", "SEK", None])
+def test_real_sync_and_rank_legacy_refresh_requires_independent_coverage(
+    tmp_path,
+    monkeypatch,
+    window_status,
+    incoming_currency,
+):
+    conn, cid = migrated_dividend()
+    if window_status is not None:
+        coverage(conn, cid, status=window_status)
+    conn.execute(
+        "INSERT INTO watchlist (company_id, ticker, source_file, source_row_hash) "
+        "VALUES (?, 'FIX', 'legacy-fixture', 'legacy-fixture')",
+        (cid,),
+    )
+    adapter = dividend_sync_adapter(incoming_currency)
+    sync_args = argparse.Namespace(
+        dsn="sqlite:///:memory:", all=True, company=None, ticker=None, allow_empty_companies=True
+    )
+    rank_args = argparse.Namespace(dsn="sqlite:///:memory:", as_of=AS_OF, watchlist=None)
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", return_value=adapter),
+    ):
+        for _ in range(2):
+            assert cmd_sync(sync_args) == 0
+            assert cmd_rank(rank_args) == 0
+            assert dividend_state(conn) == (
+                incoming_currency or "SEK",
+                int(incoming_currency is not None),
+                0,
+            )
+            exported = json.loads((tmp_path / "exports" / AS_OF / "ranking.json").read_text())
+            audit = exported["scores"][0]["scoring_audit"]["dividend_yield"]
+            if window_status == "complete" and incoming_currency == "USD":
+                assert audit["value"] == 10
+                assert audit["reason"] is None
+                assert audit["coverage"]["source"] == "synthetic_fixture"
+            else:
+                assert audit["value"] is None
+                expected_reason = (
+                    "dividend_coverage_unknown"
+                    if window_status is None
+                    else "dividend_coverage_partial"
+                    if window_status == "partial"
+                    else "dividend_currency_unknown"
+                    if incoming_currency is None
+                    else "dividend_currency_mismatch"
+                )
+                assert audit["reason"] == expected_reason
+            assert conn.execute("SELECT count(*) FROM dividend_window_coverage").fetchone()[0] == (
+                0 if window_status is None else 1
+            )
+            with (tmp_path / "exports" / AS_OF / "ranking.csv").open() as f:
+                csv_row = next(csv.DictReader(f))
+            assert float(csv_row["valuation_score"]) == exported["scores"][0]["valuation_score"]
+    assert conn.execute("SELECT count(*) FROM ranking_runs").fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("unusable_currency", [None, "XXX", "GBp"])
+def test_missing_observation_does_not_erase_verified_currency_conflict_evidence(unusable_currency):
+    conn, cid = seeded()
+    coverage(conn, cid)
+    row = {"exDate": "2025-06-01", "amount": 1, "currency": "SEK"}
+    upsert_dividends(conn, cid, [row])
+    upsert_dividends(conn, cid, [{**row, "currency": unusable_currency}])
+    assert dividend_state(conn) == ("SEK", 1, 0)
+    upsert_dividends(conn, cid, [{**row, "currency": "USD"}])
+    assert dividend_state(conn) == ("SEK", 0, 1)
+    for currency in (None, "SEK", "USD"):
+        upsert_dividends(conn, cid, [{**row, "currency": currency}])
+        assert dividend_state(conn) == ("SEK", 0, 1)
+        assert rank(conn, cid)[0]["valuation"].dividend_yield is None
 
 
 def test_foreign_dividend_does_not_change_ranking():
@@ -426,7 +572,7 @@ def test_date_growth_workers_2024_leap_cutoff_fixture():
     assert loaded["dividend_yield"]["price_date"] == "2024-02-28"
 
 
-def test_additive_migration_reverifies_only_matching_conflict_free_currency():
+def test_additive_migration_refreshes_currency_without_erasing_verified_conflicts():
     conn, cid = seeded()
     conn.execute("ALTER TABLE dividends DROP COLUMN currency_verified")
     conn.execute("ALTER TABLE dividends DROP COLUMN currency_conflicted")

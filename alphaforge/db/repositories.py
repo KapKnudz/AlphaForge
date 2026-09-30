@@ -338,30 +338,19 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
                 ON CONFLICT(company_id, ex_date, dividend_type, amount) DO UPDATE SET
                     currency=CASE
                         WHEN dividends.currency_conflicted=0
-                             AND excluded.currency_verified=1
-                             AND NOT (
-                                 length(dividends.currency)=3
-                                 AND dividends.currency NOT GLOB '*[^A-Z]*'
-                                 AND dividends.currency NOT IN ('XXX','XTS')
-                             ) THEN excluded.currency
+                             AND dividends.currency_verified=0
+                             AND excluded.currency_verified=1 THEN excluded.currency
                         ELSE dividends.currency END,
                     currency_verified=CASE
-                        WHEN dividends.currency_conflicted=0
-                             AND excluded.currency_verified=1
-                             AND (
-                                 dividends.currency=excluded.currency
-                                 OR NOT (
-                                     length(dividends.currency)=3
-                                     AND dividends.currency NOT GLOB '*[^A-Z]*'
-                                     AND dividends.currency NOT IN ('XXX','XTS')
-                                 )
-                             ) THEN 1 ELSE 0 END,
+                        WHEN dividends.currency_conflicted=1 THEN 0
+                        WHEN excluded.currency_verified=0 THEN dividends.currency_verified
+                        WHEN dividends.currency_verified=0
+                             OR dividends.currency=excluded.currency THEN 1
+                        ELSE 0 END,
                     currency_conflicted=CASE
                         WHEN dividends.currency_conflicted=1 THEN 1
-                        WHEN excluded.currency_verified=1
-                             AND length(dividends.currency)=3
-                             AND dividends.currency NOT GLOB '*[^A-Z]*'
-                             AND dividends.currency NOT IN ('XXX','XTS')
+                        WHEN dividends.currency_verified=1
+                             AND excluded.currency_verified=1
                              AND dividends.currency<>excluded.currency THEN 1
                         ELSE 0 END,
                     distribution_frequency=excluded.distribution_frequency
