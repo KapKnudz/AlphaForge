@@ -231,18 +231,14 @@ def _contextual_annual_rejection_reason(conn: Any, company_id: int, target: Any)
         return None
 
     years = [int(row["report_year"]) for row in annuals]
-    year_counts = {year: years.count(year) for year in set(years)}
     latest_index = len(annuals) - 1
-    if year_counts[years[latest_index]] > 1:
-        return "duplicate annual fiscal slot"
-
     selected_start = latest_index
     boundary_index = None
     boundary_reason = None
     for index in range(latest_index - 1, -1, -1):
         candidate = annuals[index]
         newer = annuals[selected_start]
-        if year_counts[years[index]] > 1:
+        if years[index] == years[selected_start]:
             boundary_index = index
             boundary_reason = "duplicate annual fiscal slot"
             break

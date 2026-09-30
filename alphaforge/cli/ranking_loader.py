@@ -75,7 +75,6 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
         return [], ["annual history unavailable"], []
 
     metadata = []
-    year_counts: dict[int, int] = {}
     for row in annuals:
         year = _fiscal_year(row["report_year"])
         end = _verified_fiscal_end(row)
@@ -83,8 +82,6 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
         issues = []
         if year is None:
             issues.append("annual fiscal-year metadata unverified")
-        else:
-            year_counts[year] = year_counts.get(year, 0) + 1
         if end is None:
             issues.append("annual fiscal end unverified")
         raw = _payload(row)
@@ -114,8 +111,6 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
 
     latest = metadata[-1]
     latest_reasons = list(latest[4])
-    if latest[1] is not None and year_counts[latest[1]] > 1:
-        latest_reasons.append("duplicate annual fiscal slot")
     if latest_reasons:
         reasons = sorted(set(latest_reasons))
         return [], reasons, excluded(metadata, "; ".join(reasons))
@@ -130,11 +125,11 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
             boundary_index = index
             boundary_reason = "; ".join(candidate[4])
             break
-        if candidate[1] is not None and year_counts[candidate[1]] > 1:
+        previous, end = candidate[2], newer[2]
+        if candidate[1] == newer[1]:
             boundary_index = index
             boundary_reason = "duplicate annual fiscal slot"
             break
-        previous, end = candidate[2], newer[2]
         same_month_end = (
             previous.month == end.month
             and (previous + timedelta(days=1)).day == (end + timedelta(days=1)).day == 1
@@ -180,13 +175,16 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
     ).fetchall()
     for row in rows:
         observed = _date(row["observation_date"])
+        fiscal_year = _fiscal_year(row["year"])
         reason = None
-        if observed is None:
-            reason = "KPI observation date unverified"
-        elif row["year"] is None:
-            reason = "KPI fiscal-year metadata unavailable"
-        elif observed > cutoff or row["year"] > cutoff.year:
+        if (observed is not None and observed > cutoff) or (
+            fiscal_year is not None and fiscal_year > cutoff.year
+        ):
             reason = "KPI after cutoff"
+        elif observed is None:
+            reason = "KPI observation date unverified"
+        elif fiscal_year is None:
+            reason = "KPI fiscal-year metadata unavailable"
         if reason:
             rejected.append(
                 {
@@ -333,10 +331,10 @@ def _rejection_is_current(
         future_checks.append(all(value > cutoff for value in ends))
     if publications:
         future_checks.append(all(value > cutoff for value in publications))
-    if future_checks and all(future_checks):
+    if any(future_checks):
         return False
 
-    has_slot_identity = bool(years or ends or periods)
+    has_slot_identity = bool(years or ends)
     superseded = not invalid_identity and has_slot_identity and any(
         row["period_type"] == item.get("period_type")
         and (not years or years == {_fiscal_year(row["report_year"])})

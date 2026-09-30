@@ -344,6 +344,35 @@ def test_older_annual_defect_preserves_latest_comparable_suffix(defect):
     assert selection["annual_history"]["excluded"] or selection["rejected_reports"]
 
 
+@pytest.mark.parametrize("reverse_insertion", [False, True])
+def test_old_mislabeled_year_does_not_poison_or_archive_latest_suffix(reverse_insertion):
+    old = annual(
+        2026,
+        70,
+        period_end="2019-03-31",
+        report_Date="2020-05-01",
+    )
+    recent = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    rows = [old, *recent]
+    if reverse_insertion:
+        rows.reverse()
+    conn, cid = setup(periods=rows)
+
+    restated = annual(2026, recent[-1]["revenues"] + 1)
+    assert upsert_financial_periods(conn, cid, [restated, restated]) == 2
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["selection"]["annual_history"]["period_ends"] == [
+        "2023-03-31",
+        "2024-03-31",
+        "2025-03-31",
+        "2026-03-31",
+    ]
+    assert loaded["financial"].revenue_growth is not None
+    assert loaded["financial"].revenue_growth_years == 3
+
+
 def test_gap_before_latest_pair_uses_only_one_year_horizon():
     rows = [annual(2023, 100), annual(2025, 121), annual(2026, 133.1)]
     conn, cid = setup(periods=rows)
@@ -782,6 +811,36 @@ def test_annual_rejections_block_only_while_unresolved_and_applicable(
     assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
+@pytest.mark.parametrize(
+    "publication_fields,current_refusal",
+    [
+        ({"report_Date": "2026-08-01"}, False),
+        ({"report_Date": "2026-05-01", "reportDate": "2026-08-01"}, True),
+    ],
+)
+def test_future_publication_is_audit_only_without_hiding_alias_conflicts(
+    publication_fields, current_refusal
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    rejected = annual(2026, 140, **publication_fields)
+    rejected.pop("period_end")
+    rejected.pop("year")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["current_refusal"] is current_refusal
+    assert any(
+        "fiscal end unavailable or invalid" in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    ) is current_refusal
+
+
 def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
     monkeypatch, tmp_path
 ):
@@ -1025,6 +1084,7 @@ def test_contextual_annual_rejections_archive_only_rejected_restatements(
     "case,current_refusal",
     [
         ("future", False),
+        ("future_undated", False),
         ("older_undated", False),
         ("annual_shadowed_by_r12", False),
         ("newer_undated", True),
@@ -1034,18 +1094,14 @@ def test_kpi_rejections_only_refuse_applicable_selection(
     case, current_refusal, monkeypatch, tmp_path
 ):
     conn, cid = setup()
-    if case == "future":
+    if case in {"future", "future_undated"}:
         upsert_kpi_observations(
             conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}]
         )
-        upsert_kpi_observations(
-            conn,
-            cid,
-            37,
-            "year",
-            "mean",
-            [{"y": 2027, "p": 5, "v": 40, "observationDate": "2027-05-01"}],
-        )
+        future = {"y": 2027, "p": 5, "v": 40}
+        if case == "future":
+            future["observationDate"] = "2027-05-01"
+        upsert_kpi_observations(conn, cid, 37, "year", "mean", [future])
     elif case == "older_undated":
         upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2025, "p": 5, "v": 20}])
         upsert_kpi_observations(
@@ -1123,6 +1179,36 @@ def test_corrected_nonannual_rejection_is_audit_only_in_rank_exports(
     assert not any("fiscal end unavailable or invalid" in item for item in score["missing_data"])
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["year", "r12", "quarter"])
+def test_report_period_alone_never_supersedes_a_rejection(period_type):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    period = 5 if period_type == "year" else 1
+    rejected = annual(2026, 140, period_type=period_type, period=period)
+    rejected.pop("period_end")
+    rejected.pop("year")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    if period_type != "year":
+        corrected = annual(
+            2026,
+            150,
+            period_type=period_type,
+            period=period,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+        assert upsert_financial_periods(conn, cid, [corrected]) == 1
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["current_refusal"]
+    assert any(retained["reason"] in reason for reason in loaded["selection"]["refusal_reasons"])
 
 
 @pytest.mark.parametrize("case", ["known_end_conflict", "cross_type", "unknown_slot"])
