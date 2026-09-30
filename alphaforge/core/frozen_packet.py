@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-EVIDENCE_RULES_VERSION = 3
+EVIDENCE_RULES_VERSION = 6
 """Monotonic version of the evidence/filter/completeness rule set.
 
 Stamped on every frozen packet as ``evidence_rules_version``. Bump it when a
@@ -145,10 +145,69 @@ def packet_hash_body(packet_without_hash: dict[str, Any]) -> dict[str, Any]:
         projected["source_id"] = stable_source_id
         projected_sources.append(projected)
 
+    relation_members: dict[str, list[str]] = {}
+    for source in projected_sources:
+        if not isinstance(source, dict):
+            continue
+        immutable = source.get("immutable_evidence")
+        if not isinstance(immutable, dict):
+            continue
+        for relation_id in immutable.get("relation_observation_ids") or ():
+            relation_members.setdefault(str(relation_id), []).append(str(source["source_id"]))
+    stable_relations = {
+        relation_id: f"relation:{canonical_packet_hash({'source_ids': sorted(set(source_ids))})}"
+        for relation_id, source_ids in relation_members.items()
+    }
+
     references_ready = references
     for source in projected_sources:
         if not isinstance(source, dict):
             continue
+        immutable = source.get("immutable_evidence")
+        if isinstance(immutable, dict):
+            bindings = immutable.get("relation_bindings")
+            stable_bindings = (
+                sorted(
+                    (
+                        {
+                            "relation_key": binding.get("relation_key"),
+                            "relation_type": binding.get("relation_type"),
+                            "endpoint_source_urls": sorted(
+                                str(url) for url in binding.get("endpoint_source_urls") or ()
+                            ),
+                        }
+                        for binding in bindings
+                        if isinstance(binding, dict)
+                    ),
+                    key=lambda binding: json.dumps(
+                        binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    ),
+                )
+                if isinstance(bindings, list)
+                else []
+            )
+            source["immutable_evidence"] = {
+                **{
+                    key: immutable.get(key)
+                    for key in (
+                        "artifact_id",
+                        "extraction_id",
+                        "object_uri",
+                        "acquisition_max_pdf_bytes",
+                    )
+                    if key in immutable
+                },
+                **(
+                    {"relation_bindings": stable_bindings}
+                    if stable_bindings
+                    else {
+                        "relation_observation_ids": sorted(
+                            stable_relations[str(relation_id)]
+                            for relation_id in immutable.get("relation_observation_ids") or ()
+                        )
+                    }
+                ),
+            }
         body_value = source.get("body")
         if isinstance(body_value, dict) and isinstance(body_value.get("paragraphs"), list):
             source["body"] = {

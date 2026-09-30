@@ -553,7 +553,12 @@ CREATE TABLE IF NOT EXISTS evidence_artifact_objects (
     verified_sha256 TEXT NOT NULL,
     verified_size INTEGER NOT NULL CHECK (verified_size >= 0),
     stored_at TEXT NOT NULL,
-    CHECK (verified_sha256 <> '')
+    acquisition_max_pdf_bytes INTEGER,
+    CHECK (verified_sha256 <> ''),
+    CHECK (
+        acquisition_max_pdf_bytes IS NULL
+        OR acquisition_max_pdf_bytes >= verified_size
+    )
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_evidence_artifact_objects_artifact
     ON evidence_artifact_objects(artifact_id, object_record_id);
@@ -653,7 +658,24 @@ CREATE TRIGGER IF NOT EXISTS evidence_candidates_no_update BEFORE UPDATE ON evid
 CREATE TRIGGER IF NOT EXISTS evidence_candidates_no_delete BEFORE DELETE ON evidence_candidates BEGIN SELECT RAISE(ABORT, 'evidence_candidates is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evidence_artifacts_no_update BEFORE UPDATE ON evidence_artifacts BEGIN SELECT RAISE(ABORT, 'evidence_artifacts is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evidence_artifacts_no_delete BEFORE DELETE ON evidence_artifacts BEGIN SELECT RAISE(ABORT, 'evidence_artifacts is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS evidence_artifact_objects_no_update BEFORE UPDATE ON evidence_artifact_objects BEGIN SELECT RAISE(ABORT, 'evidence_artifact_objects is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS evidence_artifact_objects_no_update
+BEFORE UPDATE ON evidence_artifact_objects
+WHEN NOT (
+    OLD.acquisition_max_pdf_bytes IS NULL
+    AND NEW.acquisition_max_pdf_bytes IS NOT NULL
+    AND NEW.acquisition_max_pdf_bytes >= NEW.verified_size
+    AND NEW.id IS OLD.id
+    AND NEW.object_record_id IS OLD.object_record_id
+    AND NEW.artifact_id IS OLD.artifact_id
+    AND NEW.object_uri IS OLD.object_uri
+    AND NEW.storage_kind IS OLD.storage_kind
+    AND NEW.verified_sha256 IS OLD.verified_sha256
+    AND NEW.verified_size IS OLD.verified_size
+    AND NEW.stored_at IS OLD.stored_at
+)
+BEGIN
+    SELECT RAISE(ABORT, 'evidence_artifact_objects is append-only');
+END;
 CREATE TRIGGER IF NOT EXISTS evidence_artifact_objects_no_delete BEFORE DELETE ON evidence_artifact_objects BEGIN SELECT RAISE(ABORT, 'evidence_artifact_objects is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evidence_attachment_observations_no_update BEFORE UPDATE ON evidence_attachment_observations BEGIN SELECT RAISE(ABORT, 'evidence_attachment_observations is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evidence_attachment_observations_no_delete BEFORE DELETE ON evidence_attachment_observations BEGIN SELECT RAISE(ABORT, 'evidence_attachment_observations is append-only'); END;

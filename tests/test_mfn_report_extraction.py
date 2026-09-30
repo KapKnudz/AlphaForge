@@ -955,6 +955,205 @@ def test_cis_release_url_requires_stable_shape():
     assert not _is_mfn_release_url("https://mfn.test/about/annual-report", base)
 
 
+def test_json_discovery_accepts_corroborated_narrative_inwido_reports_only():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+
+    articles = scraper._parse_json_feed_items(payload)
+
+    assert len(articles) == 8
+    narrative = [article for article in articles if article.get("feed_report_identity")]
+    assert len(narrative) == 8
+    assert [article["document_type"] for article in narrative[:6]] == [
+        "YEAR_END_REPORT",
+        "YEAR_END_REPORT",
+        "INTERIM_Q1",
+        "INTERIM_Q1",
+        "INTERIM_Q2",
+        "INTERIM_Q2",
+    ]
+    assert {article["report_kind"] for article in narrative[:6]} == {"quarterly"}
+    assert narrative[6]["document_type"] == "INTERIM_Q3"
+    assert narrative[7]["document_type"] == "ANNUAL_REPORT"
+    assert scraper.drain_discovery_skips() == {"non_report_title": 3}
+    dispositions = scraper.drain_discovery_dispositions()
+    assert len(dispositions) == len(payload["items"])
+    missing_q2 = payload["items"][4]
+    assert dispositions[missing_q2["url"]] == {
+        "source_url": missing_q2["url"],
+        "title": missing_q2["content"]["title"],
+        "title_admitted": False,
+        "report_kind": "quarterly",
+        "document_type": "INTERIM_Q2",
+        "feed_report_identity": "mfn-report-tag+archive-report-pdf",
+        "feed_report_attachment_url": missing_q2["content"]["attachments"][0]["url"],
+        "invitation_veto": False,
+    }
+    commentary = payload["items"][-2]
+    assert dispositions[commentary["url"]]["title_admitted"] is False
+    assert dispositions[commentary["url"]]["feed_report_identity"] is None
+
+
+def test_json_discovery_rejects_conflicting_report_subtypes():
+    payload = {
+        "items": [
+            {
+                "url": "https://mfn.se/a/acme/conflicting-report",
+                "content": {
+                    "title": "Acme financial update",
+                    "attachments": [
+                        {
+                            "url": "https://storage.mfn.se/acme/report.pdf",
+                            "content_type": "application/pdf",
+                            "tags": ["archive:report:pdf"],
+                        }
+                    ],
+                },
+                "properties": {
+                    "tags": ["sub:report", "sub:report:annual", "sub:report:interim:q4"]
+                },
+            }
+        ]
+    }
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+
+    assert scraper._parse_json_feed_items(payload) == []
+    disposition = scraper.drain_discovery_dispositions()[payload["items"][0]["url"]]
+    assert disposition["feed_report_identity"] is None
+
+
+def test_json_discovery_records_all_dispositions_after_article_limit():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=2)
+
+    articles = scraper._parse_json_feed_items(payload)
+    dispositions = scraper.drain_discovery_dispositions()
+
+    assert len(articles) == 2
+    assert scraper.drain_discovery_truncated() is True
+    assert set(dispositions) == {item["url"] for item in payload["items"]}
+    commentary = payload["items"][-2]
+    assert dispositions[commentary["url"]]["title_admitted"] is False
+    assert dispositions[commentary["url"]]["feed_report_identity"] is None
+
+
+def test_corroborated_narrative_identity_authorizes_detail_attachment_selection():
+    payload = json.loads(
+        (FIXTURES / "inwido_narrative_report_feed.json").read_text(encoding="utf-8")
+    )
+    scraper = MfnScraper(base_url="https://mfn.se", max_articles=48)
+    narrative = scraper._parse_json_feed_items(payload)[:6]
+
+    def transport(method, url, **kwargs):
+        seed = next(article for article in narrative if article["url"] == url)
+        pdf_url = next(
+            item["content"]["attachments"][0]["url"]
+            for item in payload["items"]
+            if item["url"] == url
+        )
+        html = f"""
+        <html><head>
+          <meta property="article:published_time" content="{seed["published_at"]}">
+          <link rel="canonical" href="{url}">
+        </head><body><h1>{seed["title"]}</h1><div class="release-body">
+          <a class="mfn-primary" href="{pdf_url}">Report PDF</a>
+          <a class="mfn-primary" href="{pdf_url}">Report PDF</a>
+        </div></body></html>
+        """
+        return SimpleNamespace(status_code=200, text=html)
+
+    with (
+        patch("alphaforge.providers.mfn.scraper.request_with_retry", side_effect=transport),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        details = scraper.scrape_details(narrative)
+
+    assert len(details) == 6
+    assert all(article["attachment_tier"] == "mfn-primary" for article in details)
+    assert [article["document_type"] for article in details] == [
+        "YEAR_END_REPORT",
+        "YEAR_END_REPORT",
+        "INTERIM_Q1",
+        "INTERIM_Q1",
+        "INTERIM_Q2",
+        "INTERIM_Q2",
+    ]
+    # Re-parsing the same immutable feed yields the same candidate identities,
+    # which keeps the unchanged-run feed fingerprint and replay inputs stable.
+    replay = scraper._parse_json_feed_items(payload)
+    assert replay == scraper._parse_json_feed_items(payload)
+
+
+def test_report_feed_title_does_not_admit_non_report_detail_page():
+    feed_title = "Acme Interim Report Q2 2026"
+    detail_title = "Second-quarter results"
+    pdf_url = "https://storage.mfn.se/acme/q2.pdf"
+    html = f"""
+    <html><head>
+      <meta property="article:published_time" content="2026-07-15T05:45:00Z">
+    </head><body><h1>{detail_title}</h1>
+      <a class="mfn-primary" href="{pdf_url}">Q2 report</a>
+    </body></html>
+    """
+    scraper = MfnScraper(base_url="https://mfn.test")
+    seed = {"url": "https://mfn.test/a/acme/q2", "title": feed_title, "lang": "en"}
+    with (
+        patch(
+            "alphaforge.providers.mfn.scraper.request_with_retry",
+            return_value=SimpleNamespace(status_code=200, text=html),
+        ),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        details = scraper.scrape_details([seed])
+
+    assert details == []
+    assert scraper.drain_detail_skips() == {"non_report_title": 1}
+    disposition = scraper.drain_detail_dispositions()[seed["url"]]
+    assert disposition["eligibility"] == "rejected"
+    assert disposition["eligibility_reason"] == "non_report_detail_title"
+
+
+def test_authoritative_feed_title_does_not_override_detail_invitation_veto():
+    html = """
+    <html><body><h1>Invitation to Q2 results presentation</h1>
+      <a class="mfn-primary" href="https://storage.mfn.test/acme/q2.pdf">Q2 report</a>
+    </body></html>
+    """
+    scraper = MfnScraper(base_url="https://mfn.test")
+    seed = {
+        "url": "https://mfn.test/a/acme/q2",
+        "title": "Acme Interim Report Q2 2026",
+    }
+    with (
+        patch(
+            "alphaforge.providers.mfn.scraper.request_with_retry",
+            return_value=SimpleNamespace(status_code=200, text=html),
+        ),
+        patch("alphaforge.providers.mfn.scraper.time.sleep"),
+    ):
+        assert scraper.scrape_details([seed]) == []
+    assert scraper.drain_detail_skips() == {"invitation_or_presentation_release": 1}
+    disposition = scraper.drain_detail_dispositions()[seed["url"]]
+    assert disposition["eligibility"] == "rejected"
+    assert disposition["published_at"] is None
+
+
+def test_corroborated_narrative_report_keeps_distinct_attachments_ambiguous():
+    html = """
+    <html><body><h1>Strong progress despite a difficult market</h1>
+      <a class="mfn-primary" href="https://storage.mfn.se/acme/q2.pdf">Q2 report</a>
+      <a class="mfn-primary" href="https://storage.mfn.se/acme/q2-appendix.pdf">Appendix</a>
+    </body></html>
+    """
+    parsed = _parse_html(html, corroborated_report=True)
+    assert parsed["storage_url"] is None
+    assert parsed["attachment_tier"] == "unresolved"
+
+
 def test_discovery_accepts_cis_shapes_with_counted_drops():
     payload = {
         "items": [

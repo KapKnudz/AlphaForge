@@ -1322,6 +1322,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     from alphaforge.config import Settings
     from alphaforge.db.connection import get_connection
     from alphaforge.db.migrations import migrate
+    from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
     from alphaforge.evidence.flow import EvidenceResourceLimits, OneCompanyEvidenceFlow
 
     settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
@@ -1336,7 +1337,8 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         max_pages=args.max_pages,
         max_retries=args.max_retries,
     )
-    flow = OneCompanyEvidenceFlow(conn, limits=limits)
+    artifact_store = LocalPdfArtifactStore(max_pdf_bytes=limits.max_pdf_bytes)
+    flow = OneCompanyEvidenceFlow(conn, limits=limits, artifact_store=artifact_store)
     shadow_citation = None
     if args.shadow_source_id and args.shadow_anchor and args.shadow_excerpt:
         shadow_citation = {

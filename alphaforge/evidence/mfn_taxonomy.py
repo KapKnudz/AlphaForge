@@ -60,6 +60,14 @@ REPORT_TERMS_SE: list[str] = [
 
 REPORT_TITLE_TERMS: list[str] = REPORT_TERMS_SE
 
+# MFN JSON-feed metadata can identify a report even when the issuer chooses a
+# narrative release title. Both provider classification and a report-archive
+# PDF marker are required; either signal alone occurs on ordinary releases.
+REPORT_FEED_TAG = "sub:report"
+REPORT_PDF_ATTACHMENT_TAG = "archive:report:pdf"
+REPORT_INTERIM_TAG_PREFIX = "sub:report:interim:q"
+REPORT_ANNUAL_TAG = "sub:report:annual"
+
 # Combined for detection
 ALL_REPORT_TERMS: list[str] = REPORT_TITLE_TERMS + [
     "bokslutskommuniké",

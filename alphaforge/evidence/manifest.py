@@ -16,7 +16,7 @@ from typing import Any
 
 from alphaforge.evidence.report_rules import ReportHistoryWindow
 
-MANIFEST_VERSION = "evidence-selection-manifest-v1"
+MANIFEST_VERSION = "evidence-selection-manifest-v2"
 
 
 @dataclass(frozen=True)
@@ -46,10 +46,27 @@ class EvidenceSelectionManifest:
         return {key: result[key] for key in sorted(result)}
 
     def packet_contents(self) -> tuple[dict[str, Any], ...]:
-        """Return exactly the sources counted as retained by completeness."""
+        """Return exactly the immutable observations selected by the manifest.
+
+        V1 manifests identify packet inputs only by release URL. V2 binds the
+        exact candidate observation when it is available, while retaining the
+        URL projection for historical readers.
+        """
+        retained_observations = {
+            str(group.get("selected", {}).get("candidate_observation_id") or "")
+            for group in self.deduplication
+            if isinstance(group.get("selected"), dict)
+        }
+        retained_observations.discard("")
         retained_urls = {url for group in self.deduplication for url in group["packet_source_urls"]}
         return tuple(
-            source for source in self.packet_inputs if source["source_url"] in retained_urls
+            source
+            for source in self.packet_inputs
+            if (
+                source.get("candidate_observation_id") in retained_observations
+                if retained_observations
+                else source["source_url"] in retained_urls
+            )
         )
 
     @property
@@ -119,6 +136,9 @@ def _in_window(record: dict[str, Any], *, as_of: str, window: ReportHistoryWindo
 
 
 def _group_id(record: dict[str, Any]) -> str:
+    selection_group = record.get("selection_group_id")
+    if selection_group:
+        return f"immutable:{selection_group}"
     explicit = record.get("bilingual_group_id") or record.get("_bilingual_group_id")
     if explicit:
         return f"variant:{explicit}"
@@ -152,6 +172,41 @@ def _report_class(record: dict[str, Any]) -> str:
     return "annual" if _kind(record) == "annual" else "quarterly"
 
 
+def _slot_key(record: dict[str, Any]) -> str:
+    metadata = _metadata(record.get("raw_metadata"))
+    period = (
+        record.get("period_end")
+        or record.get("observation_date")
+        or record.get("report_period_end")
+        or record.get("fiscal_period")
+        or metadata.get("period_end")
+        or metadata.get("observation_date")
+        or metadata.get("report_period_end")
+        or metadata.get("fiscal_period")
+    )
+    if period:
+        return f"{_report_class(record)}:{str(period)[:10]}"
+    return f"{_report_class(record)}:source:{_source_url(record)}"
+
+
+def _stable_selection(row: dict[str, Any]) -> dict[str, Any] | None:
+    observation_id = row.get("candidate_observation_id")
+    artifact_id = row.get("artifact_id")
+    extraction_id = row.get("immutable_extraction_id") or row.get("extraction_identity")
+    attachment_observation_id = row.get("attachment_observation_id")
+    if not all((observation_id, artifact_id, extraction_id, attachment_observation_id)):
+        return None
+    return {
+        "candidate_key": row.get("candidate_key"),
+        "candidate_observation_id": observation_id,
+        "attachment_observation_id": attachment_observation_id,
+        "artifact_id": artifact_id,
+        "extraction_id": extraction_id,
+        "release_source_url": _source_url(row),
+        "attachment_source_url": row.get("attachment_url"),
+    }
+
+
 def _packet_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep every usable edition; deduplicate only repeated source identities."""
     unique: dict[str, dict[str, Any]] = {}
@@ -182,9 +237,22 @@ def select_evidence_manifest(
     window = ReportHistoryWindow(**history_values)
     candidates = [dict(record) for record in (candidate_records or []) if _source_url(record)]
     group_records = [
-        record for record in candidates if _in_window(record, as_of=as_of, window=window)
+        record
+        for record in candidates
+        if (
+            _in_window(record, as_of=as_of, window=window)
+            or (record.get("eligibility") == "incomplete" and not record.get("published_at"))
+        )
+        and record.get("eligibility") != "revoked"
+        and not (
+            record.get("eligibility") == "rejected"
+            and record.get("rejection_reason")
+            in {"invitation_veto", "non_report_detail_title", "non_report_release"}
+        )
     ]
-    selected_packet_rows = _packet_rows(packet_inputs)
+    selected_packet_rows = _packet_rows(
+        [record for record in packet_inputs if _in_window(record, as_of=as_of, window=window)]
+    )
     packet_urls = {_source_url(row) for row in selected_packet_rows}
     # A persisted selected variant may gain a bilingual group id after the
     # discovery candidate was assembled. Its URL still denotes one edition,
@@ -200,14 +268,25 @@ def select_evidence_manifest(
             group_id,
             {
                 "group_id": group_id,
+                "slot_key": _slot_key(record),
                 "report_class": packet_classes_by_group.get(group_id, _report_class(record)),
                 "candidate_source_urls": [],
+                "candidate_observation_ids": [],
+                "relation_observation_ids": [],
                 "packet_source_urls": [],
+                "rejections": [],
+                "selected": None,
             },
         )
         source_url = _source_url(record)
         if source_url not in group["candidate_source_urls"]:
             group["candidate_source_urls"].append(source_url)
+        observation_id = record.get("candidate_observation_id")
+        if observation_id and observation_id not in group["candidate_observation_ids"]:
+            group["candidate_observation_ids"].append(observation_id)
+        for relation_id in record.get("relation_observation_ids") or ():
+            if relation_id not in group["relation_observation_ids"]:
+                group["relation_observation_ids"].append(relation_id)
         if source_url in packet_urls and source_url not in group["packet_source_urls"]:
             group["packet_source_urls"].append(source_url)
     for row in selected_packet_rows:
@@ -216,24 +295,70 @@ def select_evidence_manifest(
             group_id,
             {
                 "group_id": group_id,
+                "slot_key": _slot_key(row),
                 "report_class": _report_class(row),
                 "candidate_source_urls": [],
+                "candidate_observation_ids": [],
+                "relation_observation_ids": [],
                 "packet_source_urls": [],
+                "rejections": [],
+                "selected": None,
             },
         )
         source_url = _source_url(row)
         if source_url not in group["packet_source_urls"]:
             group["packet_source_urls"].append(source_url)
+        observation_id = row.get("candidate_observation_id")
+        if observation_id and observation_id not in group["candidate_observation_ids"]:
+            group["candidate_observation_ids"].append(observation_id)
+        for relation_id in row.get("relation_observation_ids") or ():
+            if relation_id not in group["relation_observation_ids"]:
+                group["relation_observation_ids"].append(relation_id)
+        stable = _stable_selection(row)
+        if stable is not None:
+            if group["selected"] is not None and group["selected"] != stable:
+                raise ValueError("one evidence slot selected multiple immutable observations")
+            group["selected"] = stable
 
     for group in groups.values():
+        for source_url in group["candidate_source_urls"]:
+            candidate = next(
+                (record for record in candidates if _source_url(record) == source_url),
+                None,
+            )
+            if candidate is None or source_url in group["packet_source_urls"]:
+                continue
+            group["rejections"].append(
+                {
+                    **(
+                        {"candidate_observation_id": candidate["candidate_observation_id"]}
+                        if candidate.get("candidate_observation_id")
+                        else {}
+                    ),
+                    "reason": str(candidate.get("rejection_reason") or "not_selected_by_manifest"),
+                }
+            )
         group["candidate_source_urls"].sort()
+        group["candidate_observation_ids"].sort()
+        group["relation_observation_ids"].sort()
         group["packet_source_urls"].sort()
+        group["rejections"].sort(
+            key=lambda rejection: (
+                str(rejection.get("candidate_observation_id") or ""),
+                str(rejection["reason"]),
+            )
+        )
     selected_urls = {url for group in groups.values() for url in group["packet_source_urls"]}
     considered_urls = {_source_url(record) for record in candidates}
     candidate_by_url = {_source_url(record): record for record in candidates}
     rejected = tuple(
         {
             "source_url": url,
+            **(
+                {"candidate_observation_id": candidate_by_url[url]["candidate_observation_id"]}
+                if candidate_by_url.get(url, {}).get("candidate_observation_id")
+                else {}
+            ),
             "reason": str(
                 candidate_by_url.get(url, {}).get("rejection_reason")
                 or (

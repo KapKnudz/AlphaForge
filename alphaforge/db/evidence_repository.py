@@ -52,6 +52,7 @@ class ArtifactObjectInput:
     verified_sha256: str
     verified_size: int
     stored_at: str
+    acquisition_max_pdf_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +334,11 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
         raise ValueError("artifact object references an unknown artifact")
     if value.verified_sha256 != artifact["sha256"] or value.verified_size != artifact["byte_size"]:
         raise ValueError("verified object hash and size must match artifact metadata")
+    if (
+        value.acquisition_max_pdf_bytes is not None
+        and value.acquisition_max_pdf_bytes < value.verified_size
+    ):
+        raise ValueError("artifact acquisition limit must accommodate verified size")
     identity = _stable_hash(
         {
             "artifact_id": value.artifact_id,
@@ -349,14 +355,31 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
         "verified_sha256": value.verified_sha256,
         "verified_size": value.verified_size,
         "stored_at": value.stored_at,
+        "acquisition_max_pdf_bytes": value.acquisition_max_pdf_bytes,
     }
     if existing is not None:
-        return _require_same(existing, expected, identity=identity)
+        stable_expected = {
+            key: field_value
+            for key, field_value in expected.items()
+            if key not in {"stored_at", "acquisition_max_pdf_bytes"}
+        }
+        result = _require_same(existing, stable_expected, identity=identity)
+        if (
+            result["acquisition_max_pdf_bytes"] is None
+            and value.acquisition_max_pdf_bytes is not None
+        ):
+            conn.execute(
+                """UPDATE evidence_artifact_objects
+                   SET acquisition_max_pdf_bytes=? WHERE id=?""",
+                (value.acquisition_max_pdf_bytes, result["id"]),
+            )
+            return _row(conn, "evidence_artifact_objects", "id", result["id"]) or {}
+        return result
     conn.execute(
         """INSERT INTO evidence_artifact_objects
            (object_record_id, artifact_id, object_uri, storage_kind,
-            verified_sha256, verified_size, stored_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            verified_sha256, verified_size, stored_at, acquisition_max_pdf_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             identity,
             artifact["id"],
@@ -365,6 +388,7 @@ def append_artifact_object(conn: Any, value: ArtifactObjectInput) -> dict[str, A
             value.verified_sha256,
             value.verified_size,
             value.stored_at,
+            value.acquisition_max_pdf_bytes,
         ),
     )
     return _row(conn, "evidence_artifact_objects", "object_record_id", identity) or {}
@@ -458,7 +482,6 @@ def append_extraction(conn: Any, value: ExtractionInput) -> dict[str, Any]:
             "page_truncated": int(value.page_truncated),
             "scanned": int(value.scanned),
             "limitations": list(value.limitations),
-            "extracted_at": value.extracted_at,
             "pages": [asdict(page) for page in ordered_pages],
         }
     )
@@ -477,7 +500,10 @@ def append_extraction(conn: Any, value: ExtractionInput) -> dict[str, Any]:
     }
     existing = _row(conn, "evidence_artifact_extractions", "extraction_id", identity)
     if existing is not None:
-        result = _require_same(existing, expected, identity=identity)
+        stable_expected = {
+            key: field_value for key, field_value in expected.items() if key != "extracted_at"
+        }
+        result = _require_same(existing, stable_expected, identity=identity)
         persisted_pages = [
             dict(row)
             for row in conn.execute(
@@ -719,6 +745,7 @@ def _require_assertion_corroboration(
         valid_strong = (
             isinstance(value, str)
             and bool(value)
+            and value != "mfn-report-tag+archive-report-pdf"
             and not (directly_legacy or inherited_legacy)
             and all(observation["feed_report_identity"] == value for observation in (left, right))
         )
@@ -951,6 +978,277 @@ def current_relation_observations(
         (company_id, as_of),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def manifest_v2_projection(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    publication_cutoffs: dict[str, str],
+    artifact_store: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project current immutable observations into manifest candidates and packet rows.
+
+    Once a company/window has immutable observations, this projection is the
+    complete selection input. It never supplements missing V2 facts from the
+    mutable legacy document tables.
+    """
+    observations = current_candidate_observations(conn, company_id=company_id, as_of=as_of)
+    if artifact_store is None:
+        from alphaforge.evidence.artifact_store import ArtifactUnavailableError
+
+        raise ArtifactUnavailableError(
+            "artifact_verifier_unavailable", "V2 projection requires an artifact store"
+        )
+    relations = current_relation_observations(conn, company_id=company_id, as_of=as_of)
+    asserted = [row for row in relations if row["disposition"] == "asserted"]
+    observation_by_id = {str(row["candidate_observation_id"]): row for row in observations}
+    relation_membership: dict[str, list[dict[str, Any]]] = {}
+    relation_bindings: dict[str, dict[str, Any]] = {}
+    parent = {stable_id: stable_id for stable_id in observation_by_id}
+
+    def component(stable_id: str) -> str:
+        while parent[stable_id] != stable_id:
+            parent[stable_id] = parent[parent[stable_id]]
+            stable_id = parent[stable_id]
+        return stable_id
+
+    for relation in asserted:
+        endpoints = [
+            conn.execute(
+                "SELECT candidate_observation_id FROM evidence_candidate_observations WHERE id=?",
+                (relation[field],),
+            ).fetchone()
+            for field in (
+                "left_candidate_observation_id",
+                "right_candidate_observation_id",
+            )
+        ]
+        if any(endpoint is None for endpoint in endpoints):
+            continue
+        left_id, right_id = (str(endpoint[0]) for endpoint in endpoints)
+        if left_id not in observation_by_id or right_id not in observation_by_id:
+            continue
+        relation_membership.setdefault(left_id, []).append(relation)
+        relation_membership.setdefault(right_id, []).append(relation)
+        endpoint_urls = sorted(
+            (
+                str(observation_by_id[left_id]["release_source_url"]),
+                str(observation_by_id[right_id]["release_source_url"]),
+            )
+        )
+        relation_type = str(relation["relation_type"])
+        relation_bindings[str(relation["relation_observation_id"])] = {
+            "relation_key": _stable_hash(
+                {
+                    "relation_type": relation_type,
+                    "endpoint_source_urls": endpoint_urls,
+                }
+            ),
+            "relation_type": relation_type,
+            "endpoint_source_urls": endpoint_urls,
+        }
+        left_root = component(left_id)
+        right_root = component(right_id)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    component_group_ids: dict[str, str] = {}
+    component_relation_ids: dict[str, set[str]] = {}
+    for stable_id, memberships in relation_membership.items():
+        root = component(stable_id)
+        relation_keys = [str(row["relation_key"]) for row in memberships]
+        current = component_group_ids.get(root)
+        component_group_ids[root] = min([*relation_keys, *([current] if current else [])])
+        component_relation_ids.setdefault(root, set()).update(
+            str(row["relation_observation_id"]) for row in memberships
+        )
+
+    candidates: list[dict[str, Any]] = []
+    usable: list[dict[str, Any]] = []
+    for observation in observations:
+        metadata = _json_object(observation.get("raw_metadata"))
+        stable_observation_id = str(observation["candidate_observation_id"])
+        memberships = relation_membership.get(stable_observation_id, [])
+        root = component(stable_observation_id) if memberships else None
+        relation_ids = sorted(component_relation_ids[root]) if root is not None else []
+        group_id = (
+            component_group_ids[root] if root is not None else str(observation["candidate_key"])
+        )
+        base = {
+            "source_url": str(observation["release_source_url"]),
+            "title": observation["authoritative_feed_title"] or observation["detail_title"] or "",
+            "detail_title": observation["detail_title"],
+            "published_at": observation["published_at"],
+            "language": observation["language"],
+            "ingested_lang": observation["language"],
+            "report_kind": observation["report_kind"],
+            "document_type": observation["document_type"],
+            "fiscal_period": observation["fiscal_period"],
+            "period_start": observation["period_start"],
+            "period_end": observation["period_end"],
+            "observation_date": (
+                metadata.get("observation_date")
+                if metadata.get("observation_date_authoritative")
+                else None
+            ),
+            "observation_date_authoritative": bool(metadata.get("observation_date_authoritative")),
+            "candidate_key": observation["candidate_key"],
+            "candidate_observation_id": stable_observation_id,
+            "eligibility": observation["eligibility"],
+            "rejection_reason": (
+                None
+                if observation["eligibility"] == "eligible"
+                else observation["eligibility_reason"]
+            ),
+            "selection_group_id": group_id,
+            "relation_observation_ids": relation_ids,
+            "relation_bindings": [relation_bindings[relation_id] for relation_id in relation_ids],
+            "raw_metadata": metadata,
+        }
+        candidates.append(base)
+        if observation["eligibility"] != "eligible":
+            continue
+        published_at = str(observation["published_at"] or "")[:10]
+        report_class = "annual" if observation["report_kind"] == "annual" else "quarterly"
+        if (
+            not published_at
+            or published_at > as_of[:10]
+            or published_at < publication_cutoffs[report_class]
+        ):
+            continue
+        if observation["attachment_observation_id"] is None or observation["extraction_id"] is None:
+            base["rejection_reason"] = "immutable_binding_incomplete"
+            continue
+        bound = conn.execute(
+            """SELECT ao.attachment_observation_id, ao.attachment_source_url,
+                      ao.content_type AS attachment_content_type,
+                      a.artifact_id, a.sha256, a.byte_size,
+                      x.extraction_id, x.extractor, x.extractor_version,
+                      x.config_fingerprint, x.text_checksum, x.page_count,
+                      x.pages_included, x.page_truncated, x.scanned, x.limitations,
+                      b.effective_at
+               FROM evidence_attachment_observations ao
+               JOIN evidence_artifacts a ON a.id=ao.artifact_id
+               JOIN evidence_artifact_extractions x ON x.id=? AND x.artifact_id=a.id
+               JOIN evidence_observation_batches b ON b.id=?
+               WHERE ao.id=?""",
+            (
+                observation["extraction_id"],
+                observation["batch_id"],
+                observation["attachment_observation_id"],
+            ),
+        ).fetchone()
+        if bound is None:
+            base["rejection_reason"] = "immutable_binding_mismatch"
+            continue
+        bound = dict(bound)
+        object_row = conn.execute(
+            """SELECT object_uri, storage_kind, verified_sha256, verified_size,
+                      acquisition_max_pdf_bytes
+               FROM evidence_artifact_objects
+               WHERE artifact_id=(SELECT id FROM evidence_artifacts WHERE artifact_id=?)
+                 AND verified_sha256=? AND verified_size=?
+                 AND acquisition_max_pdf_bytes IS NOT NULL
+               ORDER BY object_record_id LIMIT 1""",
+            (bound["artifact_id"], bound["sha256"], bound["byte_size"]),
+        ).fetchone()
+        if object_row is None:
+            base["rejection_reason"] = "artifact_unavailable"
+            continue
+        acquisition_limit = int(object_row["acquisition_max_pdf_bytes"])
+        artifact_store.read_pdf(
+            str(bound["sha256"]),
+            expected_size=int(bound["byte_size"]),
+            max_pdf_bytes=acquisition_limit,
+        )
+        pages = [
+            dict(row)
+            for row in conn.execute(
+                """SELECT page_number, anchor, text, text_checksum
+                   FROM evidence_artifact_pages WHERE extraction_id=? ORDER BY page_number""",
+                (observation["extraction_id"],),
+            ).fetchall()
+        ]
+        if not pages:
+            base["rejection_reason"] = "extraction_pages_unavailable"
+            continue
+        usable.append(
+            {
+                **base,
+                "attachment_observation_id": bound["attachment_observation_id"],
+                "artifact_id": bound["artifact_id"],
+                "immutable_extraction_id": bound["extraction_id"],
+                "attachment_url": bound["attachment_source_url"],
+                "content_type": bound["attachment_content_type"],
+                "byte_size": bound["byte_size"],
+                "attachment_sha256": bound["sha256"],
+                "extractor": bound["extractor"],
+                "extractor_version": bound["extractor_version"],
+                "config_fingerprint": bound["config_fingerprint"],
+                "text_checksum": bound["text_checksum"],
+                "page_count": bound["page_count"],
+                "pages_included": bound["pages_included"],
+                "page_truncated": bound["page_truncated"],
+                "scanned": bound["scanned"],
+                "limitations": bound["limitations"],
+                "fetched_at": bound["effective_at"],
+                "release_body": str(metadata.get("content_text") or metadata.get("body") or ""),
+                "pages": pages,
+                "siblings": [],
+                "object_uri": object_row["object_uri"],
+                "acquisition_max_pdf_bytes": acquisition_limit,
+            }
+        )
+
+    # Relations are manifest inputs only. Select one independently retained
+    # edition per asserted relation component; English wins translations and
+    # the latest observation wins revisions, with markers breaking date ties.
+    from alphaforge.evidence.ingest import _has_revision_markers
+
+    selected: list[dict[str, Any]] = []
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for row in usable:
+        by_group.setdefault(str(row["selection_group_id"]), []).append(row)
+    for rows in by_group.values():
+        relation_types = {
+            str(relation["relation_type"])
+            for row in rows
+            for relation in relation_membership.get(str(row["candidate_observation_id"]), [])
+        }
+        if "REVISION" in relation_types:
+            rows.sort(
+                key=lambda row: (
+                    str(row["published_at"] or ""),
+                    _has_revision_markers(
+                        {
+                            "title": " ".join((str(row["title"]), str(row["detail_title"] or ""))),
+                            "attachment_url": row.get("attachment_url"),
+                            "raw_metadata": row.get("raw_metadata"),
+                        }
+                    ),
+                    str(row.get("language") or "").lower() == "en",
+                    str(row["source_url"]),
+                ),
+                reverse=True,
+            )
+        else:
+            rows.sort(
+                key=lambda row: (
+                    0 if str(row.get("language") or "").lower() == "en" else 1,
+                    str(row["source_url"]),
+                )
+            )
+        selected.append(rows[0])
+    candidates.sort(key=lambda row: str(row["source_url"]))
+    selected.sort(key=lambda row: str(row["source_url"]))
+    return candidates, selected
+
+
+def has_manifest_v2_observations(conn: Any, *, company_id: int, as_of: str) -> bool:
+    """Return whether strict V2 authority has begun for this company/window."""
+    return bool(current_candidate_observations(conn, company_id=company_id, as_of=as_of))
 
 
 def _json_object(value: Any) -> dict[str, Any]:

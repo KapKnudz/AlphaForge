@@ -29,7 +29,7 @@ These decisions are settled and the plan implements them verbatim; no phase revi
 8. **MFN cadence daily delta + weekly page-2 backstop.** `MfnScraper.discover_feed()` daily page-1 delta (feed → unseen URLs → detail fetch), plus Sunday page-2 sweep to catch FY reports pushed off page 1 by interim flow. `mfn_feed_checks{checked_at, discovered_count, unseen_count}` persisted even on zero delta.
 9. **Call transcripts deferred to Phase 2.** No transcript ingest in MVP (`research_documents.source_type = transcript` is a reserved enum value only). Ledger rows cite report PDFs + MFN bodies only.
 10. **No paid ownership vendor — ship the free ownership stack with three permanent limitations and a capped ownership sub-score, documented plainly.** Free stack: (a) MFN annual top-10 holder tables extracted from within the 50+tail window (names+shares+%, no category), (b) flagging / placement / lockup events deterministically tagged from MFN bodies (`flaggning ≥5%`, `riktad emission`, `lock-up … dagar`), (c) FI PDMR insider windowed scrape (90-day sliced search, `marknadssok.fi.se`, `Karaktär Förvärv/Avyttring/Tilldelning` distinguished), (d) FI short register snapshot + Börsdata `holdings/shorts` snapshot. Three permanent limitations carried on every thesis's `limitations[]` and surfaced in UI/export: *`Free-float % is unavailable`* / *`Named large-holder coverage is unavailable beyond annual top 10`* / *`Ownership-change history is unavailable at quarterly granularity`*. Hedborg Stage B ownership sub-score capped (≤3/10) and thesis cannot `activated` on ownership setup alone without a rule-exception tag.
-11. **MFN publishes every release twice (Swedish + English) — ingest must dedupe and process only one.** Dedupe on normalized `(mfn_slug, canonical_url_without_lang_suffix, attachment_storage_id)` and on checksum of stripped body text; when both `sv` and `en` variants present, prefer the variant matching the packet majority lang, otherwise prefer `en`. Store `duplicate_of` pointer, process one text only, and expose `ingested_lang` in packet.
+11. **MFN publishes releases in Swedish and English — retain both candidates but select only one for the packet.** Group only through an asserted immutable translation or revision relation backed by deterministic corroboration; prefer English when available. Preserve each candidate's artifact and extraction history. [`docs/evidence-flow.md`](../evidence-flow.md) owns the detailed selection contract.
 12. **Pipeline cadence: full pipeline once per company initially, then incremental earnings/news when released, Börsdata sync nightly.** Initial fleet run: `import-watchlist → sync (reports+kpis+prices+dividends) → rank → gate → evidence → analyze → export` for all watchlist names. Thereafter: nightly `sync` (Börsdata batch 50, slice-locally not `maxCount`); MFN delta daily (incremental); `rank` on demand or daily; `evidence`/`analyze` only when a new qualifying document (report `interim/annual` or R12 set) or qualifying MFN event arrives for that company.
 13. **Thesis update path — news agent then Hedborg aggregator.** When new earnings/news arrives for a covered company, the **News & Catalyst Calendar** agent analyses its impact; it then delegates **for that company only** to the **Hedborg aggregator (Stock Researcher)** which re-evaluates the case briefly through the lens of the existing thesis (prior packet + prior thesis carried as context). Full recalculation (rank + reverse-DCF + scenario bands) is available but rare, triggered only when the news agent flags a price/earnings surprise above threshold or the aggregator marks `reassess` disposition. This path is per-company, not a fleet re-run.
 14. **Theses immutable with packet-hash revisions.** `theses{company_id, revision, as_of, packet_hash, prior_packet_hash, change_log, thesis_json, model, prompt_version, verdict}` has **`UNIQUE(company_id, revision)` as the identity key** (packet_hash is not a unique constraint — application enforces idempotence for full recalculations by checking for an existing identical `packet_hash` before inserting and returning the existing revision). Every derived value carries `packet_hash` provenance. The light-revision path (impact note without new inputs) inserts `revision+1` with the **same** `packet_hash` and a `change_log`; the previous `UNIQUE(company_id, packet_hash)` would have blocked this, so it is dropped and prose/DDL agree on `(company_id, revision)` only. Full-recalc rows still use a content-addressed `packet_hash`; light-revision rows reuse that hash intentionally (see §5.3 contract).
@@ -193,7 +193,7 @@ Following `scout-alphaforge-evidence-sources §2`:
 | # | Evidence step | Mode | Owner | What happens |
 |---|---|---|---|---|
 | S0 | MFN feed poll + detail fetch | Deterministic — scrape | `MfnScraper` (HTTP + stdlib `HTMLParser`, `BASE_URL https://mfn.se`, `MAX_ARTICLES 24`, report-only by default, detail `h1`/`article`, publication-labeled timestamp metadata, attachment `storage.mfn.se/*.pdf`) | `discover_feed(mfn_slug)` daily page-1, Sunday page-2; `scrape_details(unseen)` only for unseen URLs |
-| S1 | Release persistence | Deterministic | `ResearchDocumentIngestionService.persist_articles` | `research_documents` uses `ON CONFLICT(company_id, source_url) DO NOTHING`; report filtering happens before grouping; selected and suppressed bilingual variants retain language, checksum, group, and selection-rule metadata, with `duplicate_of` audit pointers |
+| S1 | Release persistence | Deterministic | `ResearchDocumentIngestionService.persist_articles` / `RevisionRecorder` | The mutable document table remains a legacy compatibility view; Manifest V2 records independent append-only candidate, artifact, extraction, and relation history as specified in [`docs/evidence-flow.md`](../evidence-flow.md). |
 | S2 | PDF download | Deterministic | `download_pdf` via `request_with_retry` (60 s timeout, bounded retries, `Retry-After`) | Fails single PDF without aborting batch |
 | S3 | PDF text extraction — **50 + tail** | Deterministic | `ResearchDocumentIngestionService.extract_pdf_pages` → `pypdf` pages 1–50 plus pages 81–90 when the default cap applies to a document over 50 pages; `re.sub(\n{3,},\n\n)`; `page_truncated` flag; scanned or near-empty PDFs retain a `*_no_ocr` limitation | Language is seeded from detail metadata or a deterministic title/body heuristic during ingestion; confidence is not persisted. шведск/Acast shareholder tables on p.51 prove 30 was insufficient |
 | S4 | Catalog + period normalization | Deterministic | `report_kind` / `is_report` in `mfn_taxonomy.py` | Annual/quarterly title classification, schedule-notice exclusion, and report-only eligibility; report-period normalization remains the planned downstream catalog step |
@@ -209,13 +209,15 @@ Following `scout-alphaforge-evidence-sources §2`:
 
 **Not LLM-scoped (stay deterministic):** ranking, KPI math, reverse-DCF solves, scenario recalc, return/dividend math, readiness gates, citation traversal, ADTV math, report-period normalization, bilingual dedupe, feed delta idempotence.
 
-### 4.2 MFN bilingual dedupe — Swedish + English, process one
+### 4.2 MFN bilingual selection — Swedish + English, one packet source
 
-Every MFN company feed carries each release twice (same body translated). The ingestion **must**:
-
-- Match only opposite-language candidates for the same issuer and report kind. Require one strong corroborator (shared provider event ID, exact PDF/attachment checksum, or equal numeric key-figure fingerprint) plus at least two compatible derived signals (fiscal period, resolved observation date, publication date, or translation-neutral title). Same-language documents never merge; ambiguous and semantic-only pairs remain separate.
-- Keep one preferred variant per identity group. A packet-majority `sv`/`en` selection wins when supplied; otherwise English wins, with the source URL as the final tie-breaker. The selected row is returned for packet processing; suppressed variants retain `duplicate_of`, a shared bilingual group ID, `ingest_status = superseded_by_translation`, language, checksum, and selection-rule metadata for audit.
-- Record the selection rule (`bilingual_selection_rule ∈ {sv_packet_majority, en_packet_majority, deterministic_en_fallback}`) and expose it as a diagnostic. Resolve an explicit `observation_date`, `period_end`, or `report_period_end` first; otherwise use an unambiguous covered-period end from the release body rather than assuming calendar quarters.
+Each release URL remains an independently retained candidate. Manifest V2 may group
+candidates only through a currently asserted immutable translation or revision
+relation backed by deterministic corroboration, then selects English when available.
+Suppression is a manifest decision and never deletes either candidate's attachment,
+artifact, extraction, pages, or observations. Ambiguous and semantic-only pairs remain
+separate. [`docs/evidence-flow.md`](../evidence-flow.md) owns the matching, date,
+relation, and tie-break contracts.
 
 ### 4.3 Free ownership stack — what is shipped
 
@@ -231,7 +233,7 @@ All four feed the `ResearchEvidence` and S10/S11 typed outputs; the thesis card'
 ### 4.4 Swedish-aware prompts — no translation layer
 
 - Current ingest detection is dependency-free: MFN title markers seed `sv`/`en`, while ingestion honors an explicit language and otherwise applies a Swedish-marker heuristic to title/body text. The persisted contract is `ingested_lang` plus language/checksum provenance in `raw_metadata`; confidence scores are not currently persisted.
-- Selection: a caller-supplied packet majority (`sv` or `en`) determines the preferred bilingual variant; without one, English is the deterministic fallback. The selection rule and shared group ID are persisted for audit. Specialist prompt variants remain a downstream integration step.
+- Selection: Manifest V2 prefers English within a deterministically corroborated asserted relation; otherwise candidates remain independent. Specialist prompt variants remain a downstream integration step. See [`docs/evidence-flow.md`](../evidence-flow.md) for the authoritative selection contract.
 - Instruction (front-matter of every `_sv.md`): *"`Du svarar på svenska där evidens är på svenska; citera ordagrant och översätt inte nyckeltermer. Varje påstående kräver source_ids-paragraf; saknas källa → missing_information.`"*
 - Hedborg Swedish-hedge fidelity (`"...förutsättningarna förblir utmanande"` is challenge-preserved, not mushed to *"challenging but positive"*) is validated by the evidence-sources report's §8 Nordic-language risk.
 
@@ -269,7 +271,7 @@ rank  (RankingEngine over watchlist: per company FinancialResult+ValuationResult
 gate  (AgentReadinessGate: general model only → evidence_blocked if the evidence lane lacks a valid frozen packet → valuation_blocked if reverse-DCF unavailable/guardrail missing → the ONLY paid-call gate)
       │ ready set only (top 25 + flags up to 30 style)
       ▼
-evidence  (OneCompanyEvidenceFlow PIT-filters complete MFN PDF evidence ≤as_of; packet_hash=sha256(canonical_json without hash); validated packet persisted in `evidence_packets`; bilingual duplicates suppressed only after strong cross-language corroboration plus derived-signal agreement; language majority resolved; a source-free run returns typed `no_evidence` with `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source` and records a partial job audit; see `docs/evidence-flow.md`)
+evidence  (OneCompanyEvidenceFlow PIT-filters complete MFN PDF evidence ≤as_of; packet_hash=sha256(canonical_json without hash); validated packet persisted in `evidence_packets`; Manifest V2 suppresses a bilingual packet source only through an asserted, deterministically corroborated relation and prefers English within that group; a source-free run returns typed `no_evidence` with `no_published_release`, `all_releases_after_cutoff`, or `no_complete_source` and records a partial job audit; see `docs/evidence-flow.md`)
       │
       ▼
 analyze  (fan-out 6 specialists in parallel, each a section-scoped packet slice → SectionDraft{claims,citations,limitations} via single LLMClient; one free-text retry + _coerce_optional_float; main agent Stock Researcher owns verdict-only synthesis via Hedborg skills; numbers re-derived in core and rejected if >eps)
@@ -299,7 +301,7 @@ T1 — Nightly Börsdata sync (batch 50, slice-locally):
 
 T daily — MFN delta:
      discover_feed(page-1) per watchlist issuer; unseen → detail + PDF 50+tail
-     ingestion groups by provider event/PDF identity with attachment, canonical-URL, and title fallbacks; invariant: one logical release = one processed text
+     retain each release independently; an asserted, deterministically corroborated relation may select one source for the packet
 
 T Sunday — MFN page-2 backstop:
      same delta but with ?page=2 sweep to catch FY reports pushed off page-1
@@ -510,7 +512,7 @@ All checks run without a paid model when marked *deterministic*; the pilot is th
 
 - **Check:** build a packet at `as_of = report_Date - 1 day` for a company whose FY report is published on `report_Date`; assert the report is **absent** from the packet. Rebuild at `as_of = report_Date`; assert it is present. Same for MFN body `published_at`, `kpi_observation.observation_date`, insider `Publiceringsdatum`, short snapshot vintage.
 - **Guard-two-layer proof:** inject a future-dated `research_documents` row (publication = `as_of + 7 days`) into a fixture DB and assert **both** the adapter trim and the packet re-filter exclude it — golden-packet `packet_hash` unchanged vs fixture without the row.
-- **Bilingual PIT proof:** insert both `sv` and `en` variants of one release with an authorized strong corroborator and at least two compatible derived signals; assert packet text count increments by 1 (not 2) and `duplicate_of` is populated. A semantic-only or ambiguous pair must remain two canonical sources.
+- **Bilingual PIT proof:** insert both `sv` and `en` variants of one release with an authorized strong corroborator and at least two compatible derived signals; assert packet text count increments by 1 (not 2), the asserted immutable relation is recorded, and both candidate histories remain intact. A semantic-only or ambiguous pair must remain two canonical sources.
 
 ### 7.4 Idempotence & correctness invariants
 
@@ -552,13 +554,13 @@ All checks run without a paid model when marked *deterministic*; the pilot is th
 |---|---|---|---|
 | **Scope creep back toward CompanyScraper (30 tables/30 CLIs)** | Medium | High | Explicit **deferred list** (§9) plus branch protection + import-isolation law. Each deferred item needs a demonstrated need and a new plan PR. |
 | **Thin MFN/PDF history for illiquid micro caps (false ineligibility)** | High | Medium | Blocker-vs-limitation split: missing ledger → `evidence_blocked` (gate prevents paid call), missing peak/ownership → `limitation` not blocker. 50+tail + page-2 backstop + 8–12q “partial_coverage” tolerance. |
-| **Nordic-language ledge (hedge nuance lost in translation)** | High | High | Swedish-aware prompt variants, no translation layer, paragraph-anchored excerpts, majority-lang selector, §4.4 Hedborg-fidelity. |
+| **Nordic-language ledge (hedge nuance lost in translation)** | High | High | Swedish-aware prompt variants, no translation layer, paragraph-anchored excerpts, and the Manifest V2 language-selection contract in [`docs/evidence-flow.md`](../evidence-flow.md). |
 | **Börsdata rate-limit / Cloudflare throttling (batch 50 fleet spike)** | Medium | Medium | Adapter 0.5–1 s sleep, `Retry-After`, per-company failure isolation, nightly sync not fleet-burst, `jobs` table retry semantics; FI PDMR windowed ≤1/q2s. |
 | **Over-fitting Hedborg score weights early** | Medium | Low | Weights versioned (`2026-08-12-reverse-dcf-v10`), config-versioned, unevaluated in MVP (no calibration machinery — deferred). |
 | **Hedborg witness gaps (earnings one-off risk, dilution cause, peak margin subjectivity)** | Medium | Medium | Deterministic guards (`earnings_growth_one_off_risk`, `share_dilution>5%`, `gross→EBIT spread` clue vs conclusion); model authors mechanism, core clamps the number. |
 | **Brand risk (scraped PDFs, MFN/FI ToS)** | Low | High | Use only the company's own annual reports via `storage.mfn.se`/company IR for internal research; respect FI throttle quote and never bulk-burst the PDMR search; no Avanza/Nordnet holder-HTML scraping (blocked by SPA session and ToS). |
 | **`currency_ratio` semantics misread (FX utility computes the wrong SEK direction)** | Low | High | **Verified** via `scout-borsdata-api-coverage` (wiki *converted = original × ratio* + 5 live cases ABB/Betsson/Arctic/SSAB/Beowulf; fetch `original=0`); persisted `currency_ratio` + `fx_rate_to_sek` per observation; unit test prevents wrong-direction conversion; wrong ratio would surface as valuation limitation, never guessed. |
-| **MFN bilingual double-count inflating evidence** | Medium | Low | Deterministic provider-event/PDF identity grouping with attachment, canonical-URL, and title fallbacks plus a `duplicate_of` pointer; validated by the bilingual PIT proof in §7.3. |
+| **MFN bilingual double-count inflating evidence** | Medium | Low | Manifest grouping requires an asserted immutable relation with deterministic corroboration; both candidates remain independently auditable, and the bilingual PIT proof in §7.3 validates one packet source. |
 | **Rollback cost for any phase** | Low | Low | Each phase is additive (new tables `ADD COLUMN`, new CLI subcommands); theses are immutable — nothing rewrites persisted rows. |
 
 ---
