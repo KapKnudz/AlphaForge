@@ -359,13 +359,15 @@ CREATE TABLE IF NOT EXISTS jobs (
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS mfn_feed_checks (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
     mfn_slug            TEXT NOT NULL,
     checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     discovered_count    INTEGER NOT NULL,
-    unseen_count        INTEGER NOT NULL,
-    PRIMARY KEY (company_id, checked_at)
+    unseen_count        INTEGER NOT NULL
 ) STRICT;
+CREATE INDEX IF NOT EXISTS idx_mfn_feed_checks_chronological
+    ON mfn_feed_checks(company_id, checked_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS news_releases (
     company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,

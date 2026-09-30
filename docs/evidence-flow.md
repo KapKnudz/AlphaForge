@@ -48,6 +48,12 @@ bytes; hashes the raw bytes; extracts with `pypdf`; and persists logical
 documents, bilingual sibling provenance, attachments, extraction metadata, and
 page anchors through repository helpers.
 
+Each non-dry-run feed check persists a distinct audit event, including zero
+delta. Event identity is independent of the SQLite wall-clock timestamp, so
+equal `checked_at` values do not conflate checks. The [live SQLite
+schema](../db/alphaforge.sqlite.sql) and [migration history](../db/migrations/)
+own the table shape and upgrade details.
+
 Historical retrieval is bounded: interim reports keep a 2-year lookback and
 annual reports a 5-year lookback relative to `--as-of` (calendar-year
 arithmetic, Feb 29 maps to Feb 28). Feed cards outside the window are skipped

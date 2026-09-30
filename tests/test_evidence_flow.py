@@ -377,7 +377,7 @@ def test_flow_filters_missing_and_future_dates_and_is_idempotent():
     assert first.status == "complete"
     assert first.skipped == {"future_dated_release": 1, "missing_publication_timestamp": 1}
     feed_check = conn.execute(
-        "SELECT discovered_count, unseen_count FROM mfn_feed_checks ORDER BY checked_at DESC LIMIT 1"
+        "SELECT discovered_count, unseen_count FROM mfn_feed_checks ORDER BY checked_at DESC, id DESC LIMIT 1"
     ).fetchone()
     assert tuple(feed_check) == (3, 3)
     assert first.packet_hash and validate_frozen_packet(first.packet)
@@ -970,10 +970,14 @@ def test_v2_feed_revocation_does_not_require_legacy_document(tmp_path):
     assert revoked.packet is None
 
 
+@pytest.mark.parametrize("fixed_clock", [False, True])
 def test_v2_feed_revocation_supersedes_incomplete_observation_without_legacy_document(
     tmp_path,
+    fixed_clock,
 ):
     conn = _connection()
+    if fixed_clock:
+        conn.create_function("strftime", -1, lambda *args: "2026-09-30T13:30:00.000Z")
     company_id = _mapped_company(conn)
     article = {
         "source_url": "https://mfn.test/a/flow/incomplete-revoked",
@@ -1036,6 +1040,16 @@ def test_v2_feed_revocation_supersedes_incomplete_observation_without_legacy_doc
     current = current_candidate_observations(conn, company_id=company_id, as_of="2026-09-20")
     assert current[0]["eligibility"] == "revoked"
     assert revoked.packet is None
+    checks = conn.execute(
+        "SELECT id, checked_at, discovered_count, unseen_count FROM mfn_feed_checks "
+        "WHERE company_id=? ORDER BY id",
+        (company_id,),
+    ).fetchall()
+    assert len(checks) == 2
+    assert checks[0]["id"] < checks[1]["id"]
+    assert [(row["discovered_count"], row["unseen_count"]) for row in checks] == [(1, 1), (0, 0)]
+    if fixed_clock:
+        assert [row["checked_at"] for row in checks] == ["2026-09-30T13:30:00.000Z"] * 2
 
 
 def test_corroborated_bilingual_candidates_stay_accounted_for_on_cache_replay():
