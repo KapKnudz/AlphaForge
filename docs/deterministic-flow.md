@@ -145,8 +145,12 @@ network fetch. Its effective date predicates are:
 
 These are **cutoff-filtered stored observations with verified applicable
 dates**, not historical-known-then correctness or an ingestion-vintage query.
-Generic [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not
-replace these loader predicates. `SELECTION_VERSION` is
+Market rows migrated without their original raw payload remain stored as
+`legacy_missing_raw_payload` diagnostics but cannot establish date-alias
+agreement or supply price/KPI numerical authority; a verified writer upsert can
+replace that row with its real raw payload. Generic
+[`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not replace
+these loader predicates. `SELECTION_VERSION` is
 `verified-dates-consecutive-annual-v2`. The loader returns `selection` diagnostics
 also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI/price
 provenance with original payload/value/date facts, selected price date/age,

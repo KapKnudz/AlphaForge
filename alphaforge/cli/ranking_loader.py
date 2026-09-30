@@ -219,7 +219,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
             if date_issue or observed != stored_observed:
                 observed = None
         else:
-            observed = stored_observed
+            observed = None
         fiscal_year = _fiscal_year(row["year"])
         reason = None
         if (observed is not None and observed > cutoff) or (
@@ -227,7 +227,11 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         ):
             reason = "KPI after cutoff"
         elif observed is None:
-            reason = "KPI observation date unverified"
+            reason = (
+                "KPI observation date unverified"
+                if raw
+                else "legacy KPI observation date provenance unverified"
+            )
         elif fiscal_year is None:
             reason = "KPI fiscal-year metadata unavailable"
         if reason:
@@ -244,6 +248,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
                     "value": row["value"],
                     "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
                     "raw_payload": raw,
+                    "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
                     "reason": reason,
                 }
             )
@@ -678,7 +683,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             if date_issue or verified_date != stored_date:
                 verified_date = None
         else:
-            verified_date = stored_date
+            verified_date = None
         if verified_date is None or verified_date > cutoff:
             selection["rejected_prices"].append(
                 {
@@ -688,10 +693,15 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                     "value": row["close"],
                     "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
                     "raw_payload": raw,
+                    "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
                     "reason": (
                         "stock price after cutoff"
                         if verified_date is not None and verified_date > cutoff
-                        else "stock price date unverified"
+                        else (
+                            "stock price date unverified"
+                            if raw
+                            else "legacy stock price date provenance unverified"
+                        )
                     ),
                 }
             )
