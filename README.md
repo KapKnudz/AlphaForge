@@ -4,7 +4,7 @@ A clean, simple stock-research system for the Nordic small-cap universe: one mai
 
 ## Status
 
-Phase 2 complete — deterministic ranking, valuation, and return math in pure, model-free code. The current implementation plan lives in [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md). The deterministic MFN issuer and report evidence lane is documented in [`docs/evidence-flow.md`](docs/evidence-flow.md).
+Implemented: deterministic ranking/valuation exports and a one-company MFN/PDF evidence lane; thesis generation remains planned. Start with [`docs/architecture.md`](docs/architecture.md) for implemented paths, boundaries and contract ownership. The target design remains [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md).
 
 ## Design principles
 
