@@ -158,7 +158,10 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
         if boundary_index >= 0
         else []
     )
-    return [item[0] for item in selected], [], omitted
+    reasons = []
+    if len(selected) < 2:
+        reasons = [boundary_reason or "fewer than two consecutive annual periods"]
+    return [item[0] for item in selected], reasons, omitted
 
 
 def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
@@ -205,16 +208,11 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
 def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
     annual_history = selection.get("annual_history", {})
     reasons = list(annual_history.get("reasons", []))
-    reasons.extend(
-        f"annual history report {item.get('id', 'unknown')}: {item['reason']}"
-        for item in annual_history.get("excluded", [])
-        if item.get("reason")
-    )
     reasons.extend(selection.get("price", {}).get("reasons", []))
     reasons.extend(
         f"report {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
         for item in selection.get("rejected_reports", [])
-        if item.get("reason")
+        if item.get("reason") and item.get("current_refusal", True)
     )
     reasons.extend(
         f"historical price for {item.get('period_end', 'unknown')}: {item['reason']}"
@@ -227,6 +225,84 @@ def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
         if item.get("reason")
     )
     return list(dict.fromkeys(reasons))
+
+
+def _rejection_is_current(
+    item: dict[str, Any],
+    cutoff: date,
+    admitted_annuals: list,
+    latest_annual,
+) -> bool:
+    if item.get("reason") == "after cutoff":
+        return False
+    if item.get("period_type") != "year":
+        return True
+
+    raw = item.get("raw_payload") or {}
+    year = _fiscal_year(item.get("report_year"))
+    if year is None:
+        year = next(
+            (
+                parsed
+                for key, value in raw.items()
+                if REPORT_FIELD_MAP.get(key) == "report_year"
+                and (parsed := _fiscal_year(value)) is not None
+            ),
+            None,
+        )
+    end = _date(item.get("period_end"))
+    if end is None:
+        end = next(
+            (
+                parsed
+                for key, value in raw.items()
+                if (key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end")
+                and (parsed := _date(value)) is not None
+            ),
+            None,
+        )
+    publication = _date(item.get("report_date"))
+    if publication is None:
+        publication = next(
+            (
+                parsed
+                for key, value in raw.items()
+                if REPORT_FIELD_MAP.get(key) == "report_date"
+                and (parsed := _date(value)) is not None
+            ),
+            None,
+        )
+
+    if (
+        (end is not None and end > cutoff)
+        or (publication is not None and publication > cutoff)
+        or (year is not None and year > cutoff.year)
+    ):
+        return False
+
+    admitted_years = {
+        parsed
+        for row in admitted_annuals
+        if (parsed := _fiscal_year(row["report_year"])) is not None
+    }
+    admitted_ends = {
+        parsed
+        for row in admitted_annuals
+        if (parsed := _verified_fiscal_end(row)) is not None
+    }
+    if year in admitted_years or end in admitted_ends:
+        return False
+
+    if latest_annual is None:
+        return True
+    anchor_year = _fiscal_year(latest_annual["report_year"])
+    anchor_end = _verified_fiscal_end(latest_annual)
+    comparisons = []
+    if year is not None and anchor_year is not None:
+        comparisons.append(year >= anchor_year)
+    if end is not None and anchor_end is not None:
+        comparisons.append(end >= anchor_end)
+    return any(comparisons) if comparisons else True
 
 
 def _number(value: Any) -> float | None:
@@ -357,7 +433,6 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         (company_id,),
     ).fetchall()
     period_rows = []
-    rejected_annual_dates = []
     for row in stored_period_rows:
         end, publication = _verified_fiscal_end(row), _date(row["report_date"])
         reason = None
@@ -372,11 +447,6 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         elif publication < end:
             reason = "publication precedes fiscal end"
         if reason:
-            if row["period_type"] == "year" and reason in {
-                "fiscal end or publication date unverified",
-                "publication precedes fiscal end",
-            }:
-                rejected_annual_dates.append(row)
             selection["rejected_reports"].append(
                 {
                     "id": row["id"],
@@ -393,17 +463,25 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         else:
             period_rows.append(row)
     annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
-    if annual_period_rows:
-        first_selected_end = _verified_fiscal_end(annual_period_rows[0])
-        blocking_rejections = [
-            row
-            for row in rejected_annual_dates
-            if _date(row["period_end"]) is None
-            or _date(row["period_end"]) >= first_selected_end
+    admitted_annuals = [row for row in period_rows if row["period_type"] == "year"]
+    latest_annual_row = annual_period_rows[-1] if annual_period_rows else (
+        admitted_annuals[-1] if admitted_annuals else None
+    )
+    for item in selection["rejected_reports"]:
+        item["current_refusal"] = _rejection_is_current(
+            item, cutoff, admitted_annuals, latest_annual_row
+        )
+    blocking_rejections = [
+        item
+        for item in selection["rejected_reports"]
+        if item.get("period_type") == "year" and item["current_refusal"]
+    ]
+    if annual_period_rows and blocking_rejections:
+        annual_period_rows = []
+        annual_reasons = [
+            "unresolved applicable annual rejection: "
+            + "; ".join(sorted({item["reason"] for item in blocking_rejections}))
         ]
-        if blocking_rejections:
-            annual_period_rows = []
-            annual_reasons = ["excluded annual date metadata unverified"]
     selection["annual_history"] = {
         "period_ends": [row["period_end"] for row in annual_period_rows],
         "reasons": annual_reasons,

@@ -571,28 +571,24 @@ class DcfAssumptionPolicy:
     ) -> float | None:
         if latest is None or latest.revenue is None or latest.revenue <= 0:
             return None
-        candidates = [
-            report for report in history if report.revenue is not None and report.revenue > 0
-        ]
-        if not candidates:
+
+        suffix = [latest]
+        for report in reversed(history):
+            if report.revenue is None or report.revenue <= 0:
+                break
+            newer = suffix[-1]
+            if (report.year is None) != (newer.year is None):
+                break
+            if report.year is not None and newer.year != report.year + 1:
+                break
+            suffix.append(report)
+            if len(suffix) == 4:
+                break
+        if len(suffix) < 2:
             return None
 
-        has_dated_history = latest.year is not None and any(
-            report.year is not None for report in candidates
-        )
-        if has_dated_history:
-            dated = [
-                report
-                for report in candidates
-                if report.year is not None and 0 < latest.year - report.year <= 3
-            ]
-            if not dated:
-                return None
-            baseline = min(dated, key=lambda report: report.year)
-            periods = latest.year - baseline.year
-        else:
-            periods = min(3, len(candidates))
-            baseline = candidates[-periods]
+        baseline = suffix[-1]
+        periods = latest.year - baseline.year if latest.year is not None else len(suffix) - 1
         return cagr(baseline.revenue, latest.revenue, periods)
 
     @staticmethod

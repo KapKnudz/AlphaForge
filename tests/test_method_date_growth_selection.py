@@ -381,7 +381,7 @@ def test_nonnumeric_older_fiscal_year_is_excluded_without_arithmetic():
     rows[0]["report_year"] = "not-a-year"
     selected, reasons, excluded = _annual_series(rows)
     assert [row["report_year"] for row in selected] == [2026]
-    assert reasons == []
+    assert reasons == ["annual fiscal-year metadata unverified"]
     assert excluded[0]["reason"] == "annual fiscal-year metadata unverified"
 
 
@@ -689,8 +689,8 @@ def test_foreign_report_currency_does_not_expand_valuation_availability():
 def test_all_selection_refusals_retain_provenance_and_reach_exports(
     monkeypatch, tmp_path
 ):
-    conn, cid = setup(periods=[annual(2025), annual(2026, 110)])
-    rejected = annual(2027, 121)
+    conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
+    rejected = annual(2026, 121)
     rejected.pop("period_end")
     assert upsert_financial_periods(conn, cid, [rejected]) == 0
     upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
@@ -701,10 +701,11 @@ def test_all_selection_refusals_retain_provenance_and_reach_exports(
     ingestion = next(
         item for item in selection["rejected_reports"] if item["source"] == "ingestion_rejection"
     )
-    assert ingestion["raw_payload"]["year"] == 2027
+    assert ingestion["raw_payload"]["year"] == 2026
+    assert ingestion["current_refusal"]
     assert ingestion["payload_hash"]
     assert selection["rejected_kpis"][0]["observation_date"] is None
-    assert selection["historical_price_pairings"][0]["period_end"] == "2025-03-31"
+    assert selection["historical_price_pairings"][0]["period_end"] == "2024-03-31"
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     reasons = score["missing_data"]
@@ -719,6 +720,84 @@ def test_all_selection_refusals_retain_provenance_and_reach_exports(
     assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
+def test_annual_rejections_block_only_while_unresolved_and_applicable():
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2026)]
+    conn, cid = setup(periods=rows)
+    rejected = annual(2026, 133.1)
+    rejected.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    unresolved = load_results_for_company(conn, cid, CUTOFF)
+    assert unresolved["financial"].revenue_growth is None
+    assert unresolved["selection"]["annual_history"]["period_ends"] == []
+    rejected_item = next(
+        item
+        for item in unresolved["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert rejected_item["current_refusal"]
+    assert any(
+        "fiscal end unavailable or invalid" in reason
+        for reason in unresolved["selection"]["refusal_reasons"]
+    )
+
+    upsert_financial_periods(conn, cid, [annual(2026, 133.1)])
+    older = annual(2022, 90)
+    older.pop("period_end")
+    future = annual(2027, 146.41)
+    future.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [older, future]) == 0
+
+    corrected = load_results_for_company(conn, cid, CUTOFF)
+    assert corrected["financial"].revenue_growth == pytest.approx(0.1)
+    assert corrected["financial"].revenue_growth_years == 3
+    ingestion_rejections = [
+        item
+        for item in corrected["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    ]
+    assert {item["raw_payload"]["year"] for item in ingestion_rejections} == {
+        2022,
+        2026,
+        2027,
+    }
+    assert not any(item["current_refusal"] for item in ingestion_rejections)
+    assert not any(
+        reason.startswith("report rejection:")
+        for reason in corrected["selection"]["refusal_reasons"]
+    )
+
+
+@pytest.mark.parametrize("interior_revenue", [None, 0, -100])
+def test_metric_spans_use_latest_contiguous_complete_suffix(interior_revenue):
+    rows = [
+        annual(2023, 100, operating_Income=10, free_Cash_Flow=10),
+        annual(2024, 110, operating_Income=None, free_Cash_Flow=None),
+        annual(2025, 121, operating_Income=36.3, free_Cash_Flow=-5),
+        annual(2026, 145.2, operating_Income=14.52, free_Cash_Flow=10),
+    ]
+    rows[1]["revenues"] = interior_revenue
+    conn, cid = setup(periods=rows)
+    result = load_results_for_company(conn, cid, CUTOFF)
+    financial = result["financial"]
+
+    assert financial.revenue_growth == pytest.approx(0.2)
+    assert financial.revenue_growth_years == 1
+    assert financial.revenue_per_share_growth == pytest.approx(0.2)
+    assert financial.revenue_per_share_growth_years == 1
+    assert financial.net_income_growth_years == 3
+    assert financial.share_count_growth_years == 3
+    assert financial.positive_fcf_ratio == 0.5
+    assert financial.operating_margin_volatility == pytest.approx(0.1)
+    assert result["reverse_dcf"]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(
+        0.15
+    )
+    assert any(
+        "clamped from 0.2000" in warning
+        for warning in result["reverse_dcf"]["dcf"]["warnings"]
+    )
+
+
 def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
     rows = []
     for year in range(2023, 2027):
@@ -729,7 +808,7 @@ def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
     packet(conn, cid)
 
     financial = load_results_for_company(conn, cid, CUTOFF)["financial"]
-    assert financial.revenue_per_share_growth_years == 1
+    assert financial.revenue_per_share_growth_years == 2
     assert financial.ebit_per_share_growth_years == 3
     assert financial.net_income_per_share_growth_years == 3
     assert financial.fcf_per_share_growth_years == 3
@@ -737,15 +816,18 @@ def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
     assert financial.share_count_growth_years == 3
 
     score, row, _ = rank_exports(conn, monkeypatch, tmp_path)
-    assert score["revenue_per_share_growth_years"] == 1
+    assert score["revenue_per_share_growth_years"] == 2
     assert score["ebit_per_share_growth_years"] == 3
     assert score["fcf_per_share_growth_years"] == 3
     assert score["book_value_per_share_growth_years"] == 3
-    assert row["revenue_per_share_growth_years"] == "1"
+    assert row["revenue_per_share_growth_years"] == "2"
     assert row["ebit_per_share_growth_years"] == "3"
     assert row["fcf_per_share_growth_years"] == "3"
     assert row["book_value_per_share_growth_years"] == "3"
-    assert any("Revenue/share growth" in item and "(YoY)" in item for item in score["positives"])
+    assert any(
+        "Revenue/share growth" in item and "(2y CAGR)" in item
+        for item in score["positives"]
+    )
     assert any("EBIT/share growth" in item and "(3y CAGR)" in item for item in score["positives"])
 
 
