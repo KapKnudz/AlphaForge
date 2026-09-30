@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS dividends (
     currency            TEXT NOT NULL,
     dividend_type       INTEGER NOT NULL CHECK (dividend_type IN (0,1,2,4)),
     distribution_frequency TEXT,
+    currency_verified   INTEGER NOT NULL DEFAULT 0 CHECK (currency_verified IN (0,1)),
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (company_id, ex_date, dividend_type, amount)
 ) STRICT;
@@ -136,6 +137,23 @@ CREATE TABLE IF NOT EXISTS dividend_coverage (
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     CHECK (covered_through >= covered_from)
 ) STRICT;
+
+-- Exact (start,end] assurance; never inferred from min/max dividend dates.
+CREATE TABLE IF NOT EXISTS dividend_window_coverage (
+    company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('unknown','partial','complete')),
+    source TEXT NOT NULL,
+    assurance TEXT,
+    verified_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (company_id, window_start, window_end),
+    CHECK (window_end > window_start),
+    CHECK (status <> 'complete' OR
+        (length(trim(assurance)) > 0 AND assurance IS NOT NULL
+         AND length(trim(verified_at)) > 0 AND verified_at IS NOT NULL))
+) WITHOUT ROWID, STRICT;
 
 CREATE TABLE IF NOT EXISTS ranking_runs (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,

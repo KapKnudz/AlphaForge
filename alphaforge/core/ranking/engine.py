@@ -154,7 +154,7 @@ class RankingEngine:
     # v11 wires the auditable DCF (policy + engine) into the loader and
     # exports, so valuation_score remains a heuristic while DCF fair-value
     # is presented separately with provenance.
-    RANKING_MODEL_VERSION = "2026-08-12-reverse-dcf-v11"
+    RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v12"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository
@@ -230,6 +230,20 @@ class RankingEngine:
                     },
                     weights,
                 )
+            # Applies to general and sector scoring; the missing/zero distinction
+            # and exact consumed window remain inspectable in ranking.json/audit.
+            if results.get("dividend_yield") is not None:
+                yield_audit = results["dividend_yield"]
+                scoring_audit["dividend_yield"] = yield_audit
+                for component in scoring_audit.get("valuation", {}).get("components", []):
+                    if component["name"] == "dividend_yield":
+                        component["provenance"] = (
+                            "verified_dividend_window"
+                            if yield_audit["value"] is not None
+                            else "dividend_window_unavailable"
+                        )
+                        component["unavailable_reason"] = yield_audit["reason"]
+                        component["policy_version"] = yield_audit["policy_version"]
             total = sum(
                 score["score"] * weight
                 for score, weight in zip((quality, growth, val, balance), weights, strict=False)

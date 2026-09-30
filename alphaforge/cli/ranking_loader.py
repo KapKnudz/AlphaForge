@@ -12,6 +12,10 @@ from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
+from alphaforge.core.valuation.dividend_yield import (
+    calculate_dividend_yield,
+    trailing_dividend_window,
+)
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
@@ -246,16 +250,29 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         peg=None,
         dividend_yield=None,
     )
+    window_start, window_end = trailing_dividend_window(cutoff)
     dividends = conn.execute(
-        "SELECT amount FROM dividends WHERE company_id=? AND substr(ex_date, 1, 10) <= ? AND substr(ex_date, 1, 10) > ?",
-        (
-            company_id,
-            cutoff.isoformat(),
-            date(cutoff.year - 1, cutoff.month, cutoff.day).isoformat(),
-        ),
+        """SELECT substr(ex_date, 1, 10) AS ex_date, amount, currency, currency_verified,
+                  dividend_type FROM dividends
+           WHERE company_id=? AND substr(ex_date, 1, 10) > ?
+             AND substr(ex_date, 1, 10) <= ?
+           ORDER BY ex_date, dividend_type, amount, currency""",
+        (company_id, window_start.isoformat(), window_end.isoformat()),
     ).fetchall()
-    if dividends and latest_price.close > 0:
-        current.dividend_yield = sum(float(row[0]) for row in dividends) / latest_price.close * 100
+    coverage = conn.execute(
+        """SELECT window_start, window_end, status, source, assurance, verified_at
+           FROM dividend_window_coverage
+           WHERE company_id=? AND window_start=? AND window_end=?""",
+        (company_id, window_start.isoformat(), window_end.isoformat()),
+    ).fetchone()
+    dividend_yield = calculate_dividend_yield(
+        cutoff,
+        latest_price.close,
+        price_rows[-1]["currency"],
+        [dict(row) for row in dividends],
+        dict(coverage) if coverage else None,
+    )
+    current.dividend_yield = dividend_yield.value
     valuation = ValuationCalculator().calculate(current, historical, current_raw)
 
     kpi_r12: dict[int, float] = {}
@@ -568,6 +585,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     return {
         "financial": financial,
         "valuation": valuation,
+        "dividend_yield": {
+            **dividend_yield.to_dict(),
+            "price_date": latest_price.date.isoformat(),
+            "close": latest_price.close,
+        },
         "fundamental_kpis": kpis,
         "sector_kpis": {"current": kpis, "histories": {}},
         # Top-level research_evidence mirrors the missing-data early return above:

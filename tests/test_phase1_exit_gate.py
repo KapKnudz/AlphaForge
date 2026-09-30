@@ -28,7 +28,7 @@ def mem_conn():
 
 
 def test_schema_user_version_and_wal(mem_conn):
-    assert get_user_version(mem_conn) == 12
+    assert get_user_version(mem_conn) == 13
     cur = mem_conn.execute("PRAGMA journal_mode;")
     mode = cur.fetchone()[0]
     # In-memory returns "memory" or "wal" — check that migrate set it (not delete)
@@ -65,7 +65,7 @@ def test_v1_dividend_constraint_migrates_for_type_4(mem_conn):
         (company_id, "2025-05-15", 1.25, "SEK", 4),
     )
     mem_conn.commit()
-    assert get_user_version(mem_conn) == 12
+    assert get_user_version(mem_conn) == 13
     assert mem_conn.execute("SELECT dividend_type FROM dividends").fetchone()[0] == 4
     for table in (
         "mfn_issuer_mappings",

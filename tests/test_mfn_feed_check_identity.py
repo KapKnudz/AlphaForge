@@ -42,7 +42,7 @@ def test_v11_migration_preserves_every_audit_value_and_row_identity():
     assert [
         tuple(row) for row in conn.execute("SELECT * FROM mfn_feed_checks ORDER BY id")
     ] == old_rows
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 12
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 13
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.create_function("strftime", -1, lambda *args: "2026-09-30T13:30:00.000Z")
     record_mfn_feed_check(conn, first, "all/a/first", 4, 0)

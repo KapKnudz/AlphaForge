@@ -12,9 +12,23 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-08-12-reverse-dcf-v11"`
-  (v11 wires DCF but keeps `valuation_score` as the heuristic; DCF is exported
-  separately).
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v12"`
+  (v12 guards current yield availability/currency; DCF policy/engine are unchanged
+  and exported separately).
+* **Current dividend yield:** policy `calendar-ttm-verified-v1` in
+  [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
+  percentage points from `sum(amount) / selected_close * 100` only for an
+  independently verified complete trailing calendar twelve-month `(start,end]`
+  ex-date window and known compatible denominations. February 29's prior-year
+  anniversary clamps to February 28. Verified complete empty/zero windows give
+  `0`; unknown/partial coverage and foreign/unknown currency give `None` with a
+  typed reason. No report FX or realized-return/reinvestment substitution.
+  General/property/bank scoring consume this same guarded value. General audit
+  components distinguish `verified_dividend_window` from
+  `dividend_window_unavailable`; all models retain window/coverage/selected-close
+  facts in `scoring_audit.dividend_yield`. Existing missing-input weight handling
+  is unchanged: unavailable yield is not a zero-valued fundamental. See
+  [acquisition and selection](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring).
 
 ## Auditable DCF (policy + engine)
 

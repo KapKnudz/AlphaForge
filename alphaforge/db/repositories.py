@@ -317,29 +317,75 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
         amount = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
         if ex_date is None or amount is None:
             continue
-        try:
-            if float(amount) == 0.0:
-                continue
-        except (TypeError, ValueError):
-            pass
         if isinstance(ex_date, str) and len(ex_date) > 10:
             ex_date = ex_date[:10]
-        currency = r.get("currency") or r.get("currencyShortName") or "SEK"
+        # Empty is an explicit unknown sentinel for the legacy NOT NULL column.
+        # Never invent SEK; the verification bit distinguishes legacy defaults.
+        currency = str(r.get("currency") or r.get("currencyShortName") or "").strip()
         dividend_type = int(
             r.get("dividendType") if "dividendType" in r else r.get("dividend_type", 0)
         )
         distribution_frequency = r.get("distributionFrequency")
         conn.execute(
             """
-            INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type, distribution_frequency)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(company_id, ex_date, dividend_type, amount) DO NOTHING
+            INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type, distribution_frequency, currency_verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company_id, ex_date, dividend_type, amount) DO UPDATE SET
+                currency_verified=CASE
+                    WHEN dividends.currency_verified=1
+                         AND dividends.currency=excluded.currency
+                         AND excluded.currency_verified=1 THEN 1 ELSE 0 END,
+                distribution_frequency=excluded.distribution_frequency
             """,
-            (company_id, ex_date, float(amount), currency, dividend_type, distribution_frequency),
+            (
+                company_id,
+                ex_date,
+                float(amount),
+                currency,
+                dividend_type,
+                distribution_frequency,
+                int(bool(currency)),
+            ),
         )
         count += 1
     conn.commit()
     return count
+
+
+def upsert_dividend_window_coverage(
+    conn: Any,
+    company_id: int,
+    window_start: str,
+    window_end: str,
+    *,
+    status: str,
+    source: str,
+    assurance: str | None = None,
+    verified_at: str | None = None,
+) -> None:
+    """Store independent exact-window assurance, including revocation/partiality.
+
+    A complete assertion requires external source evidence, not row extrema,
+    HTTP success, or absence of rows. Börsdata acquisition cannot assert it.
+    """
+    from datetime import date
+
+    start, end = date.fromisoformat(window_start), date.fromisoformat(window_end)
+    if end <= start:
+        raise ValueError("dividend coverage requires start < end")
+    conn.execute(
+        """
+        INSERT INTO dividend_window_coverage
+            (company_id, window_start, window_end, status, source, assurance, verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, window_start, window_end) DO UPDATE SET
+            status=excluded.status, source=excluded.source,
+            assurance=excluded.assurance, verified_at=excluded.verified_at,
+            updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (company_id, window_start, window_end, status, source, assurance, verified_at),
+    )
+    conn.commit()
 
 
 def upsert_kpi_observations(

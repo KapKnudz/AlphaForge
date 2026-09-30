@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 12 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 13 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -267,6 +267,20 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 12)
         conn.commit()
         current = 12
+    if current < 13:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dividends);")}
+        if "currency_verified" not in columns:
+            conn.execute(
+                "ALTER TABLE dividends ADD COLUMN currency_verified "
+                "INTEGER NOT NULL DEFAULT 0 CHECK (currency_verified IN (0,1))"
+            )
+        migration_path = (
+            Path(__file__).resolve().parents[2] / "db/migrations/013_verified_dividend_windows.sql"
+        )
+        conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 13)
+        conn.commit()
+        current = 13
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)

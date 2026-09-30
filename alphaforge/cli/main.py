@@ -823,6 +823,22 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Dividends (global calendar, not per-company) — filter by company if possible
         try:
+            from alphaforge.core.valuation.dividend_yield import trailing_dividend_window
+            from alphaforge.db.repositories import upsert_dividend_window_coverage
+
+            # No provider contract certifies the full calendar window, including
+            # empty companies/interior gaps. Persist unknown even on HTTP success.
+            start, end = trailing_dividend_window(date.today())
+            for cid, _, _ in company_rows:
+                upsert_dividend_window_coverage(
+                    conn,
+                    cid,
+                    start.isoformat(),
+                    end.isoformat(),
+                    status="unknown",
+                    source="borsdata",
+                    assurance="provider_window_assurance_absent",
+                )
             div_rows = adapter.get_dividends(ins_ids)
             # dividends payload may contain insId; group similarly
             from collections import defaultdict
@@ -859,22 +875,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
                             "retryable": True,
                         },
                     )
-            # dividend_coverage — update throughput for each company touched
-            for cid, _, _ in company_rows:
-                try:
-                    cur = conn.execute(
-                        "SELECT min(ex_date), max(ex_date) FROM dividends WHERE company_id=?",
-                        (cid,),
-                    )
-                    r = cur.fetchone()
-                    if r and r[0] and r[1]:
-                        conn.execute(
-                            "INSERT INTO dividend_coverage (company_id, covered_from, covered_through) VALUES (?, ?, ?) ON CONFLICT(company_id) DO UPDATE SET covered_from=excluded.covered_from, covered_through=excluded.covered_through, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                            (cid, r[0], r[1]),
-                        )
-                except Exception:
-                    pass
-            conn.commit()
         except Exception as e:
             sync_failed = True
             print(f"dividends sync failed: {_sanitize_provider_error(e)}", file=sys.stderr)

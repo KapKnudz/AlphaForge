@@ -118,7 +118,7 @@ def test_values_envelopes_are_flattened_with_instrument_identity():
     ]
 
 
-def test_live_dividend_fields_are_canonicalized_and_zero_rows_filtered():
+def test_live_dividend_fields_are_canonicalized_and_dated_zero_rows_retained():
     adapter = BorsdataAdapter(api_key="fixture")
     payload = BorsdataAdapter._normalize_keys(
         json.loads((FIXTURES / "live_dividend_calendar.json").read_text())
@@ -143,6 +143,15 @@ def test_live_dividend_fields_are_canonicalized_and_zero_rows_filtered():
             "dividendType": 4,
             "exDate": "2025-06-10",
             "insId": 221,
+        },
+        {
+            "excludingDate": "2025-07-10",
+            "amountPaid": 0.0,
+            "currencyShortName": "SEK",
+            "distributionFrequency": 1,
+            "dividendType": 4,
+            "exDate": "2025-07-10",
+            "insId": 424,
         },
     ]
 
@@ -299,9 +308,14 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
                 "SELECT count(*) FROM kpi_observations GROUP BY company_id ORDER BY company_id"
             ).fetchall()
         ] == [20, 20, 20]
-        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
         assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
-        assert conn.execute("SELECT count(DISTINCT company_id) FROM dividends").fetchone()[0] == 2
+        assert conn.execute("SELECT count(DISTINCT company_id) FROM dividends").fetchone()[0] == 3
+        coverage = conn.execute(
+            "SELECT status, verified_at FROM dividend_window_coverage"
+        ).fetchall()
+        assert [tuple(row) for row in coverage] == [("unknown", None)] * 3
+        assert conn.execute("SELECT count(*) FROM dividend_coverage").fetchone()[0] == 0
         persisted_dividend_rows = conn.execute(
             """
             SELECT c.borsdata_id, d.amount, d.dividend_type
@@ -309,15 +323,39 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ORDER BY c.borsdata_id
             """
         ).fetchall()
-        assert [tuple(row) for row in persisted_dividend_rows] == [(29, 1.25, 4), (221, 0.85, 4)]
+        assert [tuple(row) for row in persisted_dividend_rows] == [
+            (29, 1.25, 4),
+            (221, 0.85, 4),
+            (424, 0.0, 4),
+        ]
         assert (
             conn.execute("SELECT count(DISTINCT company_id) FROM report_calendar").fetchone()[0]
             == 2
         )
         assert cmd_sync(args) == 0
         assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
-        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
+        assert conn.execute("SELECT count(*) FROM dividend_window_coverage").fetchone()[0] == 3
         assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
+        # Neither empty HTTP success nor a later failed calendar certifies the
+        # window. Both must revoke any previously asserted assurance for it.
+        for response in ([], BorsdataContractError("synthetic calendar failure")):
+            conn.execute(
+                """UPDATE dividend_window_coverage SET status='complete',
+                   assurance='synthetic independent proof', verified_at='2026-01-01'"""
+            )
+            kwargs = (
+                {"side_effect": response}
+                if isinstance(response, Exception)
+                else {"return_value": response}
+            )
+            with patch.object(FixtureAdapter, "get_dividends", **kwargs):
+                assert cmd_sync(args) == int(isinstance(response, Exception))
+            assert [
+                tuple(row)
+                for row in conn.execute("SELECT status, verified_at FROM dividend_window_coverage")
+            ] == [("unknown", None)] * 3
+            assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
 
 
 @pytest.mark.integration
