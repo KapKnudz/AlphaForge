@@ -214,8 +214,8 @@ persists assessments but makes no paid thesis-model call.
 
 | Output | Contract |
 | --- | --- |
-| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data, input-selection provenance and scoring audit survive serialization. |
-| `exports/<as_of>/ranking.csv` | Display subset of scores, eligibility/readiness reasons, `missing_data`, structured `input_selection` and evidence hash; unranked rows have blank rank, list fields use semicolons. |
+| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data, input-selection provenance, scoring audit, and each computed growth value with its own horizon survive serialization. |
+| `exports/<as_of>/ranking.csv` | Display subset of scores, explicit growth value/horizon columns, eligibility/readiness reasons, `missing_data`, structured `input_selection` and evidence hash; unavailable values are empty while zero values and zero-year horizons remain explicit. |
 | `exports/<as_of>/dcf.json` | Company-ID-keyed auditable DCF/reverse-DCF payloads, including structured unavailable outcomes; not a score replacement. |
 | `ranking_runs` | New run row with scores, `as_of`, model version, universe hash and inputs summary. Scalar `packet_hash` is populated only for a one-company run with a packet; multi-company evidence provenance lives in `inputs_summary.evidence_packet_hashes`. |
 

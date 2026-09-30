@@ -12,9 +12,10 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-verified-annual-v14"`
-  (v14 combines verified dividend-yield provenance with date/freshness selection,
-  comparable annual growth and method propagation to readiness;
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-growth-horizons-v15"`
+  (v15 combines verified dividend-yield provenance with date/freshness,
+  annual-history and method changes and adds metric-specific growth
+  value/horizon fields to rank exports;
   `valuation_score` remains heuristic and DCF separate).
   Financial selection is `verified-dates-consecutive-annual-v1` in the loader.
   Current price age and historical report-price pairing are limited to seven

@@ -151,9 +151,7 @@ def _compute_candidate_reason(quality: dict, growth: dict, val: dict, balance: d
 
 
 class RankingEngine:
-    # v14 combines verified dividend yield with verified date/freshness
-    # selection, consecutive annual growth, and readiness method propagation.
-    RANKING_MODEL_VERSION = "2026-09-30-verified-annual-v14"
+    RANKING_MODEL_VERSION = "2026-09-30-growth-horizons-v15"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository
@@ -265,6 +263,15 @@ class RankingEngine:
                 if "incomplete_data" not in flags:
                     flags.append("incomplete_data")
             candidate_reason = _compute_candidate_reason(quality, growth, val, balance)
+            revenue_growth = getattr(financial, "revenue_growth", None)
+            ebit_growth = getattr(financial, "ebit_growth", None)
+            net_income_growth = getattr(financial, "net_income_growth", None)
+            revenue_per_share_growth = getattr(financial, "revenue_per_share_growth", None)
+            ebit_per_share_growth = getattr(financial, "ebit_per_share_growth", None)
+            net_income_per_share_growth = getattr(financial, "net_income_per_share_growth", None)
+            fcf_per_share_growth = getattr(financial, "fcf_per_share_growth", None)
+            book_value_per_share_growth = getattr(financial, "book_value_per_share_growth", None)
+            share_count_growth = getattr(financial, "share_count_growth", None)
 
             cs = CompanyScore(
                 company_id=company.id,
@@ -275,6 +282,58 @@ class RankingEngine:
                 valuation_score=round(val["score"], 1),
                 balance_sheet_score=round(balance["score"], 1),
                 total_score=round(total, 1),
+                revenue_growth=revenue_growth,
+                revenue_growth_years=(
+                    getattr(financial, "revenue_growth_years", 0)
+                    if revenue_growth is not None
+                    else 0
+                ),
+                ebit_growth=ebit_growth,
+                ebit_growth_years=(
+                    getattr(financial, "ebit_growth_years", 0) if ebit_growth is not None else 0
+                ),
+                net_income_growth=net_income_growth,
+                net_income_growth_years=(
+                    getattr(financial, "net_income_growth_years", 0)
+                    if net_income_growth is not None
+                    else 0
+                ),
+                revenue_per_share_growth=revenue_per_share_growth,
+                revenue_per_share_growth_years=(
+                    getattr(financial, "revenue_per_share_growth_years", 0)
+                    if revenue_per_share_growth is not None
+                    else 0
+                ),
+                ebit_per_share_growth=ebit_per_share_growth,
+                ebit_per_share_growth_years=(
+                    getattr(financial, "ebit_per_share_growth_years", 0)
+                    if ebit_per_share_growth is not None
+                    else 0
+                ),
+                net_income_per_share_growth=net_income_per_share_growth,
+                net_income_per_share_growth_years=(
+                    getattr(financial, "net_income_per_share_growth_years", 0)
+                    if net_income_per_share_growth is not None
+                    else 0
+                ),
+                fcf_per_share_growth=fcf_per_share_growth,
+                fcf_per_share_growth_years=(
+                    getattr(financial, "fcf_per_share_growth_years", 0)
+                    if fcf_per_share_growth is not None
+                    else 0
+                ),
+                book_value_per_share_growth=book_value_per_share_growth,
+                book_value_per_share_growth_years=(
+                    getattr(financial, "book_value_per_share_growth_years", 0)
+                    if book_value_per_share_growth is not None
+                    else 0
+                ),
+                share_count_growth=share_count_growth,
+                share_count_growth_years=(
+                    getattr(financial, "share_count_growth_years", 0)
+                    if share_count_growth is not None
+                    else 0
+                ),
                 positives=quality["positives"]
                 + growth["positives"]
                 + val["positives"]

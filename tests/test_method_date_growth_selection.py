@@ -559,7 +559,22 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
     assert "not consecutive" in row["missing_data"]
     assert dcf[str(cid)]["selection"]["annual_history"]["excluded"]
     assert score["growth_score"] == 0
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-verified-annual-v12"
+    for metric in (
+        "revenue_growth",
+        "ebit_growth",
+        "net_income_growth",
+        "revenue_per_share_growth",
+        "ebit_per_share_growth",
+        "net_income_per_share_growth",
+        "fcf_per_share_growth",
+        "book_value_per_share_growth",
+        "share_count_growth",
+    ):
+        assert score[metric] is None
+        assert score[f"{metric}_years"] == 0
+        assert row[metric] == ""
+        assert row[f"{metric}_years"] == "0"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-growth-horizons-v13"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
@@ -721,6 +736,44 @@ def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
     assert financial.book_value_per_share_growth_years == 3
     assert financial.share_count_growth_years == 3
 
-    score, _, _ = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, _ = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_per_share_growth_years"] == 1
+    assert score["ebit_per_share_growth_years"] == 3
+    assert score["fcf_per_share_growth_years"] == 3
+    assert score["book_value_per_share_growth_years"] == 3
+    assert row["revenue_per_share_growth_years"] == "1"
+    assert row["ebit_per_share_growth_years"] == "3"
+    assert row["fcf_per_share_growth_years"] == "3"
+    assert row["book_value_per_share_growth_years"] == "3"
     assert any("Revenue/share growth" in item and "(YoY)" in item for item in score["positives"])
     assert any("EBIT/share growth" in item and "(3y CAGR)" in item for item in score["positives"])
+
+
+def test_moderate_growth_values_and_horizons_survive_actual_exports(monkeypatch, tmp_path):
+    rows = []
+    for year in range(2023, 2027):
+        revenue = 100 * 1.05 ** (year - 2023)
+        rows.append(annual(year, revenue, ebit=revenue * 0.2))
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+
+    score, row, _ = rank_exports(conn, monkeypatch, tmp_path)
+    assert not any("growth" in item.lower() for item in score["positives"] + score["negatives"])
+    for metric in (
+        "revenue_growth",
+        "ebit_growth",
+        "net_income_growth",
+        "revenue_per_share_growth",
+        "ebit_per_share_growth",
+        "net_income_per_share_growth",
+        "fcf_per_share_growth",
+        "book_value_per_share_growth",
+    ):
+        assert score[metric] == pytest.approx(0.05)
+        assert score[f"{metric}_years"] == 3
+        assert float(row[metric]) == pytest.approx(0.05)
+        assert row[f"{metric}_years"] == "3"
+    assert score["share_count_growth"] == 0
+    assert score["share_count_growth_years"] == 3
+    assert float(row["share_count_growth"]) == 0
+    assert row["share_count_growth_years"] == "3"
