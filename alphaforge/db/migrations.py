@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 11 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 12 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -248,6 +248,25 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 11)
         conn.commit()
         current = 11
+    if current < 12:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(mfn_feed_checks);")}
+        if "id" not in columns:
+            candidates = [
+                Path("db/migrations/012_mfn_feed_check_event_identity.sql"),
+                Path(__file__).resolve().parents[2]
+                / "db"
+                / "migrations"
+                / "012_mfn_feed_check_event_identity.sql",
+            ]
+            migration_path = next((path for path in candidates if path.exists()), None)
+            if migration_path is None:
+                raise FileNotFoundError(
+                    f"MFN feed-check identity migration not found (tried {candidates})"
+                )
+            conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 12)
+        conn.commit()
+        current = 12
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)

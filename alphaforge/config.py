@@ -13,7 +13,7 @@ from pathlib import Path
 # Keep the default relative to the repository/worktree.  ``sqlite:///data`` is
 # interpreted as an absolute ``/data`` path by sqlite URL parsers.
 DEFAULT_DSN = "sqlite:///data/alphaforge.db"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _default_dsn() -> str:
