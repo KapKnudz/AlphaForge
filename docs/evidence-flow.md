@@ -338,6 +338,8 @@ binding for acquisition only (older incomplete records locate their last exact
 complete binding); this lookup never returns packet selection rows. A failed
 current observation remains current and unselectable. A later run must obtain
 fresh exact-URL admission, not restore the older healthy HTML or title/assertions.
+The same fresh-proof requirement applies when a failed report returns unchanged
+in the feed: its acquisition-only binding cannot authorize the feed cache skip.
 Latest failed source inputs govern retry; matching bytes/extractions may then
 be reused, while changed release inputs require independent acquisition.
 Missing/corrupt original bytes still block before reacquisition. New/changed attachment or release inputs
@@ -411,7 +413,7 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v10 and evidence rules v12 deliberately
+confer current readiness. Report rules v11 and evidence rules v13 deliberately
 invalidate earlier annual range/fiscal interpretation and off-feed rebuild
 behavior. A retained candidate with an older fingerprint is never selected or
 restamped: the flow re-runs current admission and covered identity from its

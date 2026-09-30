@@ -633,6 +633,47 @@ def test_latest_failed_feed_title_requires_fresh_proof_and_independent_acquisiti
     assert validate_frozen_packet(first.packet)
 
 
+@pytest.mark.parametrize("healthy", [False, True])
+def test_unchanged_feed_return_does_not_skip_current_failed_admission(lane, healthy):
+    entry = cis_entry()
+    page = cis_detail(entry)
+    first, _ = run(lane, [entry], pages={entry["url"]: page})
+    original = observations(lane)
+    revised = {**entry, "content": {**entry["content"], "title": "Interim report Q2 2026 revised"}}
+    bad = cis_detail(revised).replace(
+        '<meta property="article:published_time" content="2026-07-15T08:00:00Z">', ""
+    )
+    failed, _ = run(lane, [revised], pages={entry["url"]: bad}, fetch=False)
+    assert failed.status == "evidence_incomplete"
+    incomplete = observations(lane)
+    returned, requested = run(
+        lane,
+        [entry],
+        pages={entry["url"]: page if healthy else cis_detail(entry, issuer="foreign")},
+        fetch=False,
+    )
+    assert [url for url in requested if "?offset=" not in url] == [entry["url"]]
+    assert returned.pdf_fetch_attempts == 0
+    assert_preserved(lane, original, *historical_manifest(lane, first.packet))
+    assert_preserved(lane, incomplete, *historical_manifest(lane, first.packet))
+    if healthy:
+        assert returned.status == "complete"
+        assert gate(returned.packet, lane[1]) == "ready"
+        current = observations(lane)
+        assert current[0]["extraction_id"] == original[0]["extraction_id"]
+        assert current[0]["candidate_observation_id"] != incomplete[0]["candidate_observation_id"]
+        manifest = view(lane)[1].to_dict()
+        replay, requested = run(lane, [entry], fetch=False)
+        assert all("?offset=" in url for url in requested)
+        assert replay.packet_hash == returned.packet_hash
+        assert view(lane)[1].to_dict() == manifest
+        assert observations(lane) == current
+    else:
+        assert returned.status == "evidence_incomplete"
+        assert returned.packet is None
+        assert gate(None, lane[1]) == "evidence_blocked"
+
+
 @pytest.mark.parametrize("wrong", ["company", "candidate", "url"])
 def test_retention_lookup_is_exact_and_never_returns_packet_selection(lane, wrong):
     from alphaforge.db.evidence_repository import retained_candidate_binding

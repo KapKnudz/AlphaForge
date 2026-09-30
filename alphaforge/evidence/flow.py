@@ -1672,7 +1672,7 @@ class OneCompanyEvidenceFlow:
                 if str(entry_url) in revoked_feed_urls:
                     continue  # Canonical feed veto outranks fallback/detail admission.
                 cached = cached_v2.get(str(entry_url))
-                if cached is not None:
+                if cached is not None and str(entry_url) not in retained_retries:
                     metadata = cached["raw_metadata"]
                     disposition = feed_dispositions.get(str(entry_url))
                     matches = disposition is None or (
