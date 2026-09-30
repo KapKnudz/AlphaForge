@@ -821,6 +821,120 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
     assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
 
 
+@pytest.mark.parametrize(
+    "period_type,period_end",
+    [("r12", "2026-05-31"), ("quarter", "2026-06-01")],
+)
+def test_corrected_nonannual_rejection_is_audit_only_in_rank_exports(
+    period_type, period_end, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    rejected = annual(2026, 150, period_type=period_type, period=1)
+    rejected.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    corrected = annual(
+        2026,
+        150,
+        period_type=period_type,
+        period=1,
+        period_end=period_end,
+        report_Date=CUTOFF,
+    )
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["period_type"] == period_type
+    assert not retained["current_refusal"]
+    assert not any(
+        "fiscal end unavailable or invalid" in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    retained_export = next(
+        item
+        for item in exported["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert not retained_export["current_refusal"]
+    assert not any("fiscal end unavailable or invalid" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("case", ["known_end_conflict", "cross_type", "unknown_slot"])
+def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(
+    case, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    if case == "known_end_conflict":
+        rejected = annual(
+            2026,
+            140,
+            period_type="r12",
+            period=1,
+            period_end="2026-04-30",
+            report_Date=None,
+        )
+        corrected = annual(
+            2026,
+            150,
+            period_type="r12",
+            period=1,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+        assert upsert_financial_periods(conn, cid, [rejected]) == 1
+    else:
+        rejected = annual(2026, 140, period_type="r12", period=1)
+        rejected.pop("period_end")
+        if case == "unknown_slot":
+            rejected.pop("year")
+            rejected.pop("period")
+        corrected = annual(
+            2026,
+            150,
+            period_type="quarter" if case == "cross_type" else "r12",
+            period=1,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+        assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["period_type"] == "r12" and item["reason"] != "after cutoff"
+    )
+    assert retained["current_refusal"]
+    assert any(
+        retained["reason"] in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert any(
+        item["period_type"] == "r12" and item["current_refusal"]
+        for item in exported["rejected_reports"]
+    )
+    assert any(retained["reason"] in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
 @pytest.mark.parametrize("interior_revenue", [None, 0, -100])
 def test_metric_spans_use_latest_contiguous_complete_suffix(interior_revenue):
     rows = [

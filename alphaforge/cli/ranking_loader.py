@@ -230,13 +230,11 @@ def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
 def _rejection_is_current(
     item: dict[str, Any],
     cutoff: date,
-    admitted_annuals: list,
+    admitted_rows: list,
     latest_annual,
 ) -> bool:
     if item.get("reason") == "after cutoff":
         return False
-    if item.get("period_type") != "year":
-        return True
 
     raw = item.get("raw_payload") or {}
     year = _fiscal_year(item.get("report_year"))
@@ -296,7 +294,8 @@ def _rejection_is_current(
 
     has_slot_identity = year is not None or end is not None or period is not None
     superseded = has_slot_identity and any(
-        (year is None or _fiscal_year(row["report_year"]) == year)
+        row["period_type"] == item.get("period_type")
+        and (year is None or _fiscal_year(row["report_year"]) == year)
         and (end is None or _verified_fiscal_end(row) == end)
         and (
             period is None
@@ -307,10 +306,12 @@ def _rejection_is_current(
             )
             == period
         )
-        for row in admitted_annuals
+        for row in admitted_rows
     )
     if superseded:
         return False
+    if item.get("period_type") != "year":
+        return True
 
     if latest_annual is None:
         return True
@@ -488,7 +489,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     )
     for item in selection["rejected_reports"]:
         item["current_refusal"] = _rejection_is_current(
-            item, cutoff, admitted_annuals, latest_annual_row
+            item, cutoff, period_rows, latest_annual_row
         )
     blocking_rejections = [
         item
