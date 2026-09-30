@@ -105,7 +105,9 @@ network fetch. Its effective date predicates are:
 - Reports: `is_placeholder=0`, verified fiscal end and publication date,
   `period_end <= report_date <= as_of`. Every populated alias for publication,
   fiscal year/end/start and report period must parse and agree; contradictory
-  or malformed aliases remain refusal provenance regardless of key order.
+  or malformed aliases remain refusal provenance regardless of key order. ISO
+  dates and datetimes are normalized to a calendar day only after the complete
+  value parses successfully.
   Fiscal ends must match an explicit fiscal-end field in the retained raw
   payload; legacy publication-as-end keys and rows without source metadata are
   excluded. The writer skips rows
@@ -148,7 +150,10 @@ replace these loader predicates. `SELECTION_VERSION` is
 also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI provenance,
 selected price date/age, historical pairings and annual fiscal ends/refusal
 reasons. Refusal reasons also appear in ranking missing data and readiness
-limitations. Stale prices are
+limitations. A quarter/R12 refusal is superseded only by a unique same-type row
+matching its verified end or its fiscal year plus report period; otherwise only
+chronology provably older than the latest same-type row becomes audit-only.
+Stale prices are
 retained only as diagnostic dates, not as available closes, raw multiples or DCF
 inputs; current financial margins/balance facts can still be available.
 

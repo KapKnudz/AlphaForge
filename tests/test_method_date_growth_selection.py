@@ -211,6 +211,66 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 50
 
 
+@pytest.mark.parametrize(
+    "period_type,observed,expected_count,stored_date",
+    [
+        ("year", "2026-06-01T12:00:00Z", 1, CUTOFF),
+        ("year", "2026-06-01garbage", 1, None),
+        ("last", "2026-06-01T12:00:00+02:00", 1, CUTOFF),
+        ("last", "2026-06-01garbage", 0, None),
+    ],
+)
+def test_kpi_ingestion_parses_complete_iso_dates(
+    period_type, observed, expected_count, stored_date
+):
+    conn, cid = setup()
+    row = {"v": 30, "observationDate": observed}
+    if period_type == "year":
+        row.update({"y": 2026, "p": 5})
+
+    assert (
+        upsert_kpi_observations(conn, cid, 37, period_type, "mean", [row])
+        == expected_count
+    )
+    stored = conn.execute(
+        "SELECT observation_date FROM kpi_observations WHERE kpi_id=37"
+    ).fetchone()
+    assert (stored["observation_date"] if stored else None) == stored_date
+    if period_type == "year":
+        loaded = load_results_for_company(conn, cid, CUTOFF)
+        assert (37 in loaded["fundamental_kpis"]) is (stored_date is not None)
+
+
+def test_malformed_kpi_replacement_removes_prior_date_authority():
+    conn, cid = setup()
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}],
+    )
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 40, "observationDate": "2026-06-01garbage"}],
+    )
+
+    stored = conn.execute(
+        "SELECT value, observation_date FROM kpi_observations WHERE kpi_id=37"
+    ).fetchone()
+    assert tuple(stored) == (40, None)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert 37 not in loaded["fundamental_kpis"]
+    assert loaded["selection"]["rejected_kpis"][0]["reason"] == (
+        "KPI observation date unverified"
+    )
+
+
 @pytest.mark.parametrize("order", ["forward", "reverse", "rotated"])
 def test_annual_growth_invariant_with_quarter_r12_insertions(order, monkeypatch, tmp_path):
     annuals = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
@@ -467,14 +527,34 @@ def test_missing_future_or_invalid_price_cannot_authorize_valuation(
 
 
 @pytest.mark.parametrize(
+    "raw_date,expected_count,stored_date",
+    [
+        ("2026-06-01T23:59:59Z", 1, CUTOFF),
+        ("2026-06-01garbage", 0, None),
+    ],
+)
+def test_price_ingestion_parses_complete_iso_dates(raw_date, expected_count, stored_date):
+    conn, cid = setup(price_date=None)
+    assert upsert_prices(conn, cid, [{"d": raw_date, "c": 10}], currency="SEK") == (
+        expected_count
+    )
+    stored = conn.execute("SELECT price_date FROM prices").fetchone()
+    assert (stored["price_date"] if stored else None) == stored_date
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["selection"]["price"]["selected_date"] == stored_date
+
+
+@pytest.mark.parametrize(
     "publication,admitted",
     [
         (CUTOFF, True),
+        ("2026-06-01T23:59:59Z", True),
         ("2026-06-02", False),
         (None, False),
         ("2026", False),
         ("2026-02-30", False),
         ("2026-03-30", False),
+        ("2026-05-01garbage", False),
     ],
 )
 def test_report_publication_is_a_separate_verified_date(
@@ -544,6 +624,16 @@ def test_report_publication_is_a_separate_verified_date(
             (("period_Start", "2025-04-01"), ("period_start", "2025-04-01")),
             True,
         ),
+        (
+            ("period_start", "period_Start"),
+            (("period_Start", "2025-04-01T12:00:00Z"),),
+            True,
+        ),
+        (
+            ("period_start", "period_Start"),
+            (("period_start", "2025-04-01garbage"),),
+            False,
+        ),
         (("period", "report_period"), (("period", 5), ("report_period", 4)), False),
         (("period", "report_period"), (("report_period", 4), ("period", 5)), False),
         (("period", "report_period"), (("period", 5), ("report_period", "bad")), False),
@@ -578,7 +668,9 @@ def test_report_aliases_must_parse_and_agree(field_names, aliases, admitted):
         ((("period_end", "2026-03-31"), ("periodEnd", "2026-04-30")), False),
         ((("periodEnd", "2026-04-30"), ("period_end", "2026-03-31")), False),
         ((("period_end", "2026-03-31"), ("periodEnd", "bad")), False),
+        ((("period_end", "2026-03-31garbage"),), False),
         ((("periodEnd", "2026-03-31"), ("period_end", "2026-03-31")), True),
+        ((("periodEnd", "2026-03-31T12:00:00+01:00"),), True),
     ],
 )
 def test_fiscal_end_aliases_are_order_independent(aliases, admitted):
@@ -1348,6 +1440,108 @@ def test_corrected_nonannual_rejection_is_audit_only_in_rank_exports(
     assert not any("fiscal end unavailable or invalid" in item for item in score["missing_data"])
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize(
+    "case,year,period,current_refusal",
+    [
+        ("older_year", 2020, 1, False),
+        ("older_period", 2026, 1, False),
+        ("exact_slot", 2026, 2, False),
+        ("year_only", 2026, None, True),
+        ("newer_period", 2026, 3, True),
+        ("future", 2027, 3, False),
+    ],
+)
+def test_nonannual_rejections_use_exact_slots_and_latest_applicability(
+    period_type, case, year, period, current_refusal, monkeypatch, tmp_path
+):
+    rows = [annual(value, 100 * 1.1 ** (value - 2023)) for value in range(2023, 2027)]
+    rows.append(
+        annual(
+            2026,
+            150,
+            period_type=period_type,
+            period=2,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+    )
+    conn, cid = setup(periods=rows)
+    rejected = annual(year, 140, period_type=period_type)
+    rejected.pop("period_end")
+    if period is None:
+        rejected.pop("period")
+    else:
+        rejected["period"] = period
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["current_refusal"] is current_refusal, case
+    assert any(
+        retained["reason"] in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    ) is current_refusal
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_rejection = next(
+        item
+        for item in exported["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert exported_rejection["current_refusal"] is current_refusal
+    assert any(retained["reason"] in item for item in score["missing_data"]) is current_refusal
+    assert any(
+        retained["reason"] in item for item in score["readiness_limitations"]
+    ) is current_refusal
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+def test_nonannual_year_period_identity_must_match_one_admitted_slot(period_type):
+    rows = [annual(year) for year in range(2023, 2027)]
+    rows.extend(
+        [
+            annual(
+                2026,
+                140,
+                period_type=period_type,
+                period=2,
+                period_end="2026-03-31",
+                report_Date="2026-05-01",
+            ),
+            annual(
+                2026,
+                150,
+                period_type=period_type,
+                period=2,
+                period_end="2026-05-31",
+                report_Date=CUTOFF,
+            ),
+        ]
+    )
+    conn, cid = setup(periods=rows)
+    rejected = annual(2026, 145, period_type=period_type, period=2)
+    rejected.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    retained = next(
+        item
+        for item in load_results_for_company(conn, cid, CUTOFF)["selection"][
+            "rejected_reports"
+        ]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["current_refusal"]
 
 
 @pytest.mark.parametrize("period_type", ["year", "r12", "quarter"])

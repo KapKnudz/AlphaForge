@@ -10,6 +10,7 @@ from typing import Any
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
 from alphaforge.core.kpi_taxonomy import (
     REPORT_FIELD_MAP,
+    parse_iso_date,
     report_date_aliases,
     report_integer_aliases,
 )
@@ -482,8 +483,10 @@ def upsert_prices(
         )
         if price_date is None or close is None:
             continue
-        if isinstance(price_date, str) and len(price_date) > 10:
-            price_date = price_date[:10]
+        parsed_price_date = parse_iso_date(price_date)
+        if parsed_price_date is None:
+            continue
+        price_date = parsed_price_date.isoformat()
         cur_currency = r.get("currency") or currency
         conn.execute(
             """
@@ -626,13 +629,11 @@ def upsert_kpi_observations(
         year = r.get("year") if "year" in r else r.get("y")
         report_period = r.get("reportPeriod") or r.get("report_period") or r.get("p")
         observation_date = r.get("observationDate") or r.get("observation_date") or r.get("date")
+        parsed_observation_date = parse_iso_date(observation_date)
         if period_type == "last":
-            if not observation_date:
-                observation_date = r.get("date") or r.get("observation_date")
-            if not observation_date:
+            if parsed_observation_date is None:
                 continue
-            if isinstance(observation_date, str) and len(observation_date) > 10:
-                observation_date = observation_date[:10]
+            observation_date = parsed_observation_date.isoformat()
             conn.execute(
                 """
                 INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, observation_date, value)
@@ -647,8 +648,11 @@ def upsert_kpi_observations(
                 continue
             year_int = int(year)
             report_period_int = int(report_period) if report_period is not None else None
-            if isinstance(observation_date, str) and len(observation_date) > 10:
-                observation_date = observation_date[:10]
+            observation_date = (
+                parsed_observation_date.isoformat()
+                if parsed_observation_date is not None
+                else None
+            )
             if report_period_int is None:
                 existing = conn.execute(
                     """

@@ -10,7 +10,11 @@ from typing import Any
 from alphaforge.core.financial.calculator import FinancialCalculator
 from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
-from alphaforge.core.kpi_taxonomy import report_date_aliases, report_integer_aliases
+from alphaforge.core.kpi_taxonomy import (
+    parse_iso_date,
+    report_date_aliases,
+    report_integer_aliases,
+)
 from alphaforge.core.ranking.sector_rules import ranking_model_for_branch
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
@@ -27,10 +31,7 @@ MAX_PRICE_AGE_DAYS = 7
 
 
 def _date(value: Any) -> date | None:
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except ValueError:
-        return None
+    return parse_iso_date(value)
 
 
 def _payload(row) -> dict:
@@ -307,18 +308,43 @@ def _rejection_is_current(
     if not invalid_identity and any(future_checks):
         return False
 
-    has_slot_identity = bool(years or ends)
-    superseded = not invalid_identity and has_slot_identity and any(
-        row["period_type"] == item.get("period_type")
+    is_annual = item.get("period_type") == "year"
+    has_slot_identity = bool(ends or years) if is_annual else bool(ends or (years and periods))
+    matching_rows = [
+        row
+        for row in admitted_rows
+        if row["period_type"] == item.get("period_type")
         and (not years or years == {_verified_fiscal_year(row)})
         and (not ends or ends == {_verified_fiscal_end(row)})
         and (not periods or periods == {_verified_report_period(row)})
-        for row in admitted_rows
-    )
+    ]
+    superseded = not invalid_identity and has_slot_identity and len(matching_rows) == 1
     if superseded:
         return False
-    if item.get("period_type") != "year":
-        return True
+    if not is_annual:
+        same_type_rows = [
+            row for row in admitted_rows if row["period_type"] == item.get("period_type")
+        ]
+        if not same_type_rows:
+            return True
+        latest_same_type = max(
+            same_type_rows, key=lambda row: _verified_fiscal_end(row) or date.min
+        )
+        latest_end = _verified_fiscal_end(latest_same_type)
+        latest_year = _verified_fiscal_year(latest_same_type)
+        latest_period = _verified_report_period(latest_same_type)
+        older_checks = []
+        if ends and latest_end is not None:
+            older_checks.append(next(iter(ends)) < latest_end)
+        if years and latest_year is not None:
+            rejected_year = next(iter(years))
+            if rejected_year != latest_year:
+                older_checks.append(rejected_year < latest_year)
+            elif periods and latest_period is not None:
+                older_checks.append(next(iter(periods)) < latest_period)
+            else:
+                older_checks.append(False)
+        return not (older_checks and all(older_checks))
 
     if latest_annual is None:
         return True
@@ -382,8 +408,11 @@ def _report(row, *, shares_override: float | None = None) -> Report:
 
 
 def _price(row, fallback_currency: str | None) -> StockPrice:
+    price_date = _date(row["price_date"])
+    if price_date is None:
+        raise ValueError("stock price date unverified")
     return StockPrice(
-        date=date.fromisoformat(str(row["price_date"])[:10]),
+        date=price_date,
         close=float(row["close"]),
         volume=int(row["volume"]) if row["volume"] is not None else None,
         currency=row["currency"] or fallback_currency,

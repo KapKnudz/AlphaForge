@@ -6,7 +6,7 @@ imports raw keys.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 # Börsdata report fields (GET /v1/instruments/reports) — raw → canonical
@@ -107,16 +107,34 @@ def report_alias_values(payload: dict[str, Any], canonical_field: str) -> tuple[
     )
 
 
+def parse_iso_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
+
+
 def report_date_aliases(
     payload: dict[str, Any], canonical_field: str
 ) -> tuple[frozenset[date], bool]:
     parsed = set()
     malformed = False
     for value in report_alias_values(payload, canonical_field):
-        try:
-            parsed.add(date.fromisoformat(str(value)[:10]))
-        except ValueError:
+        parsed_value = parse_iso_date(value)
+        if parsed_value is None:
             malformed = True
+        else:
+            parsed.add(parsed_value)
     return frozenset(parsed), malformed
 
 
