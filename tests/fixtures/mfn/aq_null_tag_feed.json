@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "url": "https://mfn.se/cis/a/aq-group/aq-group-ab-publ-delarsrapport-januari-september-2022-324376bb",
+      "properties": {
+        "lang": "sv",
+        "tags": [":regulatory", "sub:report", "sub:report:interim"],
+        "type": "ir",
+        "scopes": ["SE"]
+      },
+      "content": {
+        "title": "AQ Group AB (publ) delårsrapport januari - september 2022",
+        "publish_date": "2022-10-20T06:00:00Z",
+        "attachments": [
+          {
+            "file_title": "PDF",
+            "content_type": "application/pdf",
+            "url": "https://mb.cision.com/Main/11536/3651223/1640819.pdf",
+            "tags": null
+          }
+        ]
+      }
+    }
+  ]
+}

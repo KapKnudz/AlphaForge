@@ -467,6 +467,13 @@ def _issuer_token(mfn_slug: str) -> str:
     return mfn_slug.strip().strip("/").split("/")[-1].lower()
 
 
+def _feed_tags(value: Any) -> set[str]:
+    """Null, missing and malformed collections provide no feed attestation."""
+    return (
+        {tag.lower() for tag in value if isinstance(tag, str)} if isinstance(value, list) else set()
+    )
+
+
 def _feed_report_attachment_url(entry: dict[str, Any]) -> str | None:
     content = entry.get("content") if isinstance(entry.get("content"), dict) else {}
     attachments = content.get("attachments") if isinstance(content.get("attachments"), list) else []
@@ -475,8 +482,7 @@ def _feed_report_attachment_url(entry: dict[str, Any]) -> str | None:
         for attachment in attachments
         if isinstance(attachment, dict)
         and str(attachment.get("content_type") or "").lower() == "application/pdf"
-        and REPORT_PDF_ATTACHMENT_TAG
-        in {str(tag).lower() for tag in attachment.get("tags", []) if isinstance(tag, str)}
+        and REPORT_PDF_ATTACHMENT_TAG in _feed_tags(attachment.get("tags"))
         and str(attachment.get("url") or "").strip()
     }
     return next(iter(matches)) if len(matches) == 1 else None
@@ -485,7 +491,7 @@ def _feed_report_attachment_url(entry: dict[str, Any]) -> str | None:
 def _feed_report_identity(entry: dict[str, Any]) -> tuple[str, str | None] | None:
     """Return report identity only when independent MFN feed signals agree."""
     properties = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
-    tags = {str(tag).lower() for tag in properties.get("tags", []) if isinstance(tag, str)}
+    tags = _feed_tags(properties.get("tags"))
     report_pdf_url = _feed_report_attachment_url(entry)
     if REPORT_FEED_TAG not in tags or report_pdf_url is None:
         return None

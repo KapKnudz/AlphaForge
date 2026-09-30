@@ -987,6 +987,8 @@ def manifest_v2_projection(
     as_of: str,
     publication_cutoffs: dict[str, str],
     artifact_store: Any | None = None,
+    report_rules_fingerprint: str | None = None,
+    excluded_source_urls: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Project current immutable observations into manifest candidates and packet rows.
 
@@ -1097,6 +1099,7 @@ def manifest_v2_projection(
             "candidate_key": observation["candidate_key"],
             "candidate_observation_id": stable_observation_id,
             "eligibility": observation["eligibility"],
+            "report_rules_fingerprint": observation["report_rules_fingerprint"],
             "rejection_reason": (
                 None
                 if observation["eligibility"] == "eligible"
@@ -1108,6 +1111,9 @@ def manifest_v2_projection(
             "raw_metadata": metadata,
         }
         candidates.append(base)
+        if base["source_url"] in (excluded_source_urls or set()):
+            base["rejection_reason"] = "current_acquisition_excluded"
+            continue  # No retained-object lookup for a candidate vetoed this run.
         if observation["eligibility"] != "eligible":
             continue
         published_at = str(observation["published_at"] or "")[:10]
@@ -1123,7 +1129,7 @@ def manifest_v2_projection(
             continue
         bound = conn.execute(
             """SELECT ao.attachment_observation_id, ao.attachment_source_url,
-                      ao.content_type AS attachment_content_type,
+                      ao.content_type AS attachment_content_type, ao.http_status,
                       a.artifact_id, a.sha256, a.byte_size,
                       x.extraction_id, x.extractor, x.extractor_version,
                       x.config_fingerprint, x.text_checksum, x.page_count,
@@ -1182,6 +1188,7 @@ def manifest_v2_projection(
                 "immutable_extraction_id": bound["extraction_id"],
                 "attachment_url": bound["attachment_source_url"],
                 "content_type": bound["attachment_content_type"],
+                "http_status": bound["http_status"],
                 "byte_size": bound["byte_size"],
                 "attachment_sha256": bound["sha256"],
                 "extractor": bound["extractor"],
@@ -1201,6 +1208,9 @@ def manifest_v2_projection(
                 "acquisition_max_pdf_bytes": acquisition_limit,
             }
         )
+        # Every verified independent edition is reusable, even if suppressed for
+        # the packet. Carry that binding into the same manifest input projection.
+        base.update(usable[-1])
 
     # Relations are manifest inputs only. Select one independently retained
     # edition per asserted relation component; English wins translations and
@@ -1210,6 +1220,11 @@ def manifest_v2_projection(
     selected: list[dict[str, Any]] = []
     by_group: dict[str, list[dict[str, Any]]] = {}
     for row in usable:
+        if (
+            report_rules_fingerprint is not None
+            and row["report_rules_fingerprint"] != report_rules_fingerprint
+        ):
+            continue  # Verified bytes may be reused, but stale classifications cannot select.
         by_group.setdefault(str(row["selection_group_id"]), []).append(row)
     for rows in by_group.values():
         relation_types = {

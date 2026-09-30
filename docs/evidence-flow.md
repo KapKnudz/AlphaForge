@@ -1,5 +1,16 @@
 # Deterministic textual evidence flow
 
+## Scope
+
+This document owns the deterministic **textual evidence lane**: issuer mapping,
+MFN discovery/admission, covered identity, PDF retention/extraction, immutable
+observations/relations, manifest selection/completeness/cache, frozen packets,
+and their ranking/readiness provenance contract. It does not define financial,
+valuation, return or ranking arithmetic; the authoritative
+[high-level design](plans/2026-09-16-alphaforge-mvp.md), especially §§3.2,3.5,7,
+owns those deterministic calculation boundaries. Models own neither this
+lane's validation nor those calculations.
+
 Issuer identity is source-of-truth data keyed by `companies.id`. MFN discovery
 stores observed candidates in `mfn_issuer_candidates`; only a `mapped` row in
 `mfn_issuer_mappings` with a source URL, verification timestamp, and identity
@@ -23,6 +34,10 @@ It discovers MFN quarterly/interim, year-end, and annual releases. A narrative
 headline is admitted only when MFN's JSON feed independently supplies both the
 `sub:report` classification (with one annual or interim-quarter subtype) and an
 `archive:report:pdf` attachment marker; either signal alone remains non-report.
+Missing, null and malformed tag collections provide no attestation; a string
+or object is never interpreted as a tag list. Explicit report headlines retain
+their title-based admission path. The live AQ null-tag shape is pinned in
+`tests/fixtures/mfn/aq_null_tag_feed.json` (public feed-field excerpt).
 It accepts only
 authoritative detail-page publication timestamps at or before both the requested
 cutoff and the current wall-clock date; downloads unseen PDF attachments with
@@ -88,11 +103,27 @@ hint may remain an explicit fallback as `release_hint:<case>`, never as PDF
 verification; fallback documents remain outside automatic language-based
 grouping and add `pdf_language_fallback:N` to packet limitations. The evidence
 and source used are stored as `pdf_language` / `language_evidence`. Identity
-dates (`period_start` / `period_end`) and derived fiscal periods are resolved
-once per article from provider metadata, title, or release body, then persisted
-on immutable candidate observations and carried into packet sources next to
-`observation_date`. A current observation missing a now-derivable fiscal period
-is reacquired and superseded before relation construction.
+dates (`period_start` / `period_end`) and covered fiscal identity are resolved
+before immutable observation and relation creation. The fiscal resolver in
+`evidence/ingest.py` gives explicit provider fields precedence over a covered
+report title, then falls back only to report-labelled body headings. It does
+not scan arbitrary narrative for the first year/quarter: publication dates,
+forecasts and comparator mentions are not covered identity. Contradictory
+covered headings or provider/title identities remain null with
+`fiscal_identity_ambiguous`; absent covered identity records
+`fiscal_identity_unresolved`. These are source/packet limitations, not invented
+periods or permission to group candidates. Fiscal labels never invent calendar
+dates, including non-calendar years such as `2026/27`.
+
+The resolved value, `fiscal_period_source` and any original explicit
+`fiscal_period_input`/limitation are retained in the immutable observation;
+packet sources copy the value and provenance. A previously derived nonnull
+value is an output, not a provider assertion. Changed interpretation rules
+require new observations under the new fingerprint, even when correcting an
+old nonnull identity. Verified independently retained bytes can be reused for
+that reclassification; prior observations and selected historical manifests
+remain unchanged. Relation corroboration uses these persisted identities and
+never treats an unresolved conflict as period proof.
 
 An explicit `observation_date`, `period_end`, or `report_period_end` is used
 first. Otherwise the flow extracts an unambiguous covered-period end date from
@@ -154,12 +185,27 @@ the highest applicable tier refuse as ambiguous.
 Invitation/presentation/webcast-titled pages never contribute evidence. V2
 records terminal detail dispositions: invitations and confirmed non-reports are
 rejected without reducing completeness, while missing authoritative detail
-metadata is incomplete and blocks a complete result across reruns. A later feed
-reclassification appends a revoked observation from any current candidate
-state, so a superseded incomplete classification no longer blocks completeness.
+metadata is incomplete and blocks a complete result across reruns. Flow composes
+one deterministic terminal state before appending it: a canonical feed veto
+outranks admission rediscovered in an HTML backstop; detail terminal dispositions
+outrank a conflicting returned article. There is never a provisional revocation
+followed by a conflicting same-batch rejection. Unchanged intentional rejections
+remain rejected and reuse their current observation. A genuinely changed feed
+reclassification appends a revoked observation from eligible or incomplete
+states, so a superseded incomplete classification no longer blocks completeness.
+Repository conflict and append-only protections remain mandatory.
 Diagnostics split into `discovered`, `filtered_before_download`,
 `download_failed`, `ambiguous_selection`, and `retained` (in `diagnostic()` and
-the CLI output); per-class `completeness` (annual vs quarterly over
+the CLI output). `pdf_fetch_attempts` counts bounded PDF acquisition calls,
+including calls for subsequently suppressed candidates and failed calls;
+`pdf_fetch_succeeded` counts successful PDF acquisitions before extraction or
+selection. A call may include the existing bounded transport retries; these
+counters are not individual transport-attempt telemetry. They are independent
+of selected/retained-source counts and remain zero on verified offline byte
+reuse. `downloaded` remains the compatibility retained-download count, not a
+promise of zero HTTP. Persisted run diagnostics/job and packet diagnostics carry
+the new counters; no download is hidden merely because its edition was suppressed.
+Per-class `completeness` (annual vs quarterly over
 post-dedupe groups, with no feed `group_id` pairing assumption) is a hard
 gate — shortfalls return `evidence_incomplete` with no frozen packet instead
 of a green `complete`.
@@ -218,7 +264,9 @@ boundary in CI, and `manifest_store.load_evidence_view` is the read path.
 Legacy groups retain their compatibility grouping rules. V2 groups key only on
 an independently owned candidate or a currently asserted immutable relation;
 shared event, period, PDF URL, or hash does not itself merge candidates. Every
-group also carries its fiscal slot key. Completeness counts retained groups over
+group also carries its fiscal slot key: ISO dates normalize to their day, while
+fiscal labels preserve the entire quarter (`2026/2026-q1` differs from
+`2026/2026-q2`). Equal slots do not authorize grouping. Completeness counts retained groups over
 expected groups and `packet_contents()` returns exactly the observations
 selected by stable identity. Rejected candidates carry typed reasons (`rejection_reason`,
 `outside_history_window`, `not_selected_by_manifest`); ambiguous-selection
@@ -243,6 +291,23 @@ explicit translation/revision relationship and matching variant group
 corroborate the link; unresolved editions remain independent expected groups.
 Both candidate URLs and report-class counts therefore remain stable across
 cache replay.
+
+On the V2 path, `cache`/`reuse` contain **all independently retained, currently
+eligible in-window candidate bindings whose bytes and extractions verify**, not
+only packet winners. The repository supplies these verified bindings to the
+same pure manifest that selects packet sources. Acquisition never follows a
+legacy `duplicate_of` parent for candidate reuse, and it does not write legacy
+selection rows as V2 authority. Exact candidate ownership, attachment identity,
+current feed disposition and classification fingerprint govern classification
+reuse; only current-fingerprint observations can select packet sources. A stale
+classification's verified artifact may support a new current-rule observation,
+not a restamped old classification. Reusing an extraction additionally requires
+matching extractor version and configuration; changed configuration extracts
+again from verified retained bytes. New/changed attachment or release inputs
+acquire independently. Missing/corrupt retained bytes block without URL or
+cross-candidate substitution. Window filtering and current acquisition vetoes
+precede retained-object verification.
+
 Manifest v2 groups also carry a deterministic fiscal `slot_key` and, for new
 immutable observations, bind the exact `candidate_observation_id`,
 `attachment_observation_id`, content-addressed `artifact_id`, and
@@ -291,7 +356,7 @@ database-local observation and relation IDs are normalized. Run timestamps
 auditability but are excluded from the hash, so identical artifacts hash
 identically across databases built at different times; packets hashed before
 this change keep validating against their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v6 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
+v7 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
 evidence/filter/completeness rule set (report/invitation taxonomy,
 issuer confirmation, attachment-tier selection, completeness counting). Stale
 is defined narrowly as a packet built under an older rule version — including
@@ -305,7 +370,26 @@ same transaction as its terminal job record; rows remain queryable for audit
 history, while the loader reuses only valid, current-fingerprint, usable rows.
 Run diagnostics are persisted in the packet on complete runs or the job error
 on terminal failures, and `describe_evidence_state` is the replay source for
-CLI/result diagnostics.
+CLI/result diagnostics. Report rules v5 deliberately invalidate the prior
+provider/state/fiscal/slot/cache interpretations in the fingerprint; evidence
+rules v7 invalidate prior packet readiness. Historical packets still validate
+against their original hashes, but old rules cannot confer current readiness.
+
+### Cross-boundary correction coverage
+
+`tests/test_post26_evidence_repairs.py` executes raw provider JSON/detail parsing,
+real PDF extraction and CAS verification, immutable recording, shared manifest
+cache/selection, packet/citation identities and readiness. It covers null-tag
+admission/windowing, fallback/detail terminal-state collision and genuine
+revocation, covered periods versus forecasts/comparators, ambiguous and
+non-calendar identity, full quarter slots, independent bilingual offline reuse,
+withdrawals/revisions, unavailable suppressed artifacts, configuration refresh,
+and old nonnull fiscal correction without historical mutation. These behavioral
+regressions complement the structural manifest checker: a green checker alone
+is not evidence that the runtime contract holds. Normal fixture-only tests,
+import isolation and the checker all remain required. Live two-company replay
+is separate bounded acceptance evidence; provider incompleteness never permits
+loosening resource, completeness or readiness guards.
 
 ### Live verification
 

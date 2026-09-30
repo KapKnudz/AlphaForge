@@ -1025,6 +1025,8 @@ def load_evidence_selection_manifest(
             as_of=as_of,
             publication_cutoffs={"annual": cutoff("annual"), "quarterly": cutoff("quarterly")},
             artifact_store=artifact_store,
+            report_rules_fingerprint=str(report_rules["fingerprint"]),
+            excluded_source_urls=excluded_source_urls,
         )
         return select_evidence_manifest(
             company_id=company_id,
