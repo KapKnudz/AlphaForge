@@ -311,10 +311,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
         assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
         assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
         assert conn.execute("SELECT count(DISTINCT company_id) FROM dividends").fetchone()[0] == 3
-        coverage = conn.execute(
-            "SELECT status, verified_at FROM dividend_window_coverage"
-        ).fetchall()
-        assert [tuple(row) for row in coverage] == [("unknown", None)] * 3
+        assert conn.execute("SELECT count(*) FROM dividend_window_coverage").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM dividend_coverage").fetchone()[0] == 0
         persisted_dividend_rows = conn.execute(
             """
@@ -335,15 +332,17 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
         assert cmd_sync(args) == 0
         assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == first_count
         assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
-        assert conn.execute("SELECT count(*) FROM dividend_window_coverage").fetchone()[0] == 3
+        assert conn.execute("SELECT count(*) FROM dividend_window_coverage").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM report_calendar").fetchone()[0] == 2
-        # Neither empty HTTP success nor a later failed calendar certifies the
-        # window. Both must revoke any previously asserted assurance for it.
+        conn.execute(
+            """INSERT INTO dividend_window_coverage
+               (company_id, window_start, window_end, status, source, assurance, verified_at)
+               SELECT id, '2025-01-01', '2026-01-01', 'complete',
+                      'independent_fixture', 'synthetic independent proof', '2026-01-01'
+               FROM companies"""
+        )
+        conn.commit()
         for response in ([], BorsdataContractError("synthetic calendar failure")):
-            conn.execute(
-                """UPDATE dividend_window_coverage SET status='complete',
-                   assurance='synthetic independent proof', verified_at='2026-01-01'"""
-            )
             kwargs = (
                 {"side_effect": response}
                 if isinstance(response, Exception)
@@ -353,8 +352,18 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
                 assert cmd_sync(args) == int(isinstance(response, Exception))
             assert [
                 tuple(row)
-                for row in conn.execute("SELECT status, verified_at FROM dividend_window_coverage")
-            ] == [("unknown", None)] * 3
+                for row in conn.execute(
+                    """SELECT status, source, assurance, verified_at
+                       FROM dividend_window_coverage ORDER BY company_id"""
+                )
+            ] == [
+                (
+                    "complete",
+                    "independent_fixture",
+                    "synthetic independent proof",
+                    "2026-01-01",
+                )
+            ] * 3
             assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
 
 

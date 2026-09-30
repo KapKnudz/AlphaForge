@@ -54,7 +54,7 @@ transaction. `sync --as-of` does **not** trim acquisition to that date.
 | Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. If period end is absent, the writer can fall back to publication date; it is not always a verified fiscal-period end. |
 | KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. The writer handles missing report-period keys explicitly for idempotence. |
 | Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency; no OHLC history. |
-| Dividend | `(company_id, ex_date, dividend_type, amount)`; currency, its verification bit and distribution frequency retained. Types `0/1/2/4` accepted; dated zeros are preserved, undated zero markers ignored. Missing currency is stored as an empty unknown tag, never assumed SEK; legacy rows remain currency-unverified. A conflicting currency at an existing identity revokes verification and repeat upserts cannot restore it. |
+| Dividend | `(company_id, ex_date, dividend_type, amount)`; currency, its verification/conflict bits and distribution frequency retained. Types `0/1/2/4` accepted; dated zeros are preserved, undated zero markers ignored. Missing currency is stored as an empty unknown tag, never assumed SEK. Legacy rows start unverified; a fresh matching observation verifies them. A conflicting nonempty currency at an existing identity is sticky and repeat upserts cannot restore verification. |
 | Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
 
@@ -118,9 +118,9 @@ network fetch. Its effective date predicates are:
   zero; unknown/partial coverage or unknown/foreign currency => unavailable with
   typed reason. Out-of-window/future distributions do not participate. The close's
   stored currency must be known; no company-currency fallback or dividend FX.
-  Börsdata currently supplies no trustworthy window assurance. Sync records
-  `unknown` for every touched company, including empty or failed acquisitions,
-  before fetching observations; HTTP success/min-max dates never prove coverage.
+  Börsdata currently supplies no trustworthy window assurance, so sync writes
+  observations without changing independently owned coverage assertions. An
+  absent assertion, HTTP success, and min/max dates never prove coverage.
   Fixture-backed independent complete windows are supported, not a claim of live
   completeness.
 - Textual evidence: [`load_evidence_view`](../alphaforge/evidence/manifest_store.py)

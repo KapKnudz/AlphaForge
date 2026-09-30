@@ -274,6 +274,11 @@ def migrate(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE dividends ADD COLUMN currency_verified "
                 "INTEGER NOT NULL DEFAULT 0 CHECK (currency_verified IN (0,1))"
             )
+        if "currency_conflicted" not in columns:
+            conn.execute(
+                "ALTER TABLE dividends ADD COLUMN currency_conflicted "
+                "INTEGER NOT NULL DEFAULT 0 CHECK (currency_conflicted IN (0,1))"
+            )
         migration_path = (
             Path(__file__).resolve().parents[2] / "db/migrations/013_verified_dividend_windows.sql"
         )

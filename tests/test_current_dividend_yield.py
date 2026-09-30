@@ -298,9 +298,10 @@ def test_date_growth_workers_2024_leap_cutoff_fixture():
     assert loaded["dividend_yield"]["price_date"] == "2024-02-28"
 
 
-def test_additive_migration_does_not_trust_legacy_currency_or_coverage():
+def test_additive_migration_reverifies_only_matching_conflict_free_currency():
     conn, cid = seeded()
     conn.execute("ALTER TABLE dividends DROP COLUMN currency_verified")
+    conn.execute("ALTER TABLE dividends DROP COLUMN currency_conflicted")
     conn.execute("DROP TABLE dividend_window_coverage")
     conn.execute(
         "INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type) VALUES (?, '2025-06-01', 1, 'SEK', 0)",
@@ -314,11 +315,27 @@ def test_additive_migration_does_not_trust_legacy_currency_or_coverage():
     conn.commit()
     migrate(conn)
     migrate(conn)
-    assert conn.execute("SELECT amount, currency_verified FROM dividends").fetchone()[:] == (1, 0)
+    assert conn.execute(
+        "SELECT amount, currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == (1, 0, 0)
     assert conn.execute("SELECT count(*) FROM dividend_coverage").fetchone()[0] == 1
     assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_coverage_unknown"
     coverage(conn, cid)
     assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    row = {"exDate": "2025-06-01", "amount": 1, "currency": "SEK"}
+    upsert_dividends(conn, cid, [row])
+    assert rank(conn, cid)[0]["valuation"].dividend_yield == 10
+    assert conn.execute(
+        "SELECT currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == (1, 0)
+    upsert_dividends(
+        conn, cid, [{"exDate": "2025-06-01", "amount": 1, "currency": "USD"}]
+    )
+    upsert_dividends(conn, cid, [row])
+    assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    assert conn.execute(
+        "SELECT currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == (0, 1)
 
 
 @pytest.mark.parametrize("close", [None, 0, float("inf")])

@@ -328,13 +328,21 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
         distribution_frequency = r.get("distributionFrequency")
         conn.execute(
             """
-            INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type, distribution_frequency, currency_verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO dividends
+                (company_id, ex_date, amount, currency, dividend_type,
+                 distribution_frequency, currency_verified, currency_conflicted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(company_id, ex_date, dividend_type, amount) DO UPDATE SET
                 currency_verified=CASE
-                    WHEN dividends.currency_verified=1
+                    WHEN dividends.currency_conflicted=0
                          AND dividends.currency=excluded.currency
                          AND excluded.currency_verified=1 THEN 1 ELSE 0 END,
+                currency_conflicted=CASE
+                    WHEN dividends.currency_conflicted=1 THEN 1
+                    WHEN dividends.currency<>excluded.currency
+                         AND dividends.currency<>''
+                         AND excluded.currency<>'' THEN 1
+                    ELSE 0 END,
                 distribution_frequency=excluded.distribution_frequency
             """,
             (

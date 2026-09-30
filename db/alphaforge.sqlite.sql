@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS dividends (
     dividend_type       INTEGER NOT NULL CHECK (dividend_type IN (0,1,2,4)),
     distribution_frequency TEXT,
     currency_verified   INTEGER NOT NULL DEFAULT 0 CHECK (currency_verified IN (0,1)),
+    currency_conflicted INTEGER NOT NULL DEFAULT 0 CHECK (currency_conflicted IN (0,1)),
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (company_id, ex_date, dividend_type, amount)
 ) STRICT;

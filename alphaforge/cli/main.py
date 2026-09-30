@@ -823,22 +823,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # Dividends (global calendar, not per-company) — filter by company if possible
         try:
-            from alphaforge.core.valuation.dividend_yield import trailing_dividend_window
-            from alphaforge.db.repositories import upsert_dividend_window_coverage
-
-            # No provider contract certifies the full calendar window, including
-            # empty companies/interior gaps. Persist unknown even on HTTP success.
-            start, end = trailing_dividend_window(date.today())
-            for cid, _, _ in company_rows:
-                upsert_dividend_window_coverage(
-                    conn,
-                    cid,
-                    start.isoformat(),
-                    end.isoformat(),
-                    status="unknown",
-                    source="borsdata",
-                    assurance="provider_window_assurance_absent",
-                )
             div_rows = adapter.get_dividends(ins_ids)
             # dividends payload may contain insId; group similarly
             from collections import defaultdict
