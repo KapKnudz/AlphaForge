@@ -336,16 +336,22 @@ def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
     return expanded
 
 
+_NON_COVERED_FISCAL_CONTEXT = re.compile(
+    r"\b(?:forecast|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
+    re.IGNORECASE,
+)
+
+
 def _quarter_period(text: str) -> str | None:
     text = text.casefold().replace(",", " ")
     text = re.sub(r"[‐‑‒–—]", "-", text)
-    year_end = re.search(
+    # Normalize in place: a later year-end comparator must not outrank coverage.
+    text = re.sub(
         r"\b(?:year[- ]end\s+report|bokslutskommunik[eé])\s*[:–-]?\s*"
         r"(20\d{2})(?:\s*/\s*((?:20)?\d{2}))?\b",
+        lambda match: f"q4 {match.group(1)}/{_expand_fiscal_year(match.group(1), match.group(2))}",
         text,
     )
-    if year_end:
-        return f"{year_end.group(1)}/{_expand_fiscal_year(year_end.group(1), year_end.group(2))}-q4"
     for ordinal, quarter in (
         ("första|first", "q1"),
         ("andra|second", "q2"),
@@ -357,14 +363,12 @@ def _quarter_period(text: str) -> str | None:
             f" {quarter} ",
             text,
         )
-    fiscal_range = re.search(
+    text = re.sub(
         r"\b(?:\d{1,2}\s+)?(?:may|maj)\s*[-–]\s*"
         r"(?:\d{1,2}\s+)?(?:july|juli)\s+(20\d{2})\b",
+        lambda match: f"q1 {match.group(1)}/{int(match.group(1)) + 1}",
         text,
     )
-    if fiscal_range:
-        year = int(fiscal_range.group(1))
-        return f"{year}/{year + 1}-q1"
     text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b", "q1", text)
     text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:june|juni)\b", "q2", text)
     text = re.sub(r"\b(?:january|januari)\s*[-–]\s*september\b", "q3", text)
@@ -372,20 +376,20 @@ def _quarter_period(text: str) -> str | None:
     text = re.sub(r"\bapril\s*[-–]\s*(?:june|juni)\b", "q2", text)
     text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
     text = re.sub(r"\b(?:october|oktober)\s*[-–]\s*december\b", "q4", text)
-    match = re.search(
+    quarter_first = re.search(
         r"\bq\s*([1-4])\s*[-–:]?\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\b",
         text,
     )
-    if match:
-        end_year = _expand_fiscal_year(match.group(2), match.group(3))
-        return f"{match.group(2)}/{end_year}-q{match.group(1)}"
-    match = re.search(
+    year_first = re.search(
         r"\b(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
         text,
     )
-    if match:
-        end_year = _expand_fiscal_year(match.group(1), match.group(2))
-        return f"{match.group(1)}/{end_year}-q{match.group(3)}"
+    if quarter_first and (not year_first or quarter_first.start() < year_first.start()):
+        end_year = _expand_fiscal_year(quarter_first.group(2), quarter_first.group(3))
+        return f"{quarter_first.group(2)}/{end_year}-q{quarter_first.group(1)}"
+    if year_first:
+        end_year = _expand_fiscal_year(year_first.group(1), year_first.group(2))
+        return f"{year_first.group(1)}/{end_year}-q{year_first.group(3)}"
     return None
 
 
@@ -397,7 +401,7 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     Conflicting covered headings remain explicitly unresolved. No calendar dates
     are invented from quarter labels.
     """
-    title = str(doc.get("title") or "")
+    title = _NON_COVERED_FISCAL_CONTEXT.split(str(doc.get("title") or ""), maxsplit=1)[0]
     title_period = _quarter_period(title)
     if not title_period:
         years = set(re.findall(r"\b20\d{2}\b", title))
@@ -439,8 +443,10 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     )
     periods: set[str] = set()
     for match in labelled.finditer(body):
-        context = body[max(0, match.start() - 80) : match.start()].casefold()
-        if re.search(r"\b(?:forecast|outlook|compared|previous|prognos|föregående)\b", context):
+        # Match the heading itself and its own sentence prefix, not a preceding
+        # independent forecast/comparator sentence. Use the label's delimiters.
+        sentence_start = max(body.rfind(mark, 0, match.start()) for mark in ".!?\n") + 1
+        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
             continue
         heading = match.group(0)
         period = _quarter_period(heading)

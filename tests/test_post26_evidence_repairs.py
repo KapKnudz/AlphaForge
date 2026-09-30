@@ -468,15 +468,39 @@ def test_quarter_slots_are_distinct_and_do_not_group_equal_periods(lane):
     assert first.completeness == {"quarterly": {"expected": 2, "retained": 2}}
 
 
-def test_rule_change_corrects_wrong_nonnull_observation_without_mutating_history(lane):
+@pytest.mark.parametrize(
+    "title,body,wrong,expected",
+    [
+        (
+            "Strategic and operational progress",
+            "Bokslutskommuniké januari-december 2025. Från första kvartalet 2026.",
+            "2026/2026-q1",
+            "2025/2025-q4",
+        ),
+        (
+            "Interim report Q1 2025 — compared with year-end report 2024",
+            "Revenue and operating profit.",
+            "2024/2024-q4",
+            "2025/2025-q1",
+        ),
+        (
+            "Strategic and operational progress",
+            "Interim report forecast Q2 2027",
+            "2027/2027-q2",
+            None,
+        ),
+    ],
+)
+def test_rule_change_corrects_wrong_nonnull_observation_without_mutating_history(
+    lane, title, body, wrong, expected
+):
     conn, company_id, store = lane
-    entry = item(title="Strategic and operational progress")
-    body = "Bokslutskommuniké januari-december 2025. Från första kvartalet 2026."
+    entry = item(title=title)
     # Scraper's real detail parser supplies precisely this body, including h1.
     from alphaforge.providers.mfn.scraper import _parse_html
 
     parsed_body = _parse_html(detail(entry, body), corroborated_report=True)["body"]
-    stale_rules = {**report_rules_metadata(), "version": 4, "fingerprint": "old-fiscal-rules"}
+    stale_rules = {**report_rules_metadata(), "version": 5, "fingerprint": "old-fiscal-rules"}
     recorder = RevisionRecorder(
         conn,
         store,
@@ -498,7 +522,7 @@ def test_rule_change_corrects_wrong_nonnull_observation_without_mutating_history
             "published_at": entry["content"]["publish_date"],
             "report_kind": "quarterly",
             "document_type": "INTERIM_Q2",
-            "fiscal_period": "2026/2026-q1",
+            "fiscal_period": wrong,
             "fiscal_period_source": "legacy_narrative",
             "content_text": parsed_body,
             "lang": "en",
@@ -541,14 +565,18 @@ def test_rule_change_corrects_wrong_nonnull_observation_without_mutating_history
     assert repaired.status == "complete"
     assert repaired.pdf_fetch_attempts == 0
     current = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[0]
-    assert current["fiscal_period"] == "2025/2025-q4"
+    assert current["fiscal_period"] == expected
     assert current["candidate_observation_id"] != old["candidate_observation_id"]
+    assert repaired.packet["sources"][0]["immutable_evidence"]["artifact_id"] == old["artifact_id"]
+    assert (
+        repaired.packet["sources"][0]["immutable_evidence"]["extraction_id"] == old["extraction_id"]
+    )
     assert (
         conn.execute(
             "SELECT fiscal_period FROM evidence_candidate_observations WHERE candidate_observation_id=?",
             (old["candidate_observation_id"],),
         ).fetchone()[0]
-        == "2026/2026-q1"
+        == wrong
     )
     assert (
         conn.execute(

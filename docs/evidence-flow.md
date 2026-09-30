@@ -113,8 +113,15 @@ not scan arbitrary narrative for the first year/quarter: publication dates,
 forecasts and comparator mentions are not covered identity. Covered month spans
 accept separator punctuation (including a comma before the year); explicit
 year-end report titles retain fiscal Q4, distinct from annual-report identity.
-Neither normalization changes report-class horizons. Contradictory
-covered headings or provider/title identities remain null with
+Quarter/year-end normalization preserves textual position: a later comparator
+cannot override the covered title, and a comparator Q1 cannot override an actual
+year-end Q4. Forecast/comparison clauses are excluded from title inference.
+Body guards examine the matched report heading and its own sentence prefix,
+not an arbitrary window spanning earlier independent sentences. A forecast
+inside a report-labelled match is not coverage. Bare HTML whitespace collapsed
+by the provider parser does not prove a separate heading boundary; unresolved
+identity remains explicit rather than inferred. Neither normalization changes
+report-class horizons. Contradictory covered headings or provider/title identities remain null with
 `fiscal_identity_ambiguous`; absent covered identity records
 `fiscal_identity_unresolved`. These are source/packet limitations, not invented
 periods or permission to group candidates. Fiscal labels never invent calendar
@@ -381,7 +388,10 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness.
+confer current readiness. Report rules v6 and evidence rules v8 deliberately
+invalidate earlier fiscal clause/heading interpretation; correcting a comparator
+or forecast identity appends a new current observation using independently
+verified retained bytes, without rewriting history.
 
 ### Cross-boundary correction coverage
 
@@ -394,8 +404,11 @@ non-calendar identity, full quarter slots, independent bilingual offline reuse,
 withdrawals/revisions, unavailable suppressed artifacts, configuration refresh,
 and old nonnull fiscal correction without historical mutation. These behavioral
 regressions complement the structural manifest checker: a green checker alone
-is not evidence that the runtime contract holds. Normal fixture-only tests,
-import isolation and the checker all remain required. Live two-company replay
+is not evidence that the runtime contract holds. `tests/test_greptile_fiscal_context.py`
+pins covered/comparator title ordering, sentence-scoped and inside-heading
+forecast guards, typed ambiguity, persisted identity/provenance, full quarter
+slots and exact offline immutable-binding/packet/manifest reuse. Normal
+fixture-only tests, import isolation and the checker all remain required. Live two-company replay
 is separate bounded acceptance evidence; provider incompleteness never permits
 loosening resource, completeness or readiness guards.
 
