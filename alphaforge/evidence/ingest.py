@@ -393,6 +393,15 @@ def _quarter_period(text: str) -> str | None:
     return None
 
 
+def _year_period(text: str) -> str | None:
+    """Preserve a single covered year/range, never invent its calendar dates."""
+    periods = {
+        f"{start}/{_expand_fiscal_year(start, end)}" if end else start
+        for start, end in re.findall(r"\b(20\d{2})(?:\s*/\s*((?:20)?\d{2}))?\b", text)
+    }
+    return next(iter(periods)) if len(periods) == 1 else None
+
+
 def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str | None]:
     """Resolve covered identity, never a forecast/comparator or publication year.
 
@@ -402,11 +411,10 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     are invented from quarter labels.
     """
     title = _NON_COVERED_FISCAL_CONTEXT.split(str(doc.get("title") or ""), maxsplit=1)[0]
-    title_period = _quarter_period(title)
-    if not title_period:
-        years = set(re.findall(r"\b20\d{2}\b", title))
-        if len(years) == 1 and is_report(title):
-            title_period = next(iter(years))
+    annual = doc.get("report_kind") == "annual"
+    title_period = None if annual else _quarter_period(title)
+    if not title_period and is_report(title):
+        title_period = _year_period(title)
     explicit_key = next(
         (key for key in ("fiscal_period", "report_period", "period") if doc.get(key)), None
     )
@@ -425,9 +433,12 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     if explicit_key and (provider_input or not basis or basis.startswith("provider_metadata")):
         value = str(provider_input or doc[explicit_key]).strip()
         normalized = _quarter_period(value) or value.casefold()
+        if annual and re.fullmatch(r"20\d{2}\s*/\s*(?:20)?\d{2}", value):
+            normalized = _year_period(value) or normalized
         if title_period and normalized != title_period:
             # A provider year and the same year's covered quarter are compatible.
-            if normalized == title_period.split("/")[0]:
+            # A bare provider year does not prove a two-year annual range.
+            if "-q" in title_period and normalized == title_period.split("/")[0]:
                 return title_period, f"provider_metadata:{explicit_key}+title", None
             return None, "conflicting_provider_title", "fiscal_identity_ambiguous"
         return value, f"provider_metadata:{explicit_key}", None
@@ -449,13 +460,9 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
             continue
         heading = match.group(0)
-        period = _quarter_period(heading)
-        if doc.get("report_kind") == "annual":
-            period = None
+        period = None if annual else _quarter_period(heading)
         if not period:
-            years = set(re.findall(r"\b20\d{2}\b", match.group(1)))
-            if len(years) == 1:
-                period = next(iter(years))
+            period = _year_period(match.group(1))
         if period:
             periods.add(period)
     if len(periods) == 1:

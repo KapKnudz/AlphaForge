@@ -119,7 +119,11 @@ not scan arbitrary narrative for the first year/quarter: publication dates,
 forecasts and comparator mentions are not covered identity. Covered month spans
 accept separator punctuation (including a comma before the year); explicit
 year-end report titles retain fiscal Q4, distinct from annual-report identity.
-Quarter/year-end normalization preserves textual position: a later comparator
+Covered annual fiscal ranges retain the established `YYYY/YYYY` label
+(`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
+a bare provider year cannot prove a two-year annual range. Provider values/input
+keys remain provenance, conflicting covered ranges remain ambiguous, and no
+calendar start/end dates are invented. Quarter/year-end normalization preserves textual position: a later comparator
 cannot override the covered title, and a comparator Q1 cannot override an actual
 year-end Q4. Forecast/comparison clauses are excluded from title inference.
 Body guards examine the matched report heading and its own sentence prefix,
@@ -322,8 +326,12 @@ current feed disposition and classification fingerprint govern classification
 reuse; only current-fingerprint observations can select packet sources. A stale
 classification's verified artifact may support a new current-rule observation,
 not a restamped old classification. Reusing an extraction additionally requires
-matching extractor version and configuration; changed configuration extracts
-again from verified retained bytes. New/changed attachment or release inputs
+matching extractor version and configuration. This check is shared by current-feed
+and retained off-feed paths: changed configuration/version extracts again from
+that candidate's exact verified bytes and appends new observation/extraction
+bindings before manifest/packet selection. Unchanged configuration reuses the
+existing binding; missing/corrupt bytes still refuse without PDF HTTP or sibling
+substitution. New/changed attachment or release inputs
 acquire independently. Missing/corrupt retained bytes block without URL or
 cross-candidate substitution. Window filtering and current acquisition vetoes
 precede retained-object verification.
@@ -394,9 +402,9 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v6 and evidence rules v8 deliberately
-invalidate earlier fiscal clause/heading interpretation; correcting a comparator
-or forecast identity appends a new current observation using independently
+confer current readiness. Report rules v7 and evidence rules v9 deliberately
+invalidate earlier annual range and fiscal clause/heading interpretation;
+correcting an identity appends a new current observation using independently
 verified retained bytes, without rewriting history.
 
 ### Cross-boundary correction coverage
@@ -413,7 +421,11 @@ regressions complement the structural manifest checker: a green checker alone
 is not evidence that the runtime contract holds. `tests/test_greptile_fiscal_context.py`
 pins covered/comparator title ordering, sentence-scoped and inside-heading
 forecast guards, typed ambiguity, persisted identity/provenance, full quarter
-slots and exact offline immutable-binding/packet/manifest reuse. Normal
+slots and exact offline immutable-binding/packet/manifest reuse.
+`tests/test_replacement_annual_and_offfeed.py` adds two-year annual range/provider
+provenance and conflicts, off-feed unchanged/config/version extraction paths,
+independent bilingual retained children, historical bindings/manifests,
+packet/readiness/hash consumers and missing/corrupt-object refusal. Normal
 fixture-only tests, import isolation and the checker all remain required. Live two-company replay
 is separate bounded acceptance evidence; provider incompleteness never permits
 loosening resource, completeness or readiness guards.

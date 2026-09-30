@@ -1525,6 +1525,16 @@ class OneCompanyEvidenceFlow:
             )
             # Feed and detail dispositions are composed below, before append.
             # Never record a provisional revocation then a conflicting rejection.
+
+        def current_extraction(cached: dict[str, Any]) -> bool:
+            from alphaforge.evidence.revision_flow import _extractor_version
+
+            return (
+                revision_recorder is not None
+                and cached["config_fingerprint"] == revision_recorder.config_fingerprint
+                and cached["extractor_version"] == _extractor_version()
+            )
+
         unseen_feed = []
         future_dated_complete_release = False
         not_yet_published_complete_release = False
@@ -1549,7 +1559,6 @@ class OneCompanyEvidenceFlow:
                         == disposition.get("feed_report_attachment_url")
                     )
                     from alphaforge.evidence.ingest import resolve_fiscal_identity
-                    from alphaforge.evidence.revision_flow import _extractor_version
 
                     fiscal, basis, _ = resolve_fiscal_identity(
                         {**metadata, **cached, "content_text": cached["release_body"]}
@@ -1559,8 +1568,7 @@ class OneCompanyEvidenceFlow:
                         and cached["report_rules_fingerprint"] == active_rules["fingerprint"]
                         and cached["fiscal_period"] == fiscal
                         and metadata.get("fiscal_period_source") == basis
-                        and cached["config_fingerprint"] == revision_recorder.config_fingerprint
-                        and cached["extractor_version"] == _extractor_version()
+                        and current_extraction(cached)
                     ):
                         continue
                 unseen_feed.append(entry)
@@ -1989,7 +1997,9 @@ class OneCompanyEvidenceFlow:
                         "attachment_checksum": cached["attachment_sha256"],
                         "pdf_checksum": cached["attachment_sha256"],
                         "lang": cached["language"],
-                        "_persisted_evidence": True,
+                        # Off-feed byte ownership is still verified, but a stale
+                        # extraction must traverse exact-byte acquisition/recording.
+                        "_persisted_evidence": current_extraction(cached),
                     }
                 )
         identity_candidates = persisted_identity + eligible
@@ -2083,17 +2093,13 @@ class OneCompanyEvidenceFlow:
                 == str(candidate.get("content_text") or candidate.get("body") or "")
             ):
                 from alphaforge.evidence.ingest import PdfExtraction
-                from alphaforge.evidence.revision_flow import _extractor_version
 
                 content = self.artifact_store.read_pdf(
                     cached["attachment_sha256"],
                     expected_size=cached["byte_size"],
                     max_pdf_bytes=cached["acquisition_max_pdf_bytes"],
                 )
-                if (
-                    cached["config_fingerprint"] == revision_recorder.config_fingerprint
-                    and cached["extractor_version"] == _extractor_version()
-                ):
+                if current_extraction(cached):
                     text = "\n\n".join(
                         f"[page {page['page_number']}]\n{page['text']}".rstrip()
                         for page in cached["pages"]
