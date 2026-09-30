@@ -244,11 +244,14 @@ def test_conflicting_relevant_currencies_and_duplicate_currency_conflict():
 @pytest.mark.parametrize("field", ["exDate", "ex_date", "date"])
 def test_repository_canonicalizes_valid_dividend_date_aliases(field):
     conn, cid = seeded()
-    assert upsert_dividends(
-        conn,
-        cid,
-        [{field: "2025-06-01T23:59:59Z", "amount": 1, "currency": "SEK"}],
-    ) == 1
+    assert (
+        upsert_dividends(
+            conn,
+            cid,
+            [{field: "2025-06-01T23:59:59Z", "amount": 1, "currency": "SEK"}],
+        )
+        == 1
+    )
     assert conn.execute("SELECT ex_date FROM dividends").fetchone()[0] == "2025-06-01"
 
 
@@ -289,9 +292,12 @@ def test_dividend_batch_failure_rolls_back_before_job_commit(invalid_row):
     assert conn.execute("SELECT name FROM companies WHERE id=?", (cid,)).fetchone()[0] == (
         "Pending caller work"
     )
-    assert conn.execute(
-        "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?", (cid,)
-    ).fetchone()[0] == "failed"
+    assert (
+        conn.execute(
+            "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?", (cid,)
+        ).fetchone()[0]
+        == "failed"
+    )
     assert before_loaded["valuation"].dividend_yield == 0
     assert after_loaded["valuation"].dividend_yield == 0
     assert after_ranking.scores[0].total_score == before_ranking.scores[0].total_score
@@ -447,17 +453,15 @@ def test_additive_migration_reverifies_only_matching_conflict_free_currency():
     row = {"exDate": "2025-06-01", "amount": 1, "currency": "SEK"}
     upsert_dividends(conn, cid, [row])
     assert rank(conn, cid)[0]["valuation"].dividend_yield == 10
-    assert conn.execute(
-        "SELECT currency_verified, currency_conflicted FROM dividends"
-    ).fetchone()[:] == (1, 0)
-    upsert_dividends(
-        conn, cid, [{"exDate": "2025-06-01", "amount": 1, "currency": "USD"}]
-    )
+    assert conn.execute("SELECT currency_verified, currency_conflicted FROM dividends").fetchone()[
+        :
+    ] == (1, 0)
+    upsert_dividends(conn, cid, [{"exDate": "2025-06-01", "amount": 1, "currency": "USD"}])
     upsert_dividends(conn, cid, [row])
     assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_currency_unknown"
-    assert conn.execute(
-        "SELECT currency_verified, currency_conflicted FROM dividends"
-    ).fetchone()[:] == (0, 1)
+    assert conn.execute("SELECT currency_verified, currency_conflicted FROM dividends").fetchone()[
+        :
+    ] == (0, 1)
 
 
 @pytest.mark.parametrize("close", [None, 0, float("inf")])

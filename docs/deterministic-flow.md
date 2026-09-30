@@ -40,7 +40,10 @@ history is requested directly even if summary discovery omits it. Unsupported
 KPI responses can remain missing. Integration retries belong to
 [`providers/http.py`](../alphaforge/providers/http.py); sync records branch job
 outcomes and isolates many per-company failures, not one all-or-nothing fleet
-transaction. `sync --as-of` does **not** trim acquisition to that date.
+transaction. Each per-company dividend batch is savepoint-atomic: any date, type
+or amount conversion or database-constraint failure rolls back that batch without
+discarding unrelated pending caller work. `sync --as-of` does **not** trim
+acquisition to that date.
 
 ### Authoritative stored input identities
 
@@ -107,22 +110,18 @@ network fetch. Its effective date predicates are:
 - KPIs: non-null value, `year <= cutoff.year`, and observation date absent **or**
   `<= as_of`. Latest eligible values are collected per KPI; R12 overrides
   non-R12 history. Yearless `last` snapshots do not pass that year predicate.
-- Dividend yield: trailing calendar twelve months ending at `as_of`, with
+- Dividend inputs: trailing calendar twelve months ending at `as_of`, with
   `(start,end]` ex-date bounds. The previous-year anniversary clamps February 29
   to February 28; e.g. `2028-02-29` uses `(2027-02-28,2028-02-29]`, and
   `2025-02-28` uses `(2024-02-28,2025-02-28]` (includes February 29).
-  [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) owns policy
-  `calendar-ttm-verified-v1`. Only independent verified **exact company/window**
-  completeness plus known matching distribution/selected-close currency admits
-  `sum(amount) / close * 100` percentage points. Complete empty/zero => numeric
-  zero; unknown/partial coverage or unknown/foreign currency => unavailable with
-  typed reason. Out-of-window/future distributions do not participate. The close's
-  stored currency must be known; no company-currency fallback or dividend FX.
-  Börsdata currently supplies no trustworthy window assurance, so sync writes
-  observations without changing independently owned coverage assertions. An
-  absent assertion, HTTP success, and min/max dates never prove coverage.
-  Fixture-backed independent complete windows are supported, not a claim of live
-  completeness.
+  Out-of-window/future distributions do not participate. The loader also selects
+  the exact company/window coverage assertion and latest eligible close; no
+  company-currency fallback is applied. [Valuation](valuation.md) owns the
+  calculation and availability policy. Börsdata currently supplies no
+  trustworthy window assurance, so sync writes observations without changing
+  independently owned coverage assertions. An absent assertion, HTTP success,
+  and min/max dates never prove coverage. Fixture-backed independent complete
+  windows are supported, not a claim of live completeness.
 - Textual evidence: [`load_evidence_view`](../alphaforge/evidence/manifest_store.py)
   supplies the shared manifest/packet view. Do not replace it with raw document
   counts; [evidence-flow.md](evidence-flow.md) owns its cutoff, usability,

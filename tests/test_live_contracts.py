@@ -387,18 +387,22 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ],
         ):
             assert cmd_sync(args) == 1
-        company_id = conn.execute(
-            "SELECT id FROM companies WHERE borsdata_id=29"
-        ).fetchone()[0]
+        company_id = conn.execute("SELECT id FROM companies WHERE borsdata_id=29").fetchone()[0]
         assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
-        assert conn.execute(
-            "SELECT count(*) FROM dividends WHERE company_id=? AND ex_date='2025-08-01'",
-            (company_id,),
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?",
-            (company_id,),
-        ).fetchone()[0] == "failed"
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM dividends WHERE company_id=? AND ex_date='2025-08-01'",
+                (company_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?",
+                (company_id,),
+            ).fetchone()[0]
+            == "failed"
+        )
 
 
 @pytest.mark.integration

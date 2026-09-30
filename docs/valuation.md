@@ -20,9 +20,13 @@ ranking never masquerades as a discounted-cash-flow.
   percentage points from `sum(amount) / selected_close * 100` only for an
   independently verified complete trailing calendar twelve-month `(start,end]`
   ex-date window and known compatible denominations. February 29's prior-year
-  anniversary clamps to February 28. Verified complete empty/zero windows give
-  `0`; unknown/partial coverage and foreign/unknown currency give `None` with a
-  typed reason. No report FX or realized-return/reinvestment substitution.
+  anniversary clamps to February 28. Verified complete empty windows give `0`;
+  zero-valued observations do so only when their currencies are verified and
+  match the close. Unknown/partial coverage and mismatched/unknown currency give
+  `None` with a typed reason. Matching known non-SEK distribution and close
+  currencies are valid without conversion. No report FX or
+  realized-return/reinvestment
+  substitution.
   General/property/bank scoring consume this same guarded value. General audit
   components distinguish `verified_dividend_window` from
   `dividend_window_unavailable`; all models retain window/coverage/selected-close
