@@ -523,7 +523,9 @@ def upsert_prices(
             close_value = float(close) if close is not None else None
         except (TypeError, ValueError):
             close_value = None
-        if reason is None and (close_value is None or not isfinite(close_value) or close_value <= 0):
+        if reason is None and (
+            close_value is None or not isfinite(close_value) or close_value <= 0
+        ):
             reason = "stock price value unavailable or invalid"
         try:
             volume_value = int(volume) if volume is not None else None

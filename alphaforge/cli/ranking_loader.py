@@ -177,9 +177,7 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     return [item[0] for item in selected], reasons, omitted
 
 
-def _integer_alias(
-    payload: dict[str, Any], aliases: tuple[str, ...]
-) -> tuple[int | None, bool]:
+def _integer_alias(payload: dict[str, Any], aliases: tuple[str, ...]) -> tuple[int | None, bool]:
     values = [payload[key] for key in aliases if key in payload and payload[key] is not None]
     if not values:
         return None, False
@@ -305,9 +303,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         )
         if current and item["period_type"] != "r12" and item["kpi_id"] in selected_r12:
             current = False
-        selected = selected_rows.get(
-            (int(item["kpi_id"]), item["period_type"], item["price_type"])
-        )
+        selected = selected_rows.get((int(item["kpi_id"]), item["period_type"], item["price_type"]))
         selected_year = _fiscal_year(selected["year"]) if selected is not None else None
         selected_period = selected["report_period"] if selected is not None else None
         if current and item["period_type"] == "last":
@@ -444,9 +440,7 @@ def _rejection_is_current(
     return any(comparisons) if comparisons else True
 
 
-def _price_rejection_is_current(
-    item: dict[str, Any], cutoff: date, admitted_rows: list
-) -> bool:
+def _price_rejection_is_current(item: dict[str, Any], cutoff: date, admitted_rows: list) -> bool:
     raw = item.get("raw_payload") or {}
     rejected_date, date_issue = aliased_iso_date(raw, PRICE_DATE_ALIASES)
     if not raw:

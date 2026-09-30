@@ -326,9 +326,7 @@ def test_agreeing_price_and_kpi_date_aliases_accept_full_iso_values():
     assert not loaded["selection"]["rejected_kpis"]
 
 
-def test_migrated_rawless_market_rows_require_verified_reacquisition(
-    monkeypatch, tmp_path
-):
+def test_migrated_rawless_market_rows_require_verified_reacquisition(monkeypatch, tmp_path):
     conn, cid = setup(price_date=None)
     conn.execute(
         """INSERT INTO prices(company_id, price_date, close, volume, currency)
@@ -361,18 +359,24 @@ def test_migrated_rawless_market_rows_require_verified_reacquisition(
     conn.commit()
 
     migrate(conn)
-    assert tuple(
-        conn.execute(
-            "SELECT company_id, price_date, close, volume, currency FROM prices"
-        ).fetchone()
-    ) == legacy_price
-    assert tuple(
-        conn.execute(
-            """SELECT company_id, kpi_id, period_type, price_type,
+    assert (
+        tuple(
+            conn.execute(
+                "SELECT company_id, price_date, close, volume, currency FROM prices"
+            ).fetchone()
+        )
+        == legacy_price
+    )
+    assert (
+        tuple(
+            conn.execute(
+                """SELECT company_id, kpi_id, period_type, price_type,
                       observation_date, year, report_period, value
                FROM kpi_observations"""
-        ).fetchone()
-    ) == legacy_kpi
+            ).fetchone()
+        )
+        == legacy_kpi
+    )
     assert conn.execute("SELECT raw_payload FROM prices").fetchone()[0] is None
     assert conn.execute("SELECT raw_payload FROM kpi_observations").fetchone()[0] is None
 
@@ -415,17 +419,13 @@ def test_migrated_rawless_market_rows_require_verified_reacquisition(
     assert corrected["fundamental_kpis"][37] == 30
     assert not corrected["selection"]["rejected_prices"]
     assert not corrected["selection"]["rejected_kpis"]
-    corrected_score, corrected_row, corrected_dcf = rank_exports(
-        conn, monkeypatch, tmp_path
-    )
+    corrected_score, corrected_row, corrected_dcf = rank_exports(conn, monkeypatch, tmp_path)
     assert not any("legacy" in item for item in corrected_score["missing_data"])
     assert json.loads(corrected_row["input_selection"]) == corrected_score["input_selection"]
     assert corrected_dcf[str(cid)]["selection"] == corrected_score["input_selection"]
 
 
-def test_rejected_market_inputs_survive_early_missing_financial_exports(
-    monkeypatch, tmp_path
-):
+def test_rejected_market_inputs_survive_early_missing_financial_exports(monkeypatch, tmp_path):
     conn, cid = setup(periods=[], price_date=None)
     price = {"c": 10}
     kpi = {"y": 2026, "p": 5, "v": 30}

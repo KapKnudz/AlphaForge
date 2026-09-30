@@ -17,12 +17,9 @@ ranking never masquerades as a discounted-cash-flow.
   export horizons and checks unresolved annual rejections across the entire
   selected growth span, not only its latest anchor; `valuation_score` remains
   heuristic and DCF separate).
-  Financial selection is `verified-dates-consecutive-annual-v2` in the loader.
-  Current price age and historical report-price pairing are limited to seven
-  calendar days inclusive; unavailable prices cannot supply multiples or DCF.
-  Report, KPI, price-pairing and annual-history refusals are auditable in
-  `input_selection` in ranking JSON/CSV and `dcf.json.selection`; their reasons
-  also appear in ranking `missing_data` and readiness limitations.
+  Financial selection is `verified-dates-consecutive-annual-v2` in the loader;
+  [the deterministic flow](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring)
+  owns its date, freshness, refusal-provenance and export contract.
 * **Current dividend yield:** policy `calendar-ttm-verified-v2` in
   [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
   percentage points from `sum(amount) / selected_close * 100` only for an
@@ -75,13 +72,11 @@ ranking never masquerades as a discounted-cash-flow.
   builds `DcfPolicyDecision` from validated consecutive annual fiscal history
   and dated `kpi_observations` (37), then `ReverseDcfEngine` → `DcfValue`
   (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
-  with `fcff`/`discounted_fcff`). This is cutoff-filtered stored data with
-  verified applicable dates, **not historical-known-then PIT**. KPI selection
-  requires `year <= cutoff.year AND observation_date IS NOT NULL AND
-  observation_date <= as_of` with valid dates; KPI 37/42 prefer R12 over annual.
-  Undated history stays stored but cannot drive ROIC or leverage calculations;
-  missing ROIC retains the policy's explicit provisional behavior. DCF market cap, enterprise value, and the
-  required-return hurdle come from the selected DCF report (latest R12, else
+  with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
+  cutoff-filtered verified-date contract, **not historical-known-then PIT**.
+  Rejected market inputs cannot drive valuation; missing ROIC retains the
+  policy's explicit provisional behavior. DCF market cap, enterprise value, and
+  the required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,

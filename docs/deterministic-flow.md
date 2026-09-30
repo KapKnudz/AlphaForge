@@ -55,16 +55,17 @@ acquisition to that date.
 | --- | --- |
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |
 | Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
-| KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. The writer handles missing report-period keys explicitly for idempotence. |
-| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency; no OHLC history. |
+| KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. Stored observations retain `raw_payload`; malformed or undated inputs are retained in `market_input_rejections`. The writer handles missing report-period keys explicitly for idempotence. |
+| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. Malformed or undated inputs are retained in `market_input_rejections`. |
 | Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
 | Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
 
 Market-data upserts replace values at these keys; they are not append-only
-vintages. Raw report/instrument payloads and acquisition timestamps provide
-provenance, but `fetched_at` is not consistently refreshed on conflict. This
-storage differs intentionally from the immutable textual-evidence history.
+vintages. Raw report/price/KPI/instrument payloads, hashed rejected payloads and
+acquisition timestamps provide provenance, but `fetched_at` is not consistently
+refreshed on conflict. This storage differs intentionally from the immutable
+textual-evidence history.
 
 ## 2. Units, currencies and missing values
 
