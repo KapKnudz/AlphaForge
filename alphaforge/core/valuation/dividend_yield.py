@@ -10,6 +10,9 @@ from math import isfinite
 from typing import Any
 
 DIVIDEND_YIELD_POLICY_VERSION = "calendar-ttm-verified-v2"
+SUPPORTED_DIVIDEND_CURRENCIES = frozenset(
+    {"CAD", "CHF", "DKK", "EUR", "GBP", "ISK", "NOK", "PLN", "SEK", "USD"}
+)
 
 
 class DividendYieldReason(StrEnum):
@@ -45,16 +48,7 @@ class DividendYieldResult:
 
 
 def is_known_currency(value: str | None) -> bool:
-    # Do not case-fold denomination tags (GBp is not GBP), or admit
-    # unknown/test currency markers as verified units.
-    return bool(
-        value
-        and len(value) == 3
-        and value.isascii()
-        and value.isalpha()
-        and value.isupper()
-        and value not in {"XXX", "XTS"}
-    )
+    return value in SUPPORTED_DIVIDEND_CURRENCIES
 
 
 def calculate_dividend_yield(

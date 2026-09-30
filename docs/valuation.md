@@ -19,7 +19,9 @@ ranking never masquerades as a discounted-cash-flow.
   [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
   percentage points from `sum(amount) / selected_close * 100` only for an
   independently verified complete trailing calendar twelve-month `(start,end]`
-  ex-date window and known compatible denominations. February 29's prior-year
+  ex-date window and matching denominations from the explicit MVP allowlist:
+  `CAD`, `CHF`, `DKK`, `EUR`, `GBP`, `ISK`, `NOK`, `PLN`, `SEK`, and `USD`.
+  Alphabetic shape alone does not verify a code. February 29's prior-year
   anniversary clamps to February 28. Verified complete empty windows give `0`;
   zero-valued observations do so only when their currencies are verified and
   match the close. Unknown/partial coverage and mismatched/unknown currency give

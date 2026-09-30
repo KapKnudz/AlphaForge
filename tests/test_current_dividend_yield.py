@@ -158,6 +158,9 @@ def test_first_authoritative_currency_replaces_unverified_legacy_tag(legacy_curr
     coverage(conn, cid)
     before, before_rank = rank(conn, cid)
     assert before["valuation"].dividend_yield is None
+    malformed = {"exDate": "2025-06-01", "amount": 1, "currency": "FOO"}
+    upsert_dividends(conn, cid, [malformed])
+    assert dividend_state(conn) == (legacy_currency, 0, 0)
     row = {"exDate": "2025-06-01", "amount": 1, "currency": "USD"}
     for _ in range(2):
         upsert_dividends(conn, cid, [row])
@@ -232,7 +235,7 @@ def test_real_sync_and_rank_legacy_refresh_requires_independent_coverage(
     assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("unusable_currency", [None, "XXX", "GBp"])
+@pytest.mark.parametrize("unusable_currency", [None, "XXX", "GBp", "FOO"])
 def test_missing_observation_does_not_erase_verified_currency_conflict_evidence(unusable_currency):
     conn, cid = seeded()
     coverage(conn, cid)
@@ -242,7 +245,7 @@ def test_missing_observation_does_not_erase_verified_currency_conflict_evidence(
     assert dividend_state(conn) == ("SEK", 1, 0)
     upsert_dividends(conn, cid, [{**row, "currency": "USD"}])
     assert dividend_state(conn) == ("SEK", 0, 1)
-    for currency in (None, "SEK", "USD"):
+    for currency in (None, "FOO", "SEK", "USD"):
         upsert_dividends(conn, cid, [{**row, "currency": currency}])
         assert dividend_state(conn) == ("SEK", 0, 1)
         assert rank(conn, cid)[0]["valuation"].dividend_yield is None
@@ -345,7 +348,7 @@ def test_unknown_or_foreign_denomination_never_assumed(amount_currency, price_cu
     assert loaded["dividend_yield"]["reason"] == reason
 
 
-@pytest.mark.parametrize("initial_currency", [None, "XXX", "GBp"])
+@pytest.mark.parametrize("initial_currency", [None, "XXX", "GBp", "FOO"])
 def test_first_valid_currency_replaces_unverified_unknown(initial_currency):
     conn, cid = seeded()
     coverage(conn, cid)
@@ -361,6 +364,43 @@ def test_first_valid_currency_replaces_unverified_unknown(initial_currency):
     assert conn.execute(
         "SELECT currency, currency_verified, currency_conflicted FROM dividends"
     ).fetchone()[:] == ("SEK", 1, 0)
+
+
+@pytest.mark.parametrize("amount", [None, 0, 1])
+def test_malformed_matching_currency_never_produces_yield(amount):
+    conn, cid = seeded()
+    coverage(conn, cid)
+    conn.execute("UPDATE prices SET currency='FOO'")
+    if amount is not None:
+        upsert_dividends(
+            conn,
+            cid,
+            [{"exDate": "2025-06-01", "amount": amount, "currency": "FOO"}],
+        )
+        assert dividend_state(conn) == ("FOO", 0, 0)
+    loaded, _ = rank(conn, cid)
+    assert loaded["valuation"].dividend_yield is None
+    assert loaded["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    assert len(loaded["dividend_yield"]["distributions"]) == int(amount is not None)
+
+
+@pytest.mark.parametrize(
+    "currency", ["CAD", "CHF", "DKK", "EUR", "GBP", "ISK", "NOK", "PLN", "SEK", "USD"]
+)
+@pytest.mark.parametrize("amount", [0, 1])
+def test_supported_matching_currencies_and_zero_amounts_remain_valid(currency, amount):
+    conn, cid = seeded()
+    coverage(conn, cid)
+    conn.execute("UPDATE prices SET currency=?", (currency,))
+    upsert_dividends(
+        conn,
+        cid,
+        [{"exDate": "2025-06-01", "amount": amount, "currency": currency}],
+    )
+    loaded, _ = rank(conn, cid)
+    assert loaded["valuation"].dividend_yield == amount * 10
+    assert loaded["dividend_yield"]["reason"] is None
+    assert dividend_state(conn) == (currency, 1, 0)
 
 
 def test_matching_foreign_currency_yield_does_not_enable_sek_dcf():
