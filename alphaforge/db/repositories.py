@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
@@ -162,7 +162,7 @@ def _record_financial_period_rejection(
     )
 
 
-def _keyable_period_rejection_reason(row: Any, incoming: dict[str, Any]) -> str | None:
+def _intrinsic_period_rejection_reason(row: Any) -> str | None:
     raw = json.loads(row["raw_payload"])
 
     def parsed_date(value: Any) -> date | None:
@@ -208,26 +208,75 @@ def _keyable_period_rejection_reason(row: Any, incoming: dict[str, Any]) -> str 
             reasons.append("annual stub or duration unverified")
     if not row["currency"]:
         reasons.append("annual currency comparability unverified")
-    incoming_currency = incoming.get("currency")
-    if (
-        row["currency"]
-        and incoming_currency
-        and str(row["currency"]).upper() != str(incoming_currency).upper()
-    ):
-        reasons.append("annual currency comparability unverified")
-    incoming_year = incoming.get("year", incoming.get("report_year"))
-    incoming_period = incoming.get("period", incoming.get("report_period"))
-    if (
-        row["report_year"] is not None
-        and incoming_year is not None
-        and str(incoming_year) != str(row["report_year"])
-    ) or (
-        row["report_period"] is not None
-        and incoming_period is not None
-        and str(incoming_period) != str(row["report_period"])
-    ):
-        reasons.append("duplicate annual fiscal slot")
     return "; ".join(dict.fromkeys(reasons)) or None
+
+
+def _contextual_annual_rejection_reason(conn: Any, company_id: int, target: Any) -> str | None:
+    if target["period_type"] != "year":
+        return None
+    rows = conn.execute(
+        """
+        SELECT * FROM financial_periods
+        WHERE company_id=? AND period_type='year'
+        ORDER BY period_end ASC, report_date ASC
+        """,
+        (company_id,),
+    ).fetchall()
+    annuals = [row for row in rows if _intrinsic_period_rejection_reason(row) is None]
+    target_index = next(
+        (index for index, row in enumerate(annuals) if row["id"] == target["id"]),
+        None,
+    )
+    if target_index is None or not annuals:
+        return None
+
+    years = [int(row["report_year"]) for row in annuals]
+    year_counts = {year: years.count(year) for year in set(years)}
+    latest_index = len(annuals) - 1
+    if year_counts[years[latest_index]] > 1:
+        return "duplicate annual fiscal slot"
+
+    selected_start = latest_index
+    boundary_index = None
+    boundary_reason = None
+    for index in range(latest_index - 1, -1, -1):
+        candidate = annuals[index]
+        newer = annuals[selected_start]
+        if year_counts[years[index]] > 1:
+            boundary_index = index
+            boundary_reason = "duplicate annual fiscal slot"
+            break
+        previous_end = date.fromisoformat(str(candidate["period_end"])[:10])
+        newer_end = date.fromisoformat(str(newer["period_end"])[:10])
+        same_month_end = (
+            previous_end.month == newer_end.month
+            and (previous_end + timedelta(days=1)).day
+            == (newer_end + timedelta(days=1)).day
+            == 1
+        )
+        if (
+            newer_end.year != previous_end.year + 1
+            or (
+                (previous_end.month, previous_end.day)
+                != (newer_end.month, newer_end.day)
+                and not same_month_end
+            )
+            or years[selected_start] != years[index] + 1
+        ):
+            boundary_index = index
+            boundary_reason = "annual periods are not consecutive fiscal anniversaries"
+            break
+        if str(candidate["currency"]).upper() != str(newer["currency"]).upper():
+            boundary_index = index
+            boundary_reason = "annual currency comparability unverified"
+            break
+        selected_start = index
+
+    if boundary_index is None:
+        return None
+    if target_index <= boundary_index or selected_start == latest_index:
+        return boundary_reason
+    return None
 
 
 def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str, Any]]) -> int:
@@ -293,7 +342,9 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             (company_id, period_type, period_end),
         ).fetchone()
         if existing is not None and json.loads(existing["raw_payload"]) != p:
-            reason = _keyable_period_rejection_reason(existing, p)
+            reason = _intrinsic_period_rejection_reason(existing)
+            if reason is None:
+                reason = _contextual_annual_rejection_reason(conn, company_id, existing)
             if reason:
                 _record_financial_period_rejection(
                     conn,

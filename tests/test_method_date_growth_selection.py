@@ -827,7 +827,6 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
         ("r12_publication", "fiscal end or publication date unverified"),
         ("annual_publication", "fiscal end or publication date unverified"),
         ("publication_order", "publication precedes fiscal end"),
-        ("fiscal_end", "fiscal end or publication date unverified"),
         ("annual_year", "annual fiscal-year metadata unverified"),
         ("annual_stub", "annual stub or duration unverified"),
         ("annual_currency", "annual currency comparability unverified"),
@@ -868,8 +867,6 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
             rejected["report_Date"] = None
         elif defect == "publication_order":
             rejected["report_Date"] = "2026-03-30"
-        elif defect == "fiscal_end":
-            rejected["periodEnd"] = "2026-04-30"
         elif defect == "annual_year":
             rejected.pop("year")
         elif defect == "annual_stub":
@@ -922,6 +919,159 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
     assert score["readiness_status"] == "ready"
     assert score["revenue_growth_years"] == 3
     assert not any(expected_reason in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["year", "r12", "quarter"])
+def test_conflicting_fiscal_aliases_remain_current_after_same_key_correction(
+    period_type, monkeypatch, tmp_path
+):
+    rows = [
+        annual(year, 100 * 1.1 ** (year - 2023), ebit=20 * 1.1 ** (year - 2023))
+        for year in range(2023, 2027)
+    ]
+    conn, cid = setup(periods=rows)
+    end = "2026-03-31" if period_type == "year" else "2026-05-31"
+    rejected = annual(
+        2026,
+        150,
+        period_type=period_type,
+        period=5 if period_type == "year" else 1,
+        period_end=end,
+        periodEnd="2026-04-30",
+        report_Date=CUTOFF,
+        ebit=30,
+    )
+    corrected = dict(rejected)
+    corrected.pop("periodEnd")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 1
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    audit = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == rejected
+    assert audit["current_refusal"]
+    if period_type == "year":
+        assert loaded["financial"].revenue_growth is None
+    else:
+        assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_audit = next(
+        item
+        for item in exported["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert exported_audit["current_refusal"]
+    assert any("fiscal end" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize(
+    "case,expected_reason",
+    [
+        ("duplicate", "duplicate annual fiscal slot"),
+        ("gap", "annual periods are not consecutive fiscal anniversaries"),
+        ("anniversary", "annual periods are not consecutive fiscal anniversaries"),
+        ("currency", "annual currency comparability unverified"),
+        ("ordinary", None),
+    ],
+)
+def test_contextual_annual_rejections_archive_only_rejected_restatements(
+    case, expected_reason
+):
+    if case == "duplicate":
+        rows = [annual(2025), annual(2026, 110), annual(2026, 120, period_end="2026-04-30")]
+        target = rows[-1]
+    elif case == "gap":
+        rows = [annual(2023), annual(2025, 121), annual(2026, 133.1)]
+        target = rows[0]
+    elif case == "anniversary":
+        rows = [annual(2025), annual(2026, 110, period_end="2026-04-30")]
+        target = rows[-1]
+    elif case == "currency":
+        rows = [annual(2025), annual(2026, 110, currency="USD")]
+        target = rows[-1]
+    else:
+        rows = [annual(2025), annual(2026, 110)]
+        target = rows[0]
+    conn, cid = setup(periods=rows)
+    original = dict(target)
+    restated = dict(target)
+    restated["revenues"] = float(restated["revenues"]) + 1
+
+    assert upsert_financial_periods(conn, cid, [restated]) == 1
+    assert upsert_financial_periods(conn, cid, [restated]) == 1
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchall()
+    if expected_reason is None:
+        assert archived == []
+    else:
+        assert len(archived) == 1
+        assert archived[0]["reason"] == expected_reason
+        assert json.loads(archived[0]["raw_payload"]) == original
+
+
+@pytest.mark.parametrize(
+    "case,current_refusal",
+    [
+        ("future", False),
+        ("older_undated", False),
+        ("annual_shadowed_by_r12", False),
+        ("newer_undated", True),
+    ],
+)
+def test_kpi_rejections_only_refuse_applicable_selection(
+    case, current_refusal, monkeypatch, tmp_path
+):
+    conn, cid = setup()
+    if case == "future":
+        upsert_kpi_observations(
+            conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}]
+        )
+        upsert_kpi_observations(
+            conn,
+            cid,
+            37,
+            "year",
+            "mean",
+            [{"y": 2027, "p": 5, "v": 40, "observationDate": "2027-05-01"}],
+        )
+    elif case == "older_undated":
+        upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2025, "p": 5, "v": 20}])
+        upsert_kpi_observations(
+            conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}]
+        )
+    elif case == "annual_shadowed_by_r12":
+        upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 20}])
+        upsert_kpi_observations(
+            conn, cid, 37, "r12", "mean", [{"y": 2026, "p": 1, "v": 30, "observationDate": CUTOFF}]
+        )
+    else:
+        upsert_kpi_observations(
+            conn, cid, 37, "year", "mean", [{"y": 2025, "p": 5, "v": 20, "observationDate": "2025-05-01"}]
+        )
+        upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    rejected = loaded["selection"]["rejected_kpis"][0]
+    assert rejected["current_refusal"] is current_refusal
+    assert any("KPI" in reason for reason in loaded["selection"]["refusal_reasons"]) is current_refusal
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert exported["rejected_kpis"][0]["current_refusal"] is current_refusal
+    assert any("KPI" in item for item in score["missing_data"]) is current_refusal
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
 

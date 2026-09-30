@@ -167,6 +167,7 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
 def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
     kpi_r12: dict[int, float] = {}
     kpi_annual: dict[int, float] = {}
+    selected_rows = {}
     rejected = []
     rows = conn.execute(
         """
@@ -201,7 +202,33 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
             )
             continue
         target = kpi_r12 if row["period_type"] == "r12" else kpi_annual
-        target[int(row["kpi_id"])] = float(row["value"])
+        kpi_id = int(row["kpi_id"])
+        target[kpi_id] = float(row["value"])
+        selected_rows[(kpi_id, row["period_type"], row["price_type"])] = row
+
+    selected_r12 = set(kpi_r12)
+    for item in rejected:
+        current = item["reason"] != "KPI after cutoff"
+        if current and item["period_type"] != "r12" and item["kpi_id"] in selected_r12:
+            current = False
+        selected = selected_rows.get(
+            (int(item["kpi_id"]), item["period_type"], item["price_type"])
+        )
+        rejected_year = _fiscal_year(item["year"])
+        selected_year = _fiscal_year(selected["year"]) if selected is not None else None
+        if current and rejected_year is not None and selected_year is not None:
+            if selected_year > rejected_year:
+                current = False
+            elif selected_year == rejected_year:
+                rejected_period = item["report_period"]
+                selected_period = selected["report_period"]
+                if (
+                    rejected_period is not None
+                    and selected_period is not None
+                    and int(selected_period) >= int(rejected_period)
+                ):
+                    current = False
+        item["current_refusal"] = current
     return ({**kpi_annual, **kpi_r12}, rejected)
 
 
@@ -222,7 +249,7 @@ def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
     reasons.extend(
         f"KPI {item.get('kpi_id', 'unknown')}: {item['reason']}"
         for item in selection.get("rejected_kpis", [])
-        if item.get("reason")
+        if item.get("reason") and item.get("current_refusal", True)
     )
     return list(dict.fromkeys(reasons))
 
@@ -237,74 +264,91 @@ def _rejection_is_current(
         return False
 
     raw = item.get("raw_payload") or {}
-    year = _fiscal_year(item.get("report_year"))
-    if year is None:
-        year = next(
-            (
-                parsed
-                for key, value in raw.items()
-                if REPORT_FIELD_MAP.get(key) == "report_year"
-                and (parsed := _fiscal_year(value)) is not None
-            ),
-            None,
-        )
-    end = _date(item.get("period_end"))
-    if end is None:
-        end = next(
-            (
-                parsed
-                for key, value in raw.items()
-                if (key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end")
-                and (parsed := _date(value)) is not None
-            ),
-            None,
-        )
-    publication = _date(item.get("report_date"))
-    if publication is None:
-        publication = next(
-            (
-                parsed
-                for key, value in raw.items()
-                if REPORT_FIELD_MAP.get(key) == "report_date"
-                and (parsed := _date(value)) is not None
-            ),
-            None,
-        )
+    years = set()
+    ends = set()
+    periods = set()
+    publications = set()
+    invalid_identity = False
 
-    if (
-        (end is not None and end > cutoff)
-        or (publication is not None and publication > cutoff)
-        or (year is not None and year > cutoff.year)
-    ):
+    year_values = [item.get("report_year")]
+    year_values.extend(
+        value
+        for key, value in raw.items()
+        if key == "report_year" or REPORT_FIELD_MAP.get(key) == "report_year"
+    )
+    for value in year_values:
+        if value is None:
+            continue
+        parsed = _fiscal_year(value)
+        if parsed is None:
+            invalid_identity = True
+        else:
+            years.add(parsed)
+
+    end_values = [item.get("period_end")]
+    end_values.extend(
+        value
+        for key, value in raw.items()
+        if key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end"
+    )
+    for value in end_values:
+        if value is None:
+            continue
+        parsed = _date(value)
+        if parsed is None:
+            invalid_identity = True
+        else:
+            ends.add(parsed)
+
+    period_values = [item.get("report_period")]
+    period_values.extend(
+        value
+        for key, value in raw.items()
+        if key == "report_period" or REPORT_FIELD_MAP.get(key) == "report_period"
+    )
+    for value in period_values:
+        if value is None:
+            continue
+        parsed = str(value).strip()
+        if parsed:
+            periods.add(parsed)
+        else:
+            invalid_identity = True
+
+    publication_values = [item.get("report_date")]
+    publication_values.extend(
+        value
+        for key, value in raw.items()
+        if key == "report_date" or REPORT_FIELD_MAP.get(key) == "report_date"
+    )
+    publications.update(
+        parsed
+        for value in publication_values
+        if value is not None and (parsed := _date(value)) is not None
+    )
+    future_checks = []
+    if years:
+        future_checks.append(all(value > cutoff.year for value in years))
+    if ends:
+        future_checks.append(all(value > cutoff for value in ends))
+    if publications:
+        future_checks.append(all(value > cutoff for value in publications))
+    if future_checks and all(future_checks):
         return False
 
-    period_value = item.get("report_period")
-    if period_value is None:
-        period_value = next(
-            (
-                value
-                for key, value in raw.items()
-                if REPORT_FIELD_MAP.get(key) == "report_period" and value is not None
-            ),
-            None,
-        )
-    period = str(period_value).strip() if period_value is not None else None
-    if not period:
-        period = None
-
-    has_slot_identity = year is not None or end is not None or period is not None
-    superseded = has_slot_identity and any(
+    has_slot_identity = bool(years or ends or periods)
+    superseded = not invalid_identity and has_slot_identity and any(
         row["period_type"] == item.get("period_type")
-        and (year is None or _fiscal_year(row["report_year"]) == year)
-        and (end is None or _verified_fiscal_end(row) == end)
+        and (not years or years == {_fiscal_year(row["report_year"])})
+        and (not ends or ends == {_verified_fiscal_end(row)})
         and (
-            period is None
-            or (
+            not periods
+            or periods
+            == {
                 str(row["report_period"]).strip()
                 if row["report_period"] is not None
                 else None
-            )
-            == period
+            }
         )
         for row in admitted_rows
     )
@@ -318,10 +362,10 @@ def _rejection_is_current(
     anchor_year = _fiscal_year(latest_annual["report_year"])
     anchor_end = _verified_fiscal_end(latest_annual)
     comparisons = []
-    if year is not None and anchor_year is not None:
-        comparisons.append(year >= anchor_year)
-    if end is not None and anchor_end is not None:
-        comparisons.append(end >= anchor_end)
+    if years and anchor_year is not None:
+        comparisons.append(any(year >= anchor_year for year in years))
+    if ends and anchor_end is not None:
+        comparisons.append(any(end >= anchor_end for end in ends))
     return any(comparisons) if comparisons else True
 
 
