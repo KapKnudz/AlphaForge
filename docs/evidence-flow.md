@@ -403,10 +403,30 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v8 and evidence rules v10 deliberately
-invalidate earlier annual range and fiscal clause/heading interpretation;
-correcting an identity appends a new current observation using independently
-verified retained bytes, without rewriting history.
+confer current readiness. Report rules v9 and evidence rules v11 deliberately
+invalidate earlier annual range/fiscal interpretation and off-feed rebuild
+behavior. A retained candidate with an older fingerprint is never selected or
+restamped: the flow re-runs current admission and covered identity from its
+immutable source facts: original public detail HTML is re-parsed by the normal
+MFN parser to re-prove title, publication, attachment selection and (for Cision)
+canonical issuer confirmation. Narrative admission also requires independently
+captured raw MFN report tags and archive-PDF metadata. Old eligibility flags,
+decoded report kind or selection tier cannot supply admission; a historical
+provider subtype assertion cannot silently be discarded when its raw inputs
+are unavailable. Original HTML, raw feed facts and the parsed canonical URL are
+retained in observation metadata.
+If original facts cannot re-prove the guards, the normal provider may revalidate
+only the exact catalogued detail URL, sharing the unchanged detail-fetch budget
+with current-feed work. Operational budget/scope deferrals observe no new
+provider fact: the old binding stays available for the next bounded attempt,
+but remains unselectable under the new fingerprint. Missing/failed evidence
+remains incomplete, including the previously expected report; it cannot
+disappear to improve completeness.
+No discovery or issuer inference is added. Verified exact-candidate PDFs and
+matching extractions are reused; changed extraction configuration re-extracts
+retained bytes. Corrected observations/bindings append without rewriting history.
+After a successful refresh, identical replay needs neither detail nor PDF HTTP
+(ordinary bounded feed checks still run).
 
 ### Cross-boundary correction coverage
 
@@ -423,6 +443,10 @@ is not evidence that the runtime contract holds. `tests/test_greptile_fiscal_con
 pins covered/comparator title ordering, sentence-scoped and inside-heading
 forecast guards, typed ambiguity, persisted identity/provenance, full quarter
 slots and exact offline immutable-binding/packet/manifest reuse.
+`tests/test_offfeed_rule_reclassification.py` executes old-rule/empty-feed
+annual, quarterly and narrative rebuilds, provider assertions/conflicts, exact
+known-detail fallback with issuer/admission refusal and shared budget limits,
+retained-byte/extraction reuse, immutable history and subsequent offline replay.
 `tests/test_replacement_annual_and_offfeed.py` adds two-year annual range/provider
 provenance and conflicts, canonical equivalent bilingual annual ranges,
 off-feed unchanged/config/version extraction paths,

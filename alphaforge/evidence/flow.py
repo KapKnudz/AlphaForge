@@ -217,6 +217,89 @@ def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
     )
 
 
+def _retained_type_consistent(cached: dict[str, Any], article: dict[str, Any]) -> bool:
+    """Do not silently discard a historical provider subtype assertion.
+
+    Current raw feed facts can independently re-prove it. Without them, title
+    admission must not contradict the recorded attested subtype (e.g. changing
+    a provider's quarterly year-end report into the title filter's annual class).
+    Old classification alone never supplies admission.
+    """
+    return (
+        not cached["raw_metadata"].get("feed_report_identity")
+        or bool(article.get("feed_report_identity"))
+        or (article.get("report_kind"), article.get("document_type"))
+        == (cached["report_kind"], cached["document_type"])
+    )
+
+
+def _retained_source_article(
+    cached: dict[str, Any], *, mfn_slug: str, issuer_token: str, base_url: str
+) -> tuple[dict[str, Any], bool]:
+    """Rebuild source inputs, never copy the old eligibility/classification.
+
+    Re-parse captured original detail HTML with the provider's current parser,
+    proving timestamp, title, attachment selection and canonical issuer anew.
+    Narrative admission additionally needs independent raw MFN tag/PDF facts,
+    not the old decoded report kind, selection tier or eligibility flag.
+    """
+    from alphaforge.providers.mfn.scraper import (
+        _feed_report_attachment_url,
+        _feed_report_identity,
+        _is_mfn_release_url,
+        _parse_html,
+    )
+
+    metadata = cached["raw_metadata"]
+    evidence = metadata.get("feed_report_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    identity = _feed_report_identity(evidence)
+    title = str(cached.get("title") or "")
+    html = metadata.get("mfn_detail_html")
+    parsed = _parse_html(html, corroborated_report=bool(identity)) if isinstance(html, str) else {}
+    detail_title = str(parsed.get("title") or "")
+    article = {
+        **metadata,
+        "url": cached["source_url"],
+        "source_url": cached["source_url"],
+        "title": title,
+        "detail_title": detail_title,
+        "published_at": parsed.get("published_at"),
+        "content_text": parsed.get("body"),
+        "body": parsed.get("body"),
+        "attachment_url": parsed.get("storage_url"),
+        "storage_url": parsed.get("storage_url"),
+        "attachment_tier": parsed.get("attachment_tier"),
+        "canonical_url": parsed.get("canonical_url"),
+        "lang": cached["language"],
+        "report_kind": identity[0] if identity else report_kind(title),
+        "document_type": identity[1] if identity else document_type(title),
+        "feed_report_identity": "mfn-report-tag+archive-report-pdf" if identity else None,
+        "feed_report_attachment_url": _feed_report_attachment_url(evidence) if identity else None,
+        # A derived old fiscal period is not a new provider assertion. Original
+        # provider input/key provenance, if present, is retained in metadata.
+        "fiscal_period": None,
+    }
+    sufficient = bool(
+        metadata.get("mfn_slug") == mfn_slug
+        and _is_mfn_release_url(cached["source_url"], base_url)
+        and parsed.get("body")
+        and parsed.get("published_at")
+        and parsed.get("attachment_tier") in ATTACHMENT_TIERS[:3]
+        and parsed.get("storage_url") == cached["attachment_url"]
+        and not _confirm_cis_issuer(
+            cached["source_url"], parsed.get("canonical_url"), issuer_token=issuer_token
+        )
+        and not is_invitation_or_presentation(title)
+        and not is_invitation_or_presentation(detail_title)
+        and (is_report(title) or identity)
+        and (is_report(detail_title) or identity)
+        and (not identity or article["feed_report_attachment_url"] == cached["attachment_url"])
+        and _retained_type_consistent(cached, article)
+    )
+    return article, sufficient
+
+
 def _prepare_selected_article(
     variant: dict[str, Any], downloaded: PdfDownload, extracted: Any
 ) -> dict[str, Any]:
@@ -1662,17 +1745,65 @@ class OneCompanyEvidenceFlow:
                 future_dated_complete_release = True
             elif published_date > today.isoformat():
                 not_yet_published_complete_release = True
+        feed_unseen_count = len(unseen_feed)
+        retained_details: list[dict[str, Any]] = []
+        retained_deferrals: set[str] = set()
+        retained_rebuilds: dict[str, dict[str, Any]] = {}
+        if revision_recorder is not None:
+            from alphaforge.providers.mfn.scraper import _is_mfn_release_url
+
+            detail_budget = min(
+                window.max_detail_fetches,
+                getattr(self.scraper, "max_articles", window.max_detail_fetches),
+            )
+            for source_url, cached in sorted(cached_v2.items()):
+                if (
+                    source_url in seen_feed_urls
+                    or source_url in revoked_feed_urls
+                    or cached["report_rules_fingerprint"] == active_rules["fingerprint"]
+                ):
+                    continue
+                article, sufficient = _retained_source_article(
+                    cached,
+                    mfn_slug=mapping["mfn_slug"],
+                    issuer_token=issuer_token,
+                    base_url=getattr(self.scraper, "base_url", "https://mfn.se"),
+                )
+                retained_rebuilds[source_url] = article
+                if sufficient:
+                    retained_details.append(article)
+                elif (
+                    len(unseen_feed) < detail_budget
+                    and _is_mfn_release_url(
+                        source_url, getattr(self.scraper, "base_url", "https://mfn.se")
+                    )
+                    and _cis_release_issuer(source_url) in {None, issuer_token}
+                ):
+                    # Only this catalogued URL, not discovery. The provider
+                    # re-proves detail title, publication, attachment and issuer.
+                    unseen_feed.append(article)
+                else:
+                    retained_deferrals.add(source_url)
         if not dry_run:
             record_mfn_feed_check(
                 self.conn,
                 company_id,
                 mapping["mfn_slug"],
                 len(unique_feed),
-                len(unseen_feed),
+                feed_unseen_count,
             )
             self.conn.commit()
         try:
-            details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+            fetched_details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+            details = retained_details + [
+                {
+                    **retained_rebuilds.get(
+                        str(article.get("source_url") or article.get("url")), {}
+                    ),
+                    **article,
+                }
+                for article in fetched_details
+            ]
         except MfnAcquisitionError as exc:
             return finish(
                 EvidenceFlowResult(
@@ -1687,6 +1818,34 @@ class OneCompanyEvidenceFlow:
         for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
             early_skips[reason] = early_skips.get(reason, 0) + count
         detail_dispositions = _drain_dispositions(self.scraper, "drain_detail_dispositions")
+        # A budget/scope deferral observes no new provider fact. Keep the old
+        # binding available for a later bounded attempt, but still unselectable
+        # under the current fingerprint; do not erase retention with a new row.
+        for article in details:
+            source_url = str(article.get("source_url") or article.get("url") or "")
+            if source_url in retained_rebuilds and not _retained_type_consistent(
+                cached_v2[source_url], article
+            ):
+                detail_dispositions[source_url] = {
+                    **article,
+                    "eligibility": "incomplete",
+                    "eligibility_reason": "retained_provider_type_unproven",
+                }
+        # Failed revalidation of a previously expected report is not evidence
+        # that its denominator disappeared. Keep it incomplete and unselectable.
+        for source_url in retained_rebuilds.keys() & detail_dispositions.keys():
+            cached = cached_v2[source_url]
+            detail_dispositions[source_url] = {
+                **retained_rebuilds[source_url],
+                **detail_dispositions[source_url],
+                "eligibility": "incomplete",
+                "report_kind": cached["report_kind"],
+                "document_type": cached["document_type"],
+                # This historical publication fact is for expected coverage,
+                # not proof that the failed current admission succeeded.
+                "published_at": detail_dispositions[source_url].get("published_at")
+                or cached["published_at"],
+            }
         if revision_recorder is not None:
             final_dispositions = dict(detail_dispositions)
             for source_url in sorted(revoked_feed_urls):
@@ -1763,6 +1922,9 @@ class OneCompanyEvidenceFlow:
         )
         if discovery_truncated:
             result.skipped["discovery_truncated"] = 1
+        if retained_deferrals:
+            result.skipped["retained_detail_revalidation_unavailable"] = len(retained_deferrals)
+            hard_blocks += len(retained_deferrals)
         for article in details:
             title = article.get("title") or ""
             corroborated_feed_report = bool(article.get("feed_report_identity")) and article.get(

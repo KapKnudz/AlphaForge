@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any
 
-EVIDENCE_RULES_VERSION = 10
+EVIDENCE_RULES_VERSION = 11
 """Monotonic version of the evidence/filter/completeness rule set.
 
 Stamped on every frozen packet as ``evidence_rules_version``. Bump it whenever

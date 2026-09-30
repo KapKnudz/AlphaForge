@@ -637,6 +637,10 @@ class MfnScraper:
                 article["report_kind"], article["document_type"] = feed_identity
                 article["feed_report_identity"] = "mfn-report-tag+archive-report-pdf"
                 article["feed_report_attachment_url"] = attachment_url
+                article["feed_report_evidence"] = {
+                    "properties": {"tags": (entry.get("properties") or {}).get("tags")},
+                    "content": {"attachments": content.get("attachments")},
+                }
             # Preserve feed-level language when available
             props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
             feed_lang = str(props.get("lang") or "").lower()
@@ -940,6 +944,8 @@ class MfnScraper:
                 "document_type": seed.get("document_type"),
                 "feed_report_identity": seed.get("feed_report_identity"),
                 "feed_report_attachment_url": seed.get("feed_report_attachment_url"),
+                "feed_report_evidence": seed.get("feed_report_evidence"),
+                "mfn_detail_html": resp.text,
             }
             article.update(_report_identity_seed(article))
             out.append(article)
