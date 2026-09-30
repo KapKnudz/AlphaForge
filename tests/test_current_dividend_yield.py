@@ -260,6 +260,44 @@ def test_calendar_ttm_ex_date_edges_and_future_distributions(as_of, start):
     assert loaded["dividend_yield"]["window_start"] == start
 
 
+def test_date_growth_workers_2024_leap_cutoff_fixture():
+    """Prior-year Feb-29 construction must not crash the shared loader."""
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    cid = upsert_company(
+        conn,
+        {
+            "insId": 2,
+            "name": "Leap fixture",
+            "ticker": "LEAP",
+            "stockPriceCurrency": "SEK",
+            "reportCurrency": "SEK",
+        },
+    )
+    upsert_financial_periods(
+        conn,
+        cid,
+        [
+            {
+                "period_type": "year",
+                "period_end": "2023-03-31",
+                "report_Date": "2023-05-01",
+                "revenues": 100,
+                "number_Of_Shares": 10,
+                "currency": "SEK",
+            }
+        ],
+    )
+    upsert_prices(conn, cid, [{"d": "2024-02-28", "c": 10}], currency="SEK")
+    coverage(conn, cid, as_of="2024-02-29")
+    loaded = load_results_for_company(conn, cid, "2024-02-29")
+    assert loaded["financial"] is not None
+    assert loaded["valuation"].dividend_yield == 0
+    assert loaded["dividend_yield"]["window_start"] == "2023-02-28"
+    assert loaded["dividend_yield"]["window_end"] == "2024-02-29"
+    assert loaded["dividend_yield"]["price_date"] == "2024-02-28"
+
+
 def test_additive_migration_does_not_trust_legacy_currency_or_coverage():
     conn, cid = seeded()
     conn.execute("ALTER TABLE dividends DROP COLUMN currency_verified")
