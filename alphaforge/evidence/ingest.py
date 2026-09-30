@@ -435,6 +435,7 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         normalized = _quarter_period(value) or value.casefold()
         if annual and re.fullmatch(r"20\d{2}\s*/\s*(?:20)?\d{2}", value):
             normalized = _year_period(value) or normalized
+            value = normalized  # Original spelling remains fiscal_period_input provenance.
         if title_period and normalized != title_period:
             # A provider year and the same year's covered quarter are compatible.
             # A bare provider year does not prove a two-year annual range.

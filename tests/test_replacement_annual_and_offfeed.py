@@ -103,7 +103,7 @@ def test_annual_range_survives_observation_manifest_packet_and_replay(
     "explicit,expected,limitation",
     [
         ("2025/2026", "2025/2026", None),
-        ("2025/26", "2025/26", None),
+        ("2025/26", "2025/2026", None),
         ("2025", None, "fiscal_identity_ambiguous"),
         ("2024/2025", None, "fiscal_identity_ambiguous"),
     ],
@@ -148,6 +148,50 @@ def test_annual_range_provider_provenance_and_conflict_replay(
         ]
         == current["candidate_observation_id"]
     )
+
+
+@pytest.mark.parametrize("provider_key", ["fiscal_period", "report_period", "period"])
+def test_equivalent_provider_annual_ranges_bind_one_bilingual_slot(lane, provider_key):
+    entries = [
+        item("annual-en", "Flow AB Annual Report 2025/2026"),
+        item("annual-sv", "Flow AB Årsredovisning 2025/26", "sv"),
+    ]
+    for entry in entries:
+        entry["properties"]["tags"] = ["sub:report", "sub:report:annual"]
+
+    class ProviderPeriod(MfnScraper):
+        def scrape_details(self, *args, **kwargs):
+            return [
+                {
+                    **article,
+                    provider_key: "2025/26" if article["url"].endswith("-en") else "2025/2026",
+                    "provider_event_id": "covered-annual-2025-2026",
+                }
+                for article in super().scrape_details(*args, **kwargs)
+            ]
+
+    first, _ = run(lane, entries, scraper=ProviderPeriod(max_articles=60))
+    assert first.status == "complete"
+    observations = current_candidate_observations(lane[0], company_id=lane[1], as_of=AS_OF)
+    assert len(observations) == 2
+    assert {row["fiscal_period"] for row in observations} == {"2025/2026"}
+    assert {json.loads(row["raw_metadata"])["fiscal_period_input"] for row in observations} == {
+        "2025/26",
+        "2025/2026",
+    }
+    _, manifest = view(lane)
+    assert len(manifest.cache) == 2  # Both editions remain independently retained.
+    assert len(manifest.deduplication) == 1
+    assert manifest.deduplication[0]["slot_key"] == "annual:2025/2026"
+    assert first.completeness == {"annual": {"expected": 1, "retained": 1}}
+    assert len(first.packet["sources"]) == 1
+    assert gate(first.packet, lane[1]) == "ready"
+    replay, _ = run(lane, entries, scraper=ProviderPeriod(max_articles=60), fetch=False)
+    assert replay.status == "complete"
+    assert replay.pdf_fetch_attempts == 0
+    assert replay.packet_hash == first.packet_hash
+    assert view(lane)[1].to_dict() == manifest.to_dict()
+    assert current_candidate_observations(lane[0], company_id=lane[1], as_of=AS_OF) == observations
 
 
 @pytest.mark.parametrize("refresh", ["unchanged", "config", "extractor"])

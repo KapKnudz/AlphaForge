@@ -121,8 +121,9 @@ accept separator punctuation (including a comma before the year); explicit
 year-end report titles retain fiscal Q4, distinct from annual-report identity.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
-a bare provider year cannot prove a two-year annual range. Provider values/input
-keys remain provenance, conflicting covered ranges remain ambiguous, and no
+a bare provider year cannot prove a two-year annual range. Provider ranges use
+the same canonical identity for observations, relation proof and manifest slots;
+original spellings/input keys remain provenance. Conflicting covered ranges remain ambiguous, and no
 calendar start/end dates are invented. Quarter/year-end normalization preserves textual position: a later comparator
 cannot override the covered title, and a comparator Q1 cannot override an actual
 year-end Q4. Forecast/comparison clauses are excluded from title inference.
@@ -402,7 +403,7 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v7 and evidence rules v9 deliberately
+confer current readiness. Report rules v8 and evidence rules v10 deliberately
 invalidate earlier annual range and fiscal clause/heading interpretation;
 correcting an identity appends a new current observation using independently
 verified retained bytes, without rewriting history.
@@ -423,7 +424,8 @@ pins covered/comparator title ordering, sentence-scoped and inside-heading
 forecast guards, typed ambiguity, persisted identity/provenance, full quarter
 slots and exact offline immutable-binding/packet/manifest reuse.
 `tests/test_replacement_annual_and_offfeed.py` adds two-year annual range/provider
-provenance and conflicts, off-feed unchanged/config/version extraction paths,
+provenance and conflicts, canonical equivalent bilingual annual ranges,
+off-feed unchanged/config/version extraction paths,
 independent bilingual retained children, historical bindings/manifests,
 packet/readiness/hash consumers and missing/corrupt-object refusal. Normal
 fixture-only tests, import isolation and the checker all remain required. Live two-company replay
