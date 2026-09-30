@@ -812,7 +812,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
         assert score[f"{metric}_years"] == 0
         assert row[metric] == ""
         assert row[f"{metric}_years"] == "0"
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-growth-horizons-v13"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-annual-rejection-span-v14"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
@@ -1014,6 +1014,116 @@ def test_annual_rejections_block_only_while_unresolved_and_applicable(monkeypatc
     assert not any(item["current_refusal"] for item in exported_rejections)
     assert json.loads(row["input_selection"]) == score["input_selection"]
     assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "source,end",
+    [
+        ("financial_periods", "2025-04-30"),
+        ("financial_periods", "2024-04-30"),
+        ("ingestion_rejection", "2025-04-30"),
+    ],
+)
+def test_interior_annual_rejection_blocks_growth_and_exports(
+    source, end, reverse, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2024)) for year in range(2024, 2027)]
+    rejected = annual(int(end[:4]), 115, period_end=end, report_Date=None)
+    if source == "ingestion_rejection":
+        rejected["periodEnd"] = "2025-05-31"  # An unresolved, conflicting fiscal slot.
+    rows.append(rejected)
+    conn, cid = setup(periods=list(reversed(rows)) if reverse else rows)
+    upsert_prices(conn, cid, [{"d": f"{year}-03-31", "c": 10} for year in range(2024, 2027)])
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    rejection = next(
+        item for item in loaded["selection"]["rejected_reports"] if item["raw_payload"] == rejected
+    )
+    assert rejection["source"] == source
+    assert rejection["current_refusal"]
+    assert loaded["selection"]["annual_history"]["period_ends"] == []
+    assert loaded["financial"].revenue_growth is None
+    assert loaded["financial"].revenue_growth_years == 0
+    # Preserve the existing explicit fallback, never a CAGR across the uncertain span.
+    policy = loaded["dcf"]["policy"]
+    assert policy.assumptions.revenue_growth == 0
+    assert "historical revenue growth unavailable" in policy.assumption_sources["revenue_growth"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["growth_score"] == 0
+    for metric in (
+        "revenue_growth",
+        "ebit_growth",
+        "fcf_per_share_growth",
+        "book_value_per_share_growth",
+    ):
+        assert score[metric] is None
+        assert score[f"{metric}_years"] == 0
+        assert row[metric] == ""
+        assert row[f"{metric}_years"] == "0"
+    assert any("unresolved applicable annual rejection" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+    exported = next(
+        item
+        for item in score["input_selection"]["rejected_reports"]
+        if item["raw_payload"] == rejected
+    )
+    assert exported["current_refusal"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("case", ["older", "future", "corrected", "before_suffix_gap"])
+def test_nonblocking_annual_rejections_preserve_selected_span(case, reverse, monkeypatch, tmp_path):
+    rows = [annual(year, 100 * 1.1 ** (year - 2024)) for year in range(2024, 2027)]
+    year, end = {
+        "older": (2023, "2023-04-30"),
+        "future": (2027, "2027-04-30"),
+        "corrected": (2025, "2025-03-31"),
+        "before_suffix_gap": (2024, "2024-04-30"),
+    }[case]
+    rejected = annual(year, 115, period_end=end, report_Date=None)
+    if case == "before_suffix_gap":
+        rows = [annual(2022, 80), *rows[1:]]
+    conn, cid = setup(periods=[rejected])
+    upsert_financial_periods(conn, cid, list(reversed(rows)) if reverse else rows)
+    packet(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    rejection = next(
+        item for item in loaded["selection"]["rejected_reports"] if item["raw_payload"] == rejected
+    )
+    assert not rejection["current_refusal"]
+    assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+    assert loaded["financial"].revenue_growth_years == (1 if case == "before_suffix_gap" else 2)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_growth"] == pytest.approx(0.1)
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.1)
+
+
+def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, tmp_path):
+    conn, cid = setup(
+        periods=[annual(2023, 50), annual(2024, 0), annual(2025, 110), annual(2026, 121)]
+    )
+    packet(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    expected = "reverse-dcf-v12-consecutive-annual-growth"
+    assert loaded["dcf"]["policy"].policy_version == expected
+    assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
+    assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_growth"] == pytest.approx(0.1)
+    assert score["revenue_growth_years"] == 1
+    assert row["revenue_growth_years"] == "1"
+    assert dcf[str(cid)]["dcf"]["policy_version"] == expected
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.1)
+    assert score["input_selection"]["version"] == "verified-dates-consecutive-annual-v2"
+    assert json.loads(row["input_selection"])["version"] == "verified-dates-consecutive-annual-v2"
+    assert dcf[str(cid)]["selection"]["version"] == "verified-dates-consecutive-annual-v2"
 
 
 @pytest.mark.parametrize(

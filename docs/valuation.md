@@ -12,12 +12,12 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-growth-horizons-v15"`
-  (v15 combines verified dividend-yield provenance with date/freshness,
-  annual-history and method changes and adds metric-specific growth
-  value/horizon fields to rank exports;
-  `valuation_score` remains heuristic and DCF separate).
-  Financial selection is `verified-dates-consecutive-annual-v1` in the loader.
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-annual-rejection-span-v16"`
+  (v16 combines verified dividend-yield provenance with the metric-specific
+  export horizons and checks unresolved annual rejections across the entire
+  selected growth span, not only its latest anchor; `valuation_score` remains
+  heuristic and DCF separate).
+  Financial selection is `verified-dates-consecutive-annual-v2` in the loader.
   Current price age and historical report-price pairing are limited to seven
   calendar days inclusive; unavailable prices cannot supply multiples or DCF.
   Report, KPI, price-pairing and annual-history refusals are auditable in
@@ -52,7 +52,13 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v11-market-cap-hurdle"`) — 5-year projection,
+  (`VERSION = "reverse-dcf-v12-consecutive-annual-growth"`) — historical growth
+  uses the latest consecutive positive-revenue suffix without bridging missing
+  or nonpositive observations; this calculation is distinct from v11.
+  An unresolved annual slot inside the selected fiscal span removes historical
+  growth authority; the existing explicit zero-growth fallback remains recorded
+  in assumption sources, never a CAGR across that uncertain span.
+  5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
   EBIT margin revenue-weighted over 3–5 annuals, reinvestment from
   **Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount

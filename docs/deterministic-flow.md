@@ -146,13 +146,17 @@ These are **cutoff-filtered stored observations with verified applicable
 dates**, not historical-known-then correctness or an ingestion-vintage query.
 Generic [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not
 replace these loader predicates. `SELECTION_VERSION` is
-`verified-dates-consecutive-annual-v1`. The loader returns `selection` diagnostics
+`verified-dates-consecutive-annual-v2`. The loader returns `selection` diagnostics
 also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI provenance,
 selected price date/age, historical pairings and annual fiscal ends/refusal
 reasons. Refusal reasons also appear in ranking missing data and readiness
 limitations. A quarter/R12 refusal is superseded only by a unique same-type row
 matching its verified end or its fiscal year plus report period; otherwise only
 chronology provably older than the latest same-type row becomes audit-only.
+An unresolved annual slot within the entire selected annual growth span, not
+just at or after its latest anchor, makes annual comparisons unavailable.
+Rejected slots before the selected suffix, genuinely corrected slots and
+consistent future observations remain audit-only.
 Stale prices are
 retained only as diagnostic dates, not as available closes, raw multiples or DCF
 inputs; current financial margins/balance facts can still be available.

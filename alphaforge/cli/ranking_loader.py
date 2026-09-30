@@ -26,7 +26,7 @@ from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_va
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
 
-SELECTION_VERSION = "verified-dates-consecutive-annual-v1"
+SELECTION_VERSION = "verified-dates-consecutive-annual-v2"
 MAX_PRICE_AGE_DAYS = 7
 
 
@@ -269,7 +269,7 @@ def _rejection_is_current(
     item: dict[str, Any],
     cutoff: date,
     admitted_rows: list,
-    latest_annual,
+    annual_history_start,
 ) -> bool:
     if item.get("reason") == "after cutoff":
         return False
@@ -342,10 +342,11 @@ def _rejection_is_current(
                 older_checks.append(False)
         return not (older_checks and all(older_checks))
 
-    if latest_annual is None:
+    if annual_history_start is None:
         return True
-    anchor_year = _verified_fiscal_year(latest_annual)
-    anchor_end = _verified_fiscal_end(latest_annual)
+    # An unresolved slot inside the entire selected growth span is not historical audit only.
+    anchor_year = _verified_fiscal_year(annual_history_start)
+    anchor_end = _verified_fiscal_end(annual_history_start)
     comparisons = []
     if years and anchor_year is not None:
         comparisons.append(any(year >= anchor_year for year in years))
@@ -535,14 +536,14 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             period_rows.append(row)
     annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
     admitted_annuals = [row for row in period_rows if row["period_type"] == "year"]
-    latest_annual_row = (
-        annual_period_rows[-1]
+    annual_history_start = (
+        annual_period_rows[0]
         if annual_period_rows
         else (admitted_annuals[-1] if admitted_annuals else None)
     )
     for item in selection["rejected_reports"]:
         item["current_refusal"] = _rejection_is_current(
-            item, cutoff, period_rows, latest_annual_row
+            item, cutoff, period_rows, annual_history_start
         )
     blocking_rejections = [
         item

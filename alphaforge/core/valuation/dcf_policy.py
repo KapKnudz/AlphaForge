@@ -82,7 +82,7 @@ class DcfPolicyDecision:
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v11-market-cap-hurdle"
+    VERSION = "reverse-dcf-v12-consecutive-annual-growth"
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
     TERMINAL_GROWTH = 0.02
