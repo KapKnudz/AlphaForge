@@ -365,7 +365,10 @@ def test_feed_fallback_detail_collision_composes_one_terminal_state(lane, initia
     )
     assert old["eligibility"] == initial
     target["content"]["title"] = "Invitation to presentation of Flow AB Q1 report"
-    target["content"]["attachments"][0]["tags"] = None
+    # Keep this feed well formed so the older null-parser bug cannot mask the
+    # separate provisional-revocation / detail-rejection collision.
+    target["properties"]["tags"] = []
+    target["content"]["attachments"][0]["tags"] = []
 
     class OverlappingFallback(MfnScraper):
         def discover_feed_paginated(self, *args, **kwargs):
