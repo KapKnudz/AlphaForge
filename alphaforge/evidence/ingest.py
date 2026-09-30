@@ -413,7 +413,11 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         else None
     )
     if provider_input:
-        explicit_key = "fiscal_period"
+        explicit_key = doc.get("fiscal_period_input_key") or (
+            basis.removeprefix("provider_metadata:").split("+")[0]
+            if basis.startswith("provider_metadata:")
+            else "fiscal_period"
+        )
     if explicit_key and (provider_input or not basis or basis.startswith("provider_metadata")):
         value = str(provider_input or doc[explicit_key]).strip()
         normalized = _quarter_period(value) or value.casefold()

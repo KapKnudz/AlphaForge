@@ -232,6 +232,7 @@ class RevisionRecorder:
                 "feed_report_identity",
                 "fiscal_period_source",
                 "fiscal_period_input",
+                "fiscal_period_input_key",
                 "fiscal_period_limitation",
             )
             if article.get(key) is not None

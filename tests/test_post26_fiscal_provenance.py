@@ -11,6 +11,7 @@ from alphaforge.evidence.ingest import _fiscal_period
 from alphaforge.providers.mfn.scraper import MfnScraper
 
 
+@pytest.mark.parametrize("provider_key", ["fiscal_period", "report_period", "period"])
 @pytest.mark.parametrize(
     "explicit,expected,limitation",
     [
@@ -20,14 +21,14 @@ from alphaforge.providers.mfn.scraper import MfnScraper
     ],
 )
 def test_provider_identity_is_preserved_or_explicitly_conflicted(
-    lane, explicit, expected, limitation
+    lane, provider_key, explicit, expected, limitation
 ):
     entry = item()
 
     class ProviderPeriod(MfnScraper):
         def scrape_details(self, *args, **kwargs):
             return [
-                {**article, "fiscal_period": explicit}
+                {**article, provider_key: explicit}
                 for article in super().scrape_details(*args, **kwargs)
             ]
 
@@ -37,6 +38,9 @@ def test_provider_identity_is_preserved_or_explicitly_conflicted(
     assert current["fiscal_period"] == expected
     metadata = json.loads(current["raw_metadata"])
     assert metadata["fiscal_period_input"] == explicit
+    assert metadata["fiscal_period_input_key"] == provider_key
+    if not limitation:
+        assert metadata["fiscal_period_source"].startswith(f"provider_metadata:{provider_key}")
     assert first.packet["sources"][0]["fiscal_period"] == expected
     assert first.packet["sources"][0]["fiscal_period_source"] == metadata["fiscal_period_source"]
     if limitation:

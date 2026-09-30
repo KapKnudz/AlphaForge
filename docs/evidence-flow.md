@@ -119,8 +119,10 @@ periods or permission to group candidates. Fiscal labels never invent calendar
 dates, including non-calendar years such as `2026/27`.
 
 The resolved value, `fiscal_period_source` and any original explicit
-`fiscal_period_input`/limitation are retained in the immutable observation;
-packet sources copy the value and provenance. A previously derived nonnull
+`fiscal_period_input`/limitation are retained in the immutable observation.
+`fiscal_period_input_key` preserves the original provider field (`fiscal_period`,
+`report_period`, or `period`) across replay, including unresolved conflicts.
+Packet sources copy the value and provenance. A previously derived nonnull
 value is an output, not a provider assertion. Changed interpretation rules
 require new observations under the new fingerprint, even when correcting an
 old nonnull identity. Verified independently retained bytes can be reused for

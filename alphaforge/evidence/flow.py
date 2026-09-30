@@ -2000,8 +2000,18 @@ class OneCompanyEvidenceFlow:
                 article["document_type"] = document_type(str(article.get("title") or ""))
             from alphaforge.evidence.ingest import resolve_fiscal_identity
 
-            if article.get("fiscal_period") and not article.get("fiscal_period_source"):
-                article["fiscal_period_input"] = article["fiscal_period"]
+            if not article.get("fiscal_period_source"):
+                input_key = next(
+                    (
+                        key
+                        for key in ("fiscal_period", "report_period", "period")
+                        if article.get(key)
+                    ),
+                    None,
+                )
+                if input_key:
+                    article["fiscal_period_input"] = article[input_key]
+                    article["fiscal_period_input_key"] = input_key
             fiscal, basis, limitation = resolve_fiscal_identity(article)
             article["fiscal_period"] = fiscal
             article["fiscal_period_source"] = basis
