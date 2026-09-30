@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import sqlite3
 from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,6 +22,7 @@ from alphaforge.core.valuation.dividend_yield import (
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
+    record_job,
     upsert_company,
     upsert_dividend_window_coverage,
     upsert_dividends,
@@ -248,6 +250,75 @@ def test_repository_canonicalizes_valid_dividend_date_aliases(field):
         [{field: "2025-06-01T23:59:59Z", "amount": 1, "currency": "SEK"}],
     ) == 1
     assert conn.execute("SELECT ex_date FROM dividends").fetchone()[0] == "2025-06-01"
+
+
+@pytest.mark.parametrize(
+    "invalid_row",
+    [
+        {"exDate": "2025-06-99", "amount": 1, "currency": "SEK"},
+        {"exDate": "2025-07-01", "amount": 1, "currency": "SEK", "dividendType": "bad"},
+        {"exDate": "2025-07-01", "amount": "bad", "currency": "SEK"},
+        {"exDate": "2025-07-01", "amount": -1, "currency": "SEK"},
+        {"exDate": "2025-07-01", "amount": 1, "currency": "SEK", "dividendType": 3},
+    ],
+)
+def test_dividend_batch_failure_rolls_back_before_job_commit(invalid_row):
+    conn, cid = seeded()
+    coverage(conn, cid)
+    before_loaded, before_ranking = rank(conn, cid)
+    conn.execute("UPDATE companies SET name='Pending caller work' WHERE id=?", (cid,))
+    with pytest.raises((ValueError, sqlite3.IntegrityError)):
+        upsert_dividends(
+            conn,
+            cid,
+            [
+                {"exDate": "2025-06-01", "amount": 1, "currency": "SEK"},
+                invalid_row,
+            ],
+        )
+    record_job(
+        conn,
+        "sync_dividends",
+        company_id=cid,
+        borsdata_id=1,
+        status="failed",
+        error={"code": "dividends_upsert_failed"},
+    )
+    after_loaded, after_ranking = rank(conn, cid)
+    assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 0
+    assert conn.execute("SELECT name FROM companies WHERE id=?", (cid,)).fetchone()[0] == (
+        "Pending caller work"
+    )
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?", (cid,)
+    ).fetchone()[0] == "failed"
+    assert before_loaded["valuation"].dividend_yield == 0
+    assert after_loaded["valuation"].dividend_yield == 0
+    assert after_ranking.scores[0].total_score == before_ranking.scores[0].total_score
+
+
+def test_dividend_batch_failure_rolls_back_prior_currency_update():
+    conn, cid = seeded()
+    coverage(conn, cid)
+    unknown = {"exDate": "2025-06-01", "amount": 1, "currency": None}
+    upsert_dividends(conn, cid, [unknown])
+    before_loaded, before_ranking = rank(conn, cid)
+    with pytest.raises(ValueError):
+        upsert_dividends(
+            conn,
+            cid,
+            [
+                {**unknown, "currency": "SEK"},
+                {"exDate": "2025-06-99", "amount": 1, "currency": "SEK"},
+            ],
+        )
+    after_loaded, after_ranking = rank(conn, cid)
+    assert conn.execute(
+        "SELECT currency, currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == ("", 0, 0)
+    assert before_loaded["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    assert after_loaded["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    assert after_ranking.scores[0].total_score == before_ranking.scores[0].total_score
 
 
 def test_repository_rejects_invalid_dates_without_inventing_missing_values():

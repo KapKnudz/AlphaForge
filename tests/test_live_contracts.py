@@ -366,6 +366,40 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ] * 3
             assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
 
+        with patch.object(
+            FixtureAdapter,
+            "get_dividends",
+            return_value=[
+                {
+                    "insId": 29,
+                    "exDate": "2025-08-01",
+                    "amountPaid": 9,
+                    "currencyShortName": "SEK",
+                    "dividendType": 4,
+                },
+                {
+                    "insId": 29,
+                    "exDate": "2025-08-99",
+                    "amountPaid": 1,
+                    "currencyShortName": "SEK",
+                    "dividendType": 4,
+                },
+            ],
+        ):
+            assert cmd_sync(args) == 1
+        company_id = conn.execute(
+            "SELECT id FROM companies WHERE borsdata_id=29"
+        ).fetchone()[0]
+        assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 3
+        assert conn.execute(
+            "SELECT count(*) FROM dividends WHERE company_id=? AND ex_date='2025-08-01'",
+            (company_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM jobs WHERE job_type='sync_dividends' AND company_id=?",
+            (company_id,),
+        ).fetchone()[0] == "failed"
+
 
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("BORSDATA_API_KEY"), reason="BORSDATA_API_KEY not set")
