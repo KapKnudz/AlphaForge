@@ -103,9 +103,12 @@ not a standalone yield column. DCF unavailability and provisional inputs have th
 network fetch. Its effective date predicates are:
 
 - Reports: `is_placeholder=0`, verified fiscal end and publication date,
-  `period_end <= report_date <= as_of`. Fiscal ends must match an explicit
-  fiscal-end field in the retained raw payload; legacy publication-as-end
-  keys and rows without source metadata are excluded. The writer skips rows
+  `period_end <= report_date <= as_of`. Every populated alias for publication,
+  fiscal year/end/start and report period must parse and agree; contradictory
+  or malformed aliases remain refusal provenance regardless of key order.
+  Fiscal ends must match an explicit fiscal-end field in the retained raw
+  payload; legacy publication-as-end keys and rows without source metadata are
+  excluded. The writer skips rows
   without a valid explicit fiscal end rather than inventing a key from a
   publication date or year/quarter. Rows sort by fiscal end, publication date,
   then quarter/annual/R12 (R12 wins exact ties).

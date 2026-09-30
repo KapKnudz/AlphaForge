@@ -497,6 +497,142 @@ def test_report_publication_is_a_separate_verified_date(
         assert dcf[str(cid)]["missing_information"]
 
 
+@pytest.mark.parametrize(
+    "field_names,aliases,admitted",
+    [
+        (
+            ("report_Date", "reportDate"),
+            (("report_Date", "2026-05-01"), ("reportDate", "2026-08-01")),
+            False,
+        ),
+        (
+            ("report_Date", "reportDate"),
+            (("reportDate", "2026-08-01"), ("report_Date", "2026-05-01")),
+            False,
+        ),
+        (
+            ("report_Date", "reportDate"),
+            (("report_Date", "2026-05-01"), ("reportDate", "not-a-date")),
+            False,
+        ),
+        (
+            ("report_Date", "reportDate"),
+            (("reportDate", "2026-05-01"), ("report_Date", "2026-05-01")),
+            True,
+        ),
+        (("year", "report_year"), (("year", 2026), ("report_year", 2027)), False),
+        (("year", "report_year"), (("report_year", 2027), ("year", 2026)), False),
+        (("year", "report_year"), (("year", 2026), ("report_year", "bad")), False),
+        (("year", "report_year"), (("report_year", "2026"), ("year", 2026)), True),
+        (
+            ("period_start", "period_Start"),
+            (("period_start", "2025-04-01"), ("period_Start", "2025-10-01")),
+            False,
+        ),
+        (
+            ("period_start", "period_Start"),
+            (("period_Start", "2025-10-01"), ("period_start", "2025-04-01")),
+            False,
+        ),
+        (
+            ("period_start", "period_Start"),
+            (("period_start", "2025-04-01"), ("period_Start", "bad")),
+            False,
+        ),
+        (
+            ("period_start", "period_Start"),
+            (("period_Start", "2025-04-01"), ("period_start", "2025-04-01")),
+            True,
+        ),
+        (("period", "report_period"), (("period", 5), ("report_period", 4)), False),
+        (("period", "report_period"), (("report_period", 4), ("period", 5)), False),
+        (("period", "report_period"), (("period", 5), ("report_period", "bad")), False),
+        (("period", "report_period"), (("report_period", "5"), ("period", 5)), True),
+    ],
+)
+def test_report_aliases_must_parse_and_agree(field_names, aliases, admitted):
+    payload = annual(2026)
+    for field in field_names:
+        payload.pop(field, None)
+    for field, value in aliases:
+        payload[field] = value
+
+    conn, cid = setup(periods=[payload])
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert (loaded["financial"] is not None) is admitted
+    stored = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE company_id=?", (cid,)
+    ).fetchone()
+    assert json.loads(stored["raw_payload"]) == payload
+    if admitted:
+        assert not loaded["selection"]["rejected_reports"]
+    else:
+        rejection = loaded["selection"]["rejected_reports"][0]
+        assert rejection["raw_payload"] == payload
+        assert rejection["current_refusal"]
+
+
+@pytest.mark.parametrize(
+    "aliases,admitted",
+    [
+        ((("period_end", "2026-03-31"), ("periodEnd", "2026-04-30")), False),
+        ((("periodEnd", "2026-04-30"), ("period_end", "2026-03-31")), False),
+        ((("period_end", "2026-03-31"), ("periodEnd", "bad")), False),
+        ((("periodEnd", "2026-03-31"), ("period_end", "2026-03-31")), True),
+    ],
+)
+def test_fiscal_end_aliases_are_order_independent(aliases, admitted):
+    payload = annual(2026)
+    payload.pop("period_end")
+    for field, value in aliases:
+        payload[field] = value
+    conn, cid = setup(periods=[])
+
+    assert upsert_financial_periods(conn, cid, [payload]) == int(admitted)
+    assert conn.execute("SELECT count(*) FROM financial_periods").fetchone()[0] == int(
+        admitted
+    )
+    if admitted:
+        assert load_results_for_company(conn, cid, CUTOFF)["financial"] is not None
+    else:
+        rejection = load_results_for_company(conn, cid, CUTOFF)["selection"][
+            "rejected_reports"
+        ][0]
+        assert rejection["raw_payload"] == payload
+        assert rejection["current_refusal"]
+
+
+def test_conflicting_publication_aliases_block_rank_exports(monkeypatch, tmp_path):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2026)]
+    rows.append(
+        annual(
+            2026,
+            133.1,
+            report_Date="2026-05-01",
+            reportDate="2026-08-01",
+        )
+    )
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["financial"].revenue_growth is None
+    rejection = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["raw_payload"].get("reportDate") == "2026-08-01"
+    )
+    assert rejection["current_refusal"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert score["revenue_growth"] is None
+    assert any(item.get("current_refusal") for item in exported["rejected_reports"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+
+
 def test_latest_r12_values_do_not_replace_the_annual_growth_anchor():
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     rows.extend(
@@ -816,6 +952,7 @@ def test_annual_rejections_block_only_while_unresolved_and_applicable(
     [
         ({"report_Date": "2026-08-01"}, False),
         ({"report_Date": "2026-05-01", "reportDate": "2026-08-01"}, True),
+        ({"report_Date": "2026-08-01", "reportDate": "not-a-date"}, True),
     ],
 )
 def test_future_publication_is_audit_only_without_hiding_alias_conflicts(
@@ -937,11 +1074,13 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
 
     assert upsert_financial_periods(conn, cid, [rejected]) == 1
     assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
-    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    assert upsert_financial_periods(conn, cid, [corrected, corrected]) == 2
 
-    archived = conn.execute(
+    archived_rows = conn.execute(
         "SELECT reason, raw_payload FROM financial_period_rejections"
-    ).fetchone()
+    ).fetchall()
+    assert len(archived_rows) == 1
+    archived = archived_rows[0]
     assert archived["reason"] == expected_reason
     assert json.loads(archived["raw_payload"]) == rejected
     stored = conn.execute(
@@ -982,6 +1121,36 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
     assert dcf[str(cid)]["selection"] == exported
 
 
+def test_conflicting_alias_original_is_retained_once_across_repeated_replacement():
+    conn, cid = setup(periods=[annual(2025)])
+    rejected = annual(
+        2026,
+        110,
+        report_Date="2026-05-01",
+        reportDate="2026-08-01",
+    )
+    corrected = annual(2026, 110)
+
+    assert upsert_financial_periods(conn, cid, [rejected]) == 1
+    assert upsert_financial_periods(conn, cid, [corrected, corrected]) == 2
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchall()
+    assert len(archived) == 1
+    assert archived[0]["reason"] == "fiscal end or publication date unverified"
+    assert json.loads(archived[0]["raw_payload"]) == rejected
+
+    audit = next(
+        item
+        for item in load_results_for_company(conn, cid, CUTOFF)["selection"][
+            "rejected_reports"
+        ]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == rejected
+    assert audit["current_refusal"]
+
+
 @pytest.mark.parametrize("period_type", ["year", "r12", "quarter"])
 def test_conflicting_fiscal_aliases_remain_current_after_same_key_correction(
     period_type, monkeypatch, tmp_path
@@ -1004,7 +1173,7 @@ def test_conflicting_fiscal_aliases_remain_current_after_same_key_correction(
     )
     corrected = dict(rejected)
     corrected.pop("periodEnd")
-    assert upsert_financial_periods(conn, cid, [rejected]) == 1
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
     assert upsert_financial_periods(conn, cid, [corrected]) == 1
     packet(conn, cid)
 

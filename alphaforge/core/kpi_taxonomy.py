@@ -6,6 +6,9 @@ imports raw keys.
 
 from __future__ import annotations
 
+from datetime import date
+from typing import Any
+
 # Börsdata report fields (GET /v1/instruments/reports) — raw → canonical
 REPORT_FIELD_MAP: dict[str, str] = {
     "revenues": "revenue",
@@ -47,6 +50,7 @@ REPORT_FIELD_MAP: dict[str, str] = {
     "currencyRatio": "currency_ratio",
     "report_Date": "report_date",
     "reportDate": "report_date",
+    "ReportDate": "report_date",
     "periodEnd": "period_end",
     "period_End": "period_end",
     "reportEndDate": "period_end",
@@ -55,6 +59,7 @@ REPORT_FIELD_MAP: dict[str, str] = {
     "currency_ratio": "currency_ratio",
     "year": "report_year",
     "period": "report_period",
+    "period_Start": "period_start",
     "broken_Fiscal_Year": "broken_fiscal_year",
 }
 
@@ -91,6 +96,45 @@ REPORT_PROPERTY_MAP: dict[str, str] = {
 
 def canonical_report_field(raw_key: str) -> str | None:
     return REPORT_FIELD_MAP.get(raw_key)
+
+
+def report_alias_values(payload: dict[str, Any], canonical_field: str) -> tuple[Any, ...]:
+    return tuple(
+        value
+        for key, value in payload.items()
+        if value is not None
+        and (key == canonical_field or REPORT_FIELD_MAP.get(key) == canonical_field)
+    )
+
+
+def report_date_aliases(
+    payload: dict[str, Any], canonical_field: str
+) -> tuple[frozenset[date], bool]:
+    parsed = set()
+    malformed = False
+    for value in report_alias_values(payload, canonical_field):
+        try:
+            parsed.add(date.fromisoformat(str(value)[:10]))
+        except ValueError:
+            malformed = True
+    return frozenset(parsed), malformed
+
+
+def report_integer_aliases(
+    payload: dict[str, Any], canonical_field: str
+) -> tuple[frozenset[int], bool]:
+    parsed = set()
+    malformed = False
+    for value in report_alias_values(payload, canonical_field):
+        if isinstance(value, bool):
+            malformed = True
+        elif isinstance(value, int):
+            parsed.add(value)
+        elif isinstance(value, str) and value.strip().isdigit():
+            parsed.add(int(value.strip()))
+        else:
+            malformed = True
+    return frozenset(parsed), malformed
 
 
 def is_known_kpi(kpi_id: int) -> bool:

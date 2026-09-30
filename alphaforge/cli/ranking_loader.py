@@ -10,7 +10,7 @@ from typing import Any
 from alphaforge.core.financial.calculator import FinancialCalculator
 from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
-from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP
+from alphaforge.core.kpi_taxonomy import report_date_aliases, report_integer_aliases
 from alphaforge.core.ranking.sector_rules import ranking_model_for_branch
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
@@ -45,16 +45,9 @@ def _payload(row) -> dict:
 
 
 def _verified_fiscal_end(row) -> date | None:
-    # Retained payload verifies legacy keys too: old builds could substitute
-    # publication dates. A bare key without source metadata is not assurance.
-    raw = _payload(row)
-    ends = {
-        _date(value)
-        for key, value in raw.items()
-        if (key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end") and value is not None
-    }
+    ends, malformed = report_date_aliases(_payload(row), "period_end")
     stored = _date(row["period_end"])
-    return stored if stored is not None and ends == {stored} else None
+    return stored if not malformed and stored is not None and ends == {stored} else None
 
 
 def _fiscal_year(value: Any) -> int | None:
@@ -69,6 +62,28 @@ def _fiscal_year(value: Any) -> int | None:
     return year if 1 <= year <= 9999 else None
 
 
+def _verified_publication(row) -> date | None:
+    publications, malformed = report_date_aliases(_payload(row), "report_date")
+    stored = _date(row["report_date"])
+    return stored if not malformed and stored is not None and publications == {stored} else None
+
+
+def _verified_fiscal_year(row) -> int | None:
+    years, malformed = report_integer_aliases(_payload(row), "report_year")
+    stored = _fiscal_year(row["report_year"])
+    return stored if not malformed and stored is not None and years == {stored} else None
+
+
+def _verified_report_period(row) -> int | None:
+    periods, malformed = report_integer_aliases(_payload(row), "report_period")
+    stored_values, stored_malformed = report_integer_aliases(
+        {"report_period": row["report_period"]}, "report_period"
+    )
+    if malformed or stored_malformed or len(stored_values) != 1 or periods != stored_values:
+        return None
+    return next(iter(stored_values))
+
+
 def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     annuals = [row for row in rows if row["period_type"] == "year"]
     if not annuals:
@@ -76,7 +91,7 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
 
     metadata = []
     for row in annuals:
-        year = _fiscal_year(row["report_year"])
+        year = _verified_fiscal_year(row)
         end = _verified_fiscal_end(row)
         currency = str(row["currency"]).upper() if row["currency"] else None
         issues = []
@@ -84,11 +99,12 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
             issues.append("annual fiscal-year metadata unverified")
         if end is None:
             issues.append("annual fiscal end unverified")
-        raw = _payload(row)
-        start_value = raw.get("period_start", raw.get("period_Start"))
-        if start_value is not None:
-            start = _date(start_value)
-            if start is None or end is None or not 365 <= (end - start).days + 1 <= 366:
+        starts, malformed_start = report_date_aliases(_payload(row), "period_start")
+        if malformed_start or len(starts) > 1:
+            issues.append("annual stub or duration unverified")
+        elif starts:
+            start = next(iter(starts))
+            if end is None or not 365 <= (end - start).days + 1 <= 366:
                 issues.append("annual stub or duration unverified")
         if currency is None:
             issues.append("annual currency comparability unverified")
@@ -262,68 +278,25 @@ def _rejection_is_current(
         return False
 
     raw = item.get("raw_payload") or {}
-    years = set()
-    ends = set()
-    periods = set()
-    publications = set()
-    invalid_identity = False
+    years, malformed_year = report_integer_aliases(raw, "report_year")
+    ends, malformed_end = report_date_aliases(raw, "period_end")
+    periods, malformed_period = report_integer_aliases(raw, "report_period")
+    publications, malformed_publication = report_date_aliases(raw, "report_date")
+    starts, malformed_start = report_date_aliases(raw, "period_start")
+    invalid_identity = (
+        malformed_year
+        or malformed_end
+        or malformed_period
+        or malformed_publication
+        or malformed_start
+        or len(years) > 1
+        or len(ends) > 1
+        or len(periods) > 1
+        or len(publications) > 1
+        or len(starts) > 1
+        or any(_fiscal_year(value) is None for value in years)
+    )
 
-    year_values = [item.get("report_year")]
-    year_values.extend(
-        value
-        for key, value in raw.items()
-        if key == "report_year" or REPORT_FIELD_MAP.get(key) == "report_year"
-    )
-    for value in year_values:
-        if value is None:
-            continue
-        parsed = _fiscal_year(value)
-        if parsed is None:
-            invalid_identity = True
-        else:
-            years.add(parsed)
-
-    end_values = [item.get("period_end")]
-    end_values.extend(
-        value
-        for key, value in raw.items()
-        if key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end"
-    )
-    for value in end_values:
-        if value is None:
-            continue
-        parsed = _date(value)
-        if parsed is None:
-            invalid_identity = True
-        else:
-            ends.add(parsed)
-
-    period_values = [item.get("report_period")]
-    period_values.extend(
-        value
-        for key, value in raw.items()
-        if key == "report_period" or REPORT_FIELD_MAP.get(key) == "report_period"
-    )
-    for value in period_values:
-        if value is None:
-            continue
-        parsed = str(value).strip()
-        if parsed:
-            periods.add(parsed)
-        else:
-            invalid_identity = True
-
-    publication_values = [item.get("report_date")]
-    publication_values.extend(
-        value
-        for key, value in raw.items()
-        if key == "report_date" or REPORT_FIELD_MAP.get(key) == "report_date"
-    )
-    publications.update(
-        parsed
-        for value in publication_values
-        if value is not None and (parsed := _date(value)) is not None
-    )
     future_checks = []
     if years:
         future_checks.append(all(value > cutoff.year for value in years))
@@ -331,23 +304,15 @@ def _rejection_is_current(
         future_checks.append(all(value > cutoff for value in ends))
     if publications:
         future_checks.append(all(value > cutoff for value in publications))
-    if any(future_checks):
+    if not invalid_identity and any(future_checks):
         return False
 
     has_slot_identity = bool(years or ends)
     superseded = not invalid_identity and has_slot_identity and any(
         row["period_type"] == item.get("period_type")
-        and (not years or years == {_fiscal_year(row["report_year"])})
+        and (not years or years == {_verified_fiscal_year(row)})
         and (not ends or ends == {_verified_fiscal_end(row)})
-        and (
-            not periods
-            or periods
-            == {
-                str(row["report_period"]).strip()
-                if row["report_period"] is not None
-                else None
-            }
-        )
+        and (not periods or periods == {_verified_report_period(row)})
         for row in admitted_rows
     )
     if superseded:
@@ -357,7 +322,7 @@ def _rejection_is_current(
 
     if latest_annual is None:
         return True
-    anchor_year = _fiscal_year(latest_annual["report_year"])
+    anchor_year = _verified_fiscal_year(latest_annual)
     anchor_end = _verified_fiscal_end(latest_annual)
     comparisons = []
     if years and anchor_year is not None:
@@ -407,10 +372,10 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         cash=_number(row["cash"]),
         eps=_number(row["eps"]),
         dividend_per_share=_number(row["dividend_per_share"]),
-        year=_fiscal_year(row["report_year"]),
-        period=row["report_period"],
+        year=_verified_fiscal_year(row),
+        period=_verified_report_period(row),
         period_end=_verified_fiscal_end(row),
-        report_date=_date(row["report_date"]),
+        report_date=_verified_publication(row),
         broken_fiscal_year=row["broken_fiscal_year"],
         currency=row["currency"],
     )
@@ -496,16 +461,33 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     ).fetchall()
     period_rows = []
     for row in stored_period_rows:
-        end, publication = _verified_fiscal_end(row), _date(row["report_date"])
+        raw = _payload(row)
+        end = _verified_fiscal_end(row)
+        publication = _verified_publication(row)
+        years, malformed_year = report_integer_aliases(raw, "report_year")
+        report_periods, malformed_period = report_integer_aliases(raw, "report_period")
+        starts, malformed_start = report_date_aliases(raw, "period_start")
+        fiscal_year = _verified_fiscal_year(row)
+        report_period = _verified_report_period(row)
         reason = None
         if row["is_placeholder"]:
             reason = "placeholder"
-        elif (end is not None and end > cutoff) or (
-            publication is not None and publication > cutoff
-        ):
-            reason = "after cutoff"
         elif end is None or publication is None:
             reason = "fiscal end or publication date unverified"
+        elif malformed_year or len(years) > 1 or (years and fiscal_year is None):
+            reason = "fiscal-year metadata unverified"
+        elif (
+            malformed_period
+            or len(report_periods) > 1
+            or (report_periods and report_period is None)
+        ):
+            reason = "report period metadata unverified"
+        elif malformed_start or len(starts) > 1:
+            reason = "fiscal start metadata unverified"
+        elif end > cutoff or publication > cutoff or (
+            fiscal_year is not None and fiscal_year > cutoff.year
+        ):
+            reason = "after cutoff"
         elif publication < end:
             reason = "publication precedes fiscal end"
         if reason:

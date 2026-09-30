@@ -8,7 +8,11 @@ from datetime import date, timedelta
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
-from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP
+from alphaforge.core.kpi_taxonomy import (
+    REPORT_FIELD_MAP,
+    report_date_aliases,
+    report_integer_aliases,
+)
 from alphaforge.core.valuation.dividend_yield import is_known_currency
 
 
@@ -164,47 +168,65 @@ def _record_financial_period_rejection(
 
 def _intrinsic_period_rejection_reason(row: Any) -> str | None:
     raw = json.loads(row["raw_payload"])
-
-    def parsed_date(value: Any) -> date | None:
-        try:
-            return date.fromisoformat(str(value)[:10])
-        except ValueError:
-            return None
-
-    stored_end = parsed_date(row["period_end"])
-    raw_ends = {
-        parsed_date(value)
-        for key, value in raw.items()
-        if (key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end")
-        and value is not None
-    }
-    verified_end = stored_end if stored_end is not None and raw_ends == {stored_end} else None
-    publication = parsed_date(row["report_date"])
+    ends, malformed_end = report_date_aliases(raw, "period_end")
+    publications, malformed_publication = report_date_aliases(raw, "report_date")
+    years, malformed_year = report_integer_aliases(raw, "report_year")
+    periods, malformed_period = report_integer_aliases(raw, "report_period")
+    starts, malformed_start = report_date_aliases(raw, "period_start")
+    stored_ends, stored_end_malformed = report_date_aliases(
+        {"period_end": row["period_end"]}, "period_end"
+    )
+    stored_publications, stored_publication_malformed = report_date_aliases(
+        {"report_date": row["report_date"]}, "report_date"
+    )
+    stored_years, _ = report_integer_aliases(
+        {"report_year": row["report_year"]}, "report_year"
+    )
+    stored_periods, _ = report_integer_aliases(
+        {"report_period": row["report_period"]}, "report_period"
+    )
+    verified_end = (
+        next(iter(ends))
+        if not malformed_end
+        and not stored_end_malformed
+        and len(ends) == 1
+        and ends == stored_ends
+        else None
+    )
+    publication = (
+        next(iter(publications))
+        if not malformed_publication
+        and not stored_publication_malformed
+        and len(publications) == 1
+        and publications == stored_publications
+        else None
+    )
     if row["is_placeholder"]:
         return "placeholder"
     if verified_end is None or publication is None:
         return "fiscal end or publication date unverified"
     if publication < verified_end:
         return "publication precedes fiscal end"
+    if malformed_year or len(years) > 1 or (years and years != stored_years):
+        if row["period_type"] == "year":
+            return "annual fiscal-year metadata unverified"
+        return "fiscal-year metadata unverified"
+    if malformed_period or len(periods) > 1 or (periods and periods != stored_periods):
+        return "report period metadata unverified"
+    if malformed_start or len(starts) > 1:
+        if row["period_type"] == "year":
+            return "annual stub or duration unverified"
+        return "fiscal start metadata unverified"
     if row["period_type"] != "year":
         return None
 
     reasons = []
-    year = row["report_year"]
-    if isinstance(year, bool):
-        fiscal_year = None
-    elif isinstance(year, int):
-        fiscal_year = year
-    elif isinstance(year, str) and year.strip().isdigit():
-        fiscal_year = int(year.strip())
-    else:
-        fiscal_year = None
+    fiscal_year = next(iter(years)) if len(years) == 1 else None
     if fiscal_year is None or not 1 <= fiscal_year <= 9999:
         reasons.append("annual fiscal-year metadata unverified")
-    start_value = raw.get("period_start", raw.get("period_Start"))
-    if start_value is not None:
-        start = parsed_date(start_value)
-        if start is None or not 365 <= (verified_end - start).days + 1 <= 366:
+    if starts:
+        start = next(iter(starts))
+        if not 365 <= (verified_end - start).days + 1 <= 366:
             reasons.append("annual stub or duration unverified")
     if not row["currency"]:
         reasons.append("annual currency comparability unverified")
@@ -279,9 +301,23 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
     count = 0
     for p in periods:
         # Use-core kpi_taxonomy to map? Keep raw mapping here minimal
-        # Determine is_placeholder: revenue 0.0 + report_Date null → placeholder
+        publications, malformed_publication = report_date_aliases(p, "report_date")
+        years, malformed_year = report_integer_aliases(p, "report_year")
+        report_periods, malformed_period = report_integer_aliases(p, "report_period")
+        report_date = (
+            next(iter(publications)).isoformat()
+            if not malformed_publication and len(publications) == 1
+            else None
+        )
+        report_year = (
+            next(iter(years)) if not malformed_year and len(years) == 1 else None
+        )
+        report_period = (
+            next(iter(report_periods))
+            if not malformed_period and len(report_periods) == 1
+            else None
+        )
         revenue = p.get("revenues")
-        report_date = p.get("report_Date") or p.get("reportDate") or p.get("ReportDate")
         is_placeholder = 1 if (revenue == 0.0 or revenue == 0) and report_date is None else 0
         # If is_placeholder and all core financials are null/0 → quarantine
         # Respect plan: is_placeholder=1 rows never enter ranking/valuation (WHERE is_placeholder=0)
@@ -314,22 +350,19 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 mapped[canon] = v
         # period_type / period_end handling — caller supplies period_type if not in payload
         period_type = p.get("period_type") or mapped.get("period_type") or "year"
-        period_end = p.get("period_end") or mapped.get("period_end")
-        # Publication and year/quarter labels are not fiscal-end evidence.
-        # Unkeyable rows are not persisted under a manufactured fiscal date.
-        try:
-            period_end = date.fromisoformat(str(period_end)[:10]).isoformat()
-        except (TypeError, ValueError):
+        period_ends, malformed_period_end = report_date_aliases(p, "period_end")
+        if malformed_period_end or len(period_ends) != 1:
             _record_financial_period_rejection(
                 conn,
                 company_id,
                 "fiscal end unavailable or invalid",
                 period_type,
-                p.get("year") or p.get("report_year"),
-                p.get("period") or p.get("report_period"),
+                report_year,
+                report_period,
                 raw_payload,
             )
             continue
+        period_end = next(iter(period_ends)).isoformat()
         existing = conn.execute(
             """
             SELECT * FROM financial_periods
@@ -394,8 +427,8 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 company_id,
                 period_type,
                 period_end,
-                p.get("year") or p.get("report_year"),
-                p.get("period") or p.get("report_period"),
+                report_year,
+                report_period,
                 report_date,
                 p.get("broken_Fiscal_Year", p.get("broken_fiscal_year")),
                 currency,
