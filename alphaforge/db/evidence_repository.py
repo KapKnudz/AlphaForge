@@ -989,6 +989,7 @@ def manifest_v2_projection(
     artifact_store: Any | None = None,
     report_rules_fingerprint: str | None = None,
     excluded_source_urls: set[str] | None = None,
+    _retained_observation_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Project current immutable observations into manifest candidates and packet rows.
 
@@ -997,6 +998,20 @@ def manifest_v2_projection(
     mutable legacy document tables.
     """
     observations = current_candidate_observations(conn, company_id=company_id, as_of=as_of)
+    if _retained_observation_id is not None:
+        # Acquisition-only lookup of an explicitly linked original binding.
+        # This mode NEVER returns packet rows or replaces current selection.
+        rows = conn.execute(
+            """SELECT o.*, c.candidate_key, c.release_source_url,
+                      b.batch_id AS stable_batch_id, b.effective_at
+               FROM evidence_candidate_observations o
+               JOIN evidence_candidates c ON c.id=o.candidate_id
+               JOIN evidence_observation_batches b ON b.id=o.batch_id
+               WHERE c.company_id=? AND b.as_of <= ?
+                 AND o.candidate_observation_id=?""",
+            (company_id, as_of, _retained_observation_id),
+        ).fetchall()
+        observations = [dict(row) for row in rows]
     if artifact_store is None:
         from alphaforge.evidence.artifact_store import ArtifactUnavailableError
 
@@ -1258,7 +1273,66 @@ def manifest_v2_projection(
         selected.append(rows[0])
     candidates.sort(key=lambda row: str(row["source_url"]))
     selected.sort(key=lambda row: str(row["source_url"]))
-    return candidates, selected
+    return candidates, [] if _retained_observation_id is not None else selected
+
+
+def retained_candidate_binding(
+    conn: Any,
+    *,
+    company_id: int,
+    as_of: str,
+    source_url: str,
+    candidate_id: int,
+    observation_id: str | None,
+    publication_cutoffs: dict[str, str],
+    artifact_store: Any,
+) -> dict[str, Any] | None:
+    """Verify exact retained ownership, never fall back in packet selection.
+
+    Older failed observations predate explicit retention links. For those,
+    locate the last complete binding of this exact company/candidate/URL only.
+    The caller must still acquire fresh current admission, not its old facts.
+    """
+    if observation_id is None:
+        original = conn.execute(
+            """SELECT o.candidate_observation_id
+               FROM evidence_candidate_observations o
+               JOIN evidence_candidates c ON c.id=o.candidate_id
+               JOIN evidence_observation_batches b ON b.id=o.batch_id
+               WHERE c.company_id=? AND c.id=? AND c.release_source_url=?
+                 AND b.as_of <= ? AND o.eligibility='eligible'
+                 AND o.attachment_observation_id IS NOT NULL AND o.extraction_id IS NOT NULL
+               ORDER BY b.as_of DESC, b.effective_at DESC, b.batch_id DESC LIMIT 1""",
+            (company_id, candidate_id, source_url, as_of),
+        ).fetchone()
+        if original is None:
+            return None
+        observation_id = original[0]
+    original = conn.execute(
+        """SELECT o.id FROM evidence_candidate_observations o
+           JOIN evidence_candidates c ON c.id=o.candidate_id
+           JOIN evidence_observation_batches b ON b.id=o.batch_id
+           WHERE o.candidate_observation_id=? AND c.company_id=?
+             AND c.id=? AND c.release_source_url=? AND b.as_of <= ?""",
+        (observation_id, company_id, candidate_id, source_url, as_of),
+    ).fetchone()
+    if original is None:
+        return None
+    candidates, packet_rows = manifest_v2_projection(
+        conn,
+        company_id=company_id,
+        as_of=as_of,
+        publication_cutoffs=publication_cutoffs,
+        artifact_store=artifact_store,
+        _retained_observation_id=observation_id,
+    )
+    assert not packet_rows
+    if len(candidates) != 1:
+        return None
+    retained = candidates[0]
+    if retained["source_url"] != source_url or not retained.get("immutable_extraction_id"):
+        return None
+    return retained
 
 
 def has_manifest_v2_observations(conn: Any, *, company_id: int, as_of: str) -> bool:

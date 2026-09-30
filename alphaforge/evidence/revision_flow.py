@@ -233,6 +233,7 @@ class RevisionRecorder:
                 "feed_report_evidence",
                 "canonical_url",
                 "mfn_detail_html",
+                "retained_source_observation_id",
                 "fiscal_period_source",
                 "fiscal_period_input",
                 "fiscal_period_input_key",

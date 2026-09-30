@@ -530,3 +530,127 @@ def test_original_html_reproves_attachment_selection_not_old_decoded_tier(lane, 
     assert metadata["attachment_tier"] == "mfn-primary"
     assert metadata["mfn_detail_html"]
     assert rebuilt.pdf_fetch_attempts == 0
+
+
+@pytest.mark.parametrize("change_config", [False, True])
+@pytest.mark.parametrize("legacy_link", [False, True])
+def test_failed_offfeed_revalidation_can_recover_without_feed_or_pdf(
+    lane, monkeypatch, change_config, legacy_link
+):
+    entry = cis_entry()
+    page = cis_detail(entry)
+    with historical_rules(monkeypatch, omit=("canonical_url",)):
+        first, _ = run(lane, [entry], pages={entry["url"]: page})
+        before = observations(lane)
+    assert first.status == "complete"
+    failed_page = page.replace(
+        '<meta property="article:published_time" content="2026-07-15T08:00:00Z">', ""
+    )
+    if legacy_link:
+        with historical_rules(monkeypatch, version=9, omit=("retained_source_observation_id",)):
+            failed, _ = run(lane, [], pages={entry["url"]: failed_page}, fetch=False)
+    else:
+        failed, _ = run(lane, [], pages={entry["url"]: failed_page}, fetch=False)
+    assert failed.status == "evidence_incomplete"
+    incomplete = observations(lane)
+    assert incomplete[0]["eligibility"] == "incomplete"
+    limits = EvidenceResourceLimits(max_pages=1 if change_config else 50)
+    recovered, requested = run(lane, [], pages={entry["url"]: page}, limits=limits, fetch=False)
+    assert recovered.status == "complete"
+    assert [url for url in requested if "?offset=" not in url] == [entry["url"]]
+    assert recovered.pdf_fetch_attempts == 0
+    after = observations(lane)
+    assert after[0]["candidate_id"] == before[0]["candidate_id"]
+    assert after[0]["candidate_observation_id"] != incomplete[0]["candidate_observation_id"]
+    assert (after[0]["extraction_id"] != before[0]["extraction_id"]) == change_config
+    assert recovered.completeness == {"quarterly": {"expected": 1, "retained": 1}}
+    assert gate(recovered.packet, lane[1]) == "ready"
+    assert_preserved(lane, incomplete, *historical_manifest(lane, first.packet))
+    manifest = view(lane)[1].to_dict()
+    replay, requested = run(lane, [], limits=limits, fetch=False)
+    assert all("?offset=" in url for url in requested)
+    assert replay.packet_hash == recovered.packet_hash
+    assert view(lane)[1].to_dict() == manifest
+    assert observations(lane) == after
+
+
+def test_failed_retry_cannot_select_old_good_evidence_and_missing_bytes_block(lane, monkeypatch):
+    entry = cis_entry()
+    page = cis_detail(entry)
+    with historical_rules(monkeypatch, omit=("canonical_url",)):
+        first, _ = run(lane, [entry], pages={entry["url"]: page})
+        binding = view(lane)[1].cache[0]
+    bad = cis_detail(entry, issuer="foreign")
+    failed, _ = run(lane, [], pages={entry["url"]: bad}, fetch=False)
+    assert failed.status == "evidence_incomplete"
+    again, requested = run(lane, [], pages={entry["url"]: bad}, fetch=False)
+    assert again.status == "evidence_incomplete"
+    assert again.packet is None
+    assert [url for url in requested if "?offset=" not in url] == [entry["url"]]
+    assert again.pdf_fetch_attempts == 0
+    assert gate(None, lane[1]) == "evidence_blocked"
+    digest = binding["attachment_sha256"]
+    (lane[2].root / "sha256" / digest[:2] / f"{digest}.pdf").unlink()
+    missing, requested = run(lane, [], pages={entry["url"]: page}, fetch=False)
+    assert missing.status == "evidence_incomplete"
+    assert missing.packet is None
+    assert all(
+        "?offset=" in url for url in requested
+    )  # No metadata/PDF substitution for lost bytes.
+    assert validate_frozen_packet(first.packet)
+
+
+def test_latest_failed_feed_title_requires_fresh_proof_and_independent_acquisition(
+    lane, monkeypatch
+):
+    entry = cis_entry()
+    page = cis_detail(entry)
+    with historical_rules(monkeypatch, version=9):
+        first, _ = run(lane, [entry], pages={entry["url"]: page})
+    original = observations(lane)[0]
+    revised = {**entry, "content": {**entry["content"], "title": "Interim report Q2 2026 revised"}}
+    bad = page.replace(
+        '<meta property="article:published_time" content="2026-07-15T08:00:00Z">', ""
+    )
+    bad = bad.replace(entry["content"]["title"], revised["content"]["title"])
+    failed, _ = run(lane, [revised], pages={entry["url"]: bad}, fetch=False)
+    assert failed.status == "evidence_incomplete"
+    assert "retained_source_observation_id" not in json.loads(observations(lane)[0]["raw_metadata"])
+    again, requested = run(lane, [], pages={entry["url"]: bad}, fetch=False)
+    assert again.status == "evidence_incomplete"
+    assert again.packet is None  # Old healthy HTML is not current admission.
+    assert [url for url in requested if "?offset=" not in url] == [entry["url"]]
+    new_page = cis_detail(
+        revised, body="Interim report April-June 2026. Revised operating discussion."
+    )
+    recovered, requested = run(lane, [], pages={entry["url"]: new_page})
+    assert recovered.status == "complete"
+    assert recovered.pdf_fetch_attempts == 1  # Changed source body cannot borrow old binding.
+    current = observations(lane)[0]
+    assert current["authoritative_feed_title"] == revised["content"]["title"]
+    assert current["attachment_observation_id"] != original["attachment_observation_id"]
+    assert current["candidate_id"] == original["candidate_id"]
+    assert validate_frozen_packet(first.packet)
+
+
+@pytest.mark.parametrize("wrong", ["company", "candidate", "url"])
+def test_retention_lookup_is_exact_and_never_returns_packet_selection(lane, wrong):
+    from alphaforge.db.evidence_repository import retained_candidate_binding
+
+    first, _ = run(lane, [item()])
+    current = observations(lane)[0]
+    params = {
+        "company_id": lane[1],
+        "as_of": AS_OF,
+        "source_url": current["release_source_url"],
+        "candidate_id": current["candidate_id"],
+        "observation_id": current["candidate_observation_id"],
+        "publication_cutoffs": {"annual": "2021-09-29", "quarterly": "2024-09-29"},
+        "artifact_store": lane[2],
+    }
+    params[{"company": "company_id", "candidate": "candidate_id", "url": "source_url"}[wrong]] = (
+        "https://mfn.se/a/flow/other" if wrong == "url" else 9999
+    )
+    assert retained_candidate_binding(lane[0], **params) is None
+    assert observations(lane)[0] == current
+    assert load_evidence_packet(lane[0], lane[1], AS_OF)["packet_hash"] == first.packet_hash

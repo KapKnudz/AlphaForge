@@ -279,6 +279,7 @@ def _retained_source_article(
         # A derived old fiscal period is not a new provider assertion. Original
         # provider input/key provenance, if present, is retained in metadata.
         "fiscal_period": None,
+        "retained_source_observation_id": cached["candidate_observation_id"],
     }
     sufficient = bool(
         metadata.get("mfn_slug") == mfn_slug
@@ -1554,10 +1555,20 @@ class OneCompanyEvidenceFlow:
         revision_recorder = None
         cached_v2: dict[str, dict[str, Any]] = {}
         current_v2: dict[str, dict[str, Any]] = {}
+        retained_retries: set[str] = set()
         if self.artifact_store is not None and not dry_run:
-            from alphaforge.db.evidence_repository import current_candidate_observations
+            from alphaforge.db.evidence_repository import (
+                current_candidate_observations,
+                retained_candidate_binding,
+            )
             from alphaforge.evidence.revision_flow import RevisionRecorder
 
+            current_v2 = {
+                str(record["release_source_url"]): record
+                for record in current_candidate_observations(
+                    self.conn, company_id=company_id, as_of=as_of[:10]
+                )
+            }
             # Cache and packet selection are roles of the same verified view.
             # Missing/corrupt retained bytes block before any URL reacquisition.
             try:
@@ -1570,6 +1581,49 @@ class OneCompanyEvidenceFlow:
                     artifact_store=self.artifact_store,
                     excluded_source_urls=revoked_feed_urls,
                 )
+                cached_v2 = {
+                    str(record["source_url"]): record
+                    for record in prior_view.cache
+                    if record.get("candidate_observation_id")
+                }
+                for source_url, current in current_v2.items():
+                    metadata = json.loads(current["raw_metadata"])
+                    if not isinstance(metadata, dict):
+                        continue
+                    reference = metadata.get("retained_source_observation_id")
+                    if (
+                        current["eligibility"] != "incomplete"
+                        and not (
+                            current["eligibility"] == "rejected"
+                            and (
+                                reference
+                                or current["eligibility_reason"]
+                                in {
+                                    "canonical_issuer_unconfirmed",
+                                    "issuer_mismatch",
+                                    "mfn_report_attachment_mismatch",
+                                    AMBIGUOUS_SELECTION_SKIP_REASON,
+                                }
+                            )
+                        )
+                    ) or source_url in revoked_feed_urls:
+                        continue
+                    retained = retained_candidate_binding(
+                        self.conn,
+                        company_id=company_id,
+                        as_of=as_of[:10],
+                        source_url=source_url,
+                        candidate_id=current["candidate_id"],
+                        observation_id=reference,
+                        publication_cutoffs={
+                            kind: _resolve_cutoff(as_of, window, kind)
+                            for kind in ("annual", "quarterly")
+                        },
+                        artifact_store=self.artifact_store,
+                    )
+                    if retained is not None:
+                        cached_v2[source_url] = retained
+                        retained_retries.add(source_url)
             except Exception as exc:
                 from alphaforge.evidence.artifact_store import ArtifactStoreError
 
@@ -1584,17 +1638,6 @@ class OneCompanyEvidenceFlow:
                         message=str(exc),
                     )
                 )
-            cached_v2 = {
-                str(record["source_url"]): record
-                for record in prior_view.cache
-                if record.get("candidate_observation_id")
-            }
-            current_v2 = {
-                str(record["release_source_url"]): record
-                for record in current_candidate_observations(
-                    self.conn, company_id=company_id, as_of=as_of[:10]
-                )
-            }
             revision_recorder = RevisionRecorder(
                 self.conn,
                 self.artifact_store,
@@ -1760,17 +1803,33 @@ class OneCompanyEvidenceFlow:
                 if (
                     source_url in seen_feed_urls
                     or source_url in revoked_feed_urls
-                    or cached["report_rules_fingerprint"] == active_rules["fingerprint"]
+                    or (
+                        cached["report_rules_fingerprint"] == active_rules["fingerprint"]
+                        and source_url not in retained_retries
+                    )
                 ):
                     continue
+                source_inputs = cached
+                if source_url in retained_retries:
+                    # Byte ownership is original, but the source inputs must
+                    # reflect the latest failed evidence, never an older title
+                    # or provider assertion hidden by a healthy cached snapshot.
+                    current = current_v2[source_url]
+                    source_inputs = {
+                        **cached,
+                        "title": current["authoritative_feed_title"] or current["detail_title"],
+                        "raw_metadata": json.loads(current["raw_metadata"]),
+                    }
                 article, sufficient = _retained_source_article(
-                    cached,
+                    source_inputs,
                     mfn_slug=mapping["mfn_slug"],
                     issuer_token=issuer_token,
                     base_url=getattr(self.scraper, "base_url", "https://mfn.se"),
                 )
                 retained_rebuilds[source_url] = article
-                if sufficient:
+                # More recent failed evidence cannot be replaced by an earlier
+                # healthy snapshot. Retry must acquire fresh exact-URL proof.
+                if sufficient and source_url not in retained_retries:
                     retained_details.append(article)
                 elif (
                     len(unseen_feed) < detail_budget
