@@ -822,6 +822,111 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
 
 
 @pytest.mark.parametrize(
+    "defect,expected_reason",
+    [
+        ("r12_publication", "fiscal end or publication date unverified"),
+        ("annual_publication", "fiscal end or publication date unverified"),
+        ("publication_order", "publication precedes fiscal end"),
+        ("fiscal_end", "fiscal end or publication date unverified"),
+        ("annual_year", "annual fiscal-year metadata unverified"),
+        ("annual_stub", "annual stub or duration unverified"),
+        ("annual_currency", "annual currency comparability unverified"),
+        ("placeholder", "placeholder"),
+    ],
+)
+def test_keyable_rejection_survives_same_slot_correction_and_exports(
+    defect, expected_reason, monkeypatch, tmp_path
+):
+    annuals = []
+    for year in range(2023, 2027 if defect == "r12_publication" else 2026):
+        revenue = 100 * 1.1 ** (year - 2023)
+        annuals.append(annual(year, revenue, ebit=revenue * 0.2))
+    conn, cid = setup(periods=annuals)
+    if defect == "r12_publication":
+        rejected = annual(
+            2026,
+            150,
+            period_type="r12",
+            period=1,
+            period_end="2026-05-31",
+            report_Date=None,
+            ebit=30,
+        )
+        corrected = annual(
+            2026,
+            150,
+            period_type="r12",
+            period=1,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+            ebit=30,
+        )
+    else:
+        rejected = annual(2026, 133.1, ebit=26.62)
+        corrected = annual(2026, 133.1, ebit=26.62)
+        if defect == "annual_publication":
+            rejected["report_Date"] = None
+        elif defect == "publication_order":
+            rejected["report_Date"] = "2026-03-30"
+        elif defect == "fiscal_end":
+            rejected["periodEnd"] = "2026-04-30"
+        elif defect == "annual_year":
+            rejected.pop("year")
+        elif defect == "annual_stub":
+            rejected["period_start"] = "2025-10-01"
+        elif defect == "annual_currency":
+            rejected["currency"] = "USD"
+        elif defect == "placeholder":
+            rejected = annual(2026, 0, report_Date=None, ebit=0)
+
+    assert upsert_financial_periods(conn, cid, [rejected]) == 1
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchone()
+    assert archived["reason"] == expected_reason
+    assert json.loads(archived["raw_payload"]) == rejected
+    stored = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE period_type=? AND period_end=?",
+        (corrected["period_type"], corrected["period_end"]),
+    ).fetchone()
+    assert json.loads(stored["raw_payload"]) == corrected
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    audit = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == rejected
+    assert not audit["current_refusal"]
+    assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+    assert loaded["financial"].revenue_growth_years == 3
+    assert not any(
+        expected_reason in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
+
+    packet(conn, cid)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_audit = next(
+        item
+        for item in exported["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert exported_audit["raw_payload"] == rejected
+    assert not exported_audit["current_refusal"]
+    assert score["readiness_status"] == "ready"
+    assert score["revenue_growth_years"] == 3
+    assert not any(expected_reason in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize(
     "period_type,period_end",
     [("r12", "2026-05-31"), ("quarter", "2026-06-01")],
 )

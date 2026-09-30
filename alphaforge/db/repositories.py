@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
+from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP
 from alphaforge.core.valuation.dividend_yield import is_known_currency
 
 
@@ -128,6 +129,107 @@ def relink_watchlist(conn: Any) -> int:
     return linked
 
 
+def _record_financial_period_rejection(
+    conn: Any,
+    company_id: int,
+    reason: str,
+    period_type: Any,
+    report_year: Any,
+    report_period: Any,
+    raw_payload: str,
+) -> None:
+    payload = json.loads(raw_payload)
+    payload_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO financial_period_rejections
+            (company_id, reason, period_type, report_year, report_period,
+             payload_hash, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
+        """,
+        (
+            company_id,
+            reason,
+            str(period_type) if period_type is not None else None,
+            str(report_year) if report_year is not None else None,
+            str(report_period) if report_period is not None else None,
+            payload_hash,
+            raw_payload,
+        ),
+    )
+
+
+def _keyable_period_rejection_reason(row: Any, incoming: dict[str, Any]) -> str | None:
+    raw = json.loads(row["raw_payload"])
+
+    def parsed_date(value: Any) -> date | None:
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None
+
+    stored_end = parsed_date(row["period_end"])
+    raw_ends = {
+        parsed_date(value)
+        for key, value in raw.items()
+        if (key == "period_end" or REPORT_FIELD_MAP.get(key) == "period_end")
+        and value is not None
+    }
+    verified_end = stored_end if stored_end is not None and raw_ends == {stored_end} else None
+    publication = parsed_date(row["report_date"])
+    if row["is_placeholder"]:
+        return "placeholder"
+    if verified_end is None or publication is None:
+        return "fiscal end or publication date unverified"
+    if publication < verified_end:
+        return "publication precedes fiscal end"
+    if row["period_type"] != "year":
+        return None
+
+    reasons = []
+    year = row["report_year"]
+    if isinstance(year, bool):
+        fiscal_year = None
+    elif isinstance(year, int):
+        fiscal_year = year
+    elif isinstance(year, str) and year.strip().isdigit():
+        fiscal_year = int(year.strip())
+    else:
+        fiscal_year = None
+    if fiscal_year is None or not 1 <= fiscal_year <= 9999:
+        reasons.append("annual fiscal-year metadata unverified")
+    start_value = raw.get("period_start", raw.get("period_Start"))
+    if start_value is not None:
+        start = parsed_date(start_value)
+        if start is None or not 365 <= (verified_end - start).days + 1 <= 366:
+            reasons.append("annual stub or duration unverified")
+    if not row["currency"]:
+        reasons.append("annual currency comparability unverified")
+    incoming_currency = incoming.get("currency")
+    if (
+        row["currency"]
+        and incoming_currency
+        and str(row["currency"]).upper() != str(incoming_currency).upper()
+    ):
+        reasons.append("annual currency comparability unverified")
+    incoming_year = incoming.get("year", incoming.get("report_year"))
+    incoming_period = incoming.get("period", incoming.get("report_period"))
+    if (
+        row["report_year"] is not None
+        and incoming_year is not None
+        and str(incoming_year) != str(row["report_year"])
+    ) or (
+        row["report_period"] is not None
+        and incoming_period is not None
+        and str(incoming_period) != str(row["report_period"])
+    ):
+        reasons.append("duplicate annual fiscal slot")
+    return "; ".join(dict.fromkeys(reasons)) or None
+
+
 def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str, Any]]) -> int:
     count = 0
     for p in periods:
@@ -160,8 +262,6 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             pass
         raw_payload = json.dumps(p, ensure_ascii=False)
         # Map fields via taxonomy where possible
-        from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP
-
         mapped: dict[str, Any] = {}
         for k, v in p.items():
             canon = REPORT_FIELD_MAP.get(k)
@@ -175,28 +275,36 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         try:
             period_end = date.fromisoformat(str(period_end)[:10]).isoformat()
         except (TypeError, ValueError):
-            payload_hash = hashlib.sha256(
-                json.dumps(p, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-            ).hexdigest()
-            conn.execute(
-                """
-                INSERT INTO financial_period_rejections
-                    (company_id, reason, period_type, report_year, report_period,
-                     payload_hash, raw_payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
-                """,
-                (
-                    company_id,
-                    "fiscal end unavailable or invalid",
-                    str(period_type) if period_type is not None else None,
-                    str(p.get("year") or p.get("report_year") or "") or None,
-                    str(p.get("period") or p.get("report_period") or "") or None,
-                    payload_hash,
-                    raw_payload,
-                ),
+            _record_financial_period_rejection(
+                conn,
+                company_id,
+                "fiscal end unavailable or invalid",
+                period_type,
+                p.get("year") or p.get("report_year"),
+                p.get("period") or p.get("report_period"),
+                raw_payload,
             )
             continue
+        existing = conn.execute(
+            """
+            SELECT * FROM financial_periods
+            WHERE company_id=? AND period_type=? AND period_end=?
+            """,
+            (company_id, period_type, period_end),
+        ).fetchone()
+        if existing is not None and json.loads(existing["raw_payload"]) != p:
+            reason = _keyable_period_rejection_reason(existing, p)
+            if reason:
+                _record_financial_period_rejection(
+                    conn,
+                    company_id,
+                    reason,
+                    existing["period_type"],
+                    existing["report_year"],
+                    existing["report_period"],
+                    existing["raw_payload"],
+                )
+
         # Use mapped for other financials — REPORT_FIELD_MAP now covers live keys
         # (total_Equity, net_Debt, cash_Flow_From_Operating_Activities …) so that
         # ROE, D/E and cash conversion are not silently dropped.
