@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import date, timedelta
+from math import isfinite
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
 from alphaforge.core.kpi_taxonomy import (
+    KPI_DATE_ALIASES,
+    PRICE_DATE_ALIASES,
     REPORT_FIELD_MAP,
-    parse_iso_date,
+    aliased_iso_date,
     report_date_aliases,
     report_integer_aliases,
 )
@@ -453,6 +456,49 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
     return count
 
 
+def _record_market_input_rejection(
+    conn: Any,
+    company_id: int,
+    input_type: str,
+    reason: str,
+    raw: dict[str, Any],
+    *,
+    kpi_id: int | None = None,
+    period_type: str | None = None,
+    price_type: str | None = None,
+) -> None:
+    raw_payload = json.dumps(raw, ensure_ascii=False)
+    identity = {
+        "input_type": input_type,
+        "kpi_id": kpi_id,
+        "period_type": period_type,
+        "price_type": price_type,
+        "payload": raw,
+    }
+    payload_hash = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO market_input_rejections
+            (company_id, input_type, reason, kpi_id, period_type, price_type,
+             payload_hash, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
+        """,
+        (
+            company_id,
+            input_type,
+            reason,
+            kpi_id,
+            period_type,
+            price_type,
+            payload_hash,
+            raw_payload,
+        ),
+    )
+
+
 def upsert_prices(
     conn: Any,
     company_id: int,
@@ -462,7 +508,8 @@ def upsert_prices(
 ) -> int:
     count = 0
     for r in rows:
-        price_date = r.get("price_Date") or r.get("price_date") or r.get("d") or r.get("date")
+        raw_payload = json.dumps(r, ensure_ascii=False)
+        parsed_price_date, date_issue = aliased_iso_date(r, PRICE_DATE_ALIASES)
         close = next(
             (r.get(key) for key in ("close", "c", "price") if r.get(key) is not None),
             None,
@@ -471,26 +518,41 @@ def upsert_prices(
             (r.get(key) for key in ("volume", "vol", "v") if r.get(key) is not None),
             None,
         )
-        if price_date is None or close is None:
-            continue
-        parsed_price_date = parse_iso_date(price_date)
-        if parsed_price_date is None:
+        reason = f"stock price date {date_issue}" if date_issue else None
+        try:
+            close_value = float(close) if close is not None else None
+        except (TypeError, ValueError):
+            close_value = None
+        if reason is None and (close_value is None or not isfinite(close_value) or close_value <= 0):
+            reason = "stock price value unavailable or invalid"
+        try:
+            volume_value = int(volume) if volume is not None else None
+        except (TypeError, ValueError):
+            volume_value = None
+            if reason is None:
+                reason = "stock price volume invalid"
+        if reason is None and volume_value is not None and volume_value < 0:
+            reason = "stock price volume invalid"
+        if reason:
+            _record_market_input_rejection(conn, company_id, "price", reason, r)
             continue
         price_date = parsed_price_date.isoformat()
         cur_currency = r.get("currency") or currency
         conn.execute(
             """
-            INSERT INTO prices (company_id, price_date, close, volume, currency)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO prices (company_id, price_date, close, volume, currency, raw_payload)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, price_date) DO UPDATE SET
-                close=excluded.close, volume=excluded.volume, currency=excluded.currency
+                close=excluded.close, volume=excluded.volume, currency=excluded.currency,
+                raw_payload=excluded.raw_payload
             """,
             (
                 company_id,
                 price_date,
-                float(close),
-                int(volume) if volume is not None else None,
+                close_value,
+                volume_value,
                 cur_currency,
+                raw_payload,
             ),
         )
         count += 1
@@ -605,42 +667,80 @@ def upsert_kpi_observations(
 ) -> int:
     count = 0
     for r in rows:
+        raw_payload = json.dumps(r, ensure_ascii=False)
         val = r.get("v") if "v" in r else r.get("value")
-        if val is None:
-            continue
         try:
-            val_f = float(val)
+            val_f = float(val) if val is not None else None
         except (TypeError, ValueError):
-            continue
-        # v null-filtered client-side
-        if r.get("v") is None and "v" in r:
-            # keep null-filtered?
-            pass
+            val_f = None
+        reason = None
+        if val_f is None or not isfinite(val_f):
+            reason = "KPI value unavailable or invalid"
+
+        parsed_observation_date, date_issue = aliased_iso_date(r, KPI_DATE_ALIASES)
+        if reason is None and date_issue:
+            reason = f"KPI observation date {date_issue}"
+
         year = r.get("year") if "year" in r else r.get("y")
-        report_period = r.get("reportPeriod") or r.get("report_period") or r.get("p")
-        observation_date = r.get("observationDate") or r.get("observation_date") or r.get("date")
-        parsed_observation_date = parse_iso_date(observation_date)
+        report_period = next(
+            (
+                r.get(key)
+                for key in ("reportPeriod", "report_period", "p")
+                if r.get(key) is not None
+            ),
+            None,
+        )
+        year_int = None
+        report_period_int = None
+        if period_type != "last":
+            try:
+                year_int = int(year) if year is not None and not isinstance(year, bool) else None
+            except (TypeError, ValueError):
+                year_int = None
+            if year_int is None and reason is None:
+                reason = "KPI fiscal-year metadata unavailable"
+            try:
+                report_period_int = int(report_period) if report_period is not None else None
+            except (TypeError, ValueError):
+                if reason is None:
+                    reason = "KPI report-period metadata invalid"
+
+        if reason:
+            _record_market_input_rejection(
+                conn,
+                company_id,
+                "kpi",
+                reason,
+                r,
+                kpi_id=kpi_id,
+                period_type=period_type,
+                price_type=price_type,
+            )
+            continue
+
+        observation_date = parsed_observation_date.isoformat()
         if period_type == "last":
-            if parsed_observation_date is None:
-                continue
-            observation_date = parsed_observation_date.isoformat()
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, observation_date, value)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations
+                    (company_id, kpi_id, period_type, price_type, observation_date,
+                     value, raw_payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, observation_date)
-                WHERE period_type='last' DO UPDATE SET value=excluded.value
+                WHERE period_type='last' DO UPDATE SET
+                    value=excluded.value, raw_payload=excluded.raw_payload
                 """,
-                (company_id, kpi_id, period_type, price_type, observation_date, val_f),
+                (
+                    company_id,
+                    kpi_id,
+                    period_type,
+                    price_type,
+                    observation_date,
+                    val_f,
+                    raw_payload,
+                ),
             )
         else:
-            if year is None:
-                continue
-            year_int = int(year)
-            report_period_int = int(report_period) if report_period is not None else None
-            observation_date = (
-                parsed_observation_date.isoformat() if parsed_observation_date is not None else None
-            )
             if report_period_int is None:
                 existing = conn.execute(
                     """
@@ -653,17 +753,22 @@ def upsert_kpi_observations(
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE kpi_observations SET value=?, observation_date=? WHERE id=?",
-                        (val_f, observation_date, int(existing[0])),
+                        """UPDATE kpi_observations
+                           SET value=?, observation_date=?, raw_payload=? WHERE id=?""",
+                        (val_f, observation_date, raw_payload, int(existing[0])),
                     )
                     count += 1
                     continue
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, observation_date, value)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations
+                    (company_id, kpi_id, period_type, price_type, year,
+                     report_period, observation_date, value, raw_payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, year, report_period)
-                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=excluded.observation_date
+                WHERE period_type IN ('year','r12') DO UPDATE SET
+                    value=excluded.value, observation_date=excluded.observation_date,
+                    raw_payload=excluded.raw_payload
                 """,
                 (
                     company_id,
@@ -674,6 +779,7 @@ def upsert_kpi_observations(
                     report_period_int,
                     observation_date,
                     val_f,
+                    raw_payload,
                 ),
             )
         count += 1

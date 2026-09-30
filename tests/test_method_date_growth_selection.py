@@ -196,10 +196,13 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     stored = conn.execute(
         "SELECT value, observation_date FROM kpi_observations WHERE kpi_id=37"
     ).fetchone()
-    assert tuple(stored) == (40, None)
+    assert tuple(stored) == (30, CUTOFF)
     result = load_results_for_company(conn, cid, CUTOFF)
-    assert 37 not in result["fundamental_kpis"]
-    assert result["selection"]["rejected_kpis"][0]["reason"] == "KPI observation date unverified"
+    assert result["fundamental_kpis"][37] == 30
+    rejected = result["selection"]["rejected_kpis"][0]
+    assert rejected["reason"] == "KPI observation date unavailable"
+    assert rejected["raw_payload"] == observation(40, observed=False)
+    assert not rejected["current_refusal"]
 
     upsert_kpi_observations(conn, cid, 37, "year", "mean", [observation(50)])
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 50
@@ -209,7 +212,7 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     "period_type,observed,expected_count,stored_date",
     [
         ("year", "2026-06-01T12:00:00Z", 1, CUTOFF),
-        ("year", "2026-06-01garbage", 1, None),
+        ("year", "2026-06-01garbage", 0, None),
         ("last", "2026-06-01T12:00:00+02:00", 1, CUTOFF),
         ("last", "2026-06-01garbage", 0, None),
     ],
@@ -227,12 +230,145 @@ def test_kpi_ingestion_parses_complete_iso_dates(
         "SELECT observation_date FROM kpi_observations WHERE kpi_id=37"
     ).fetchone()
     assert (stored["observation_date"] if stored else None) == stored_date
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    if stored_date is None:
+        rejected = loaded["selection"]["rejected_kpis"][0]
+        assert rejected["raw_payload"] == row
+        assert rejected["value"] == 30
+        assert rejected["date_facts"] == {"observationDate": observed}
     if period_type == "year":
-        loaded = load_results_for_company(conn, cid, CUTOFF)
         assert (37 in loaded["fundamental_kpis"]) is (stored_date is not None)
 
 
-def test_malformed_kpi_replacement_removes_prior_date_authority():
+@pytest.mark.parametrize("reverse", [False, True])
+def test_price_and_kpi_date_alias_conflicts_retain_original_evidence(
+    reverse, monkeypatch, tmp_path
+):
+    conn, cid = setup()
+    price = {
+        "price_Date": CUTOFF,
+        "date": "2026-06-10",
+        "c": 11,
+    }
+    kpi = {
+        "observationDate": CUTOFF,
+        "date": "2026-06-10",
+        "y": 2026,
+        "p": 5,
+        "v": 31,
+    }
+    if reverse:
+        price = dict(reversed(tuple(price.items())))
+        kpi = dict(reversed(tuple(kpi.items())))
+
+    assert upsert_prices(conn, cid, [price], currency="SEK") == 0
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 0
+    assert upsert_prices(conn, cid, [price], currency="SEK") == 0
+    assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 2
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    rejected_price = loaded["selection"]["rejected_prices"][0]
+    rejected_kpi = loaded["selection"]["rejected_kpis"][0]
+    assert rejected_price["raw_payload"] == price
+    assert rejected_price["value"] == 11
+    assert rejected_price["date_facts"] == {
+        "price_Date": CUTOFF,
+        "date": "2026-06-10",
+    }
+    assert rejected_price["current_refusal"]
+    assert rejected_kpi["raw_payload"] == kpi
+    assert rejected_kpi["value"] == 31
+    assert rejected_kpi["current_refusal"]
+    assert loaded["reverse_dcf"]["current_price"] is None
+
+    packet(conn, cid)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["readiness_status"] == "valuation_blocked"
+    assert any("aliases conflict" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+
+def test_agreeing_price_and_kpi_date_aliases_accept_full_iso_values():
+    conn, cid = setup(price_date=None)
+    assert (
+        upsert_prices(
+            conn,
+            cid,
+            [{"price_Date": CUTOFF, "date": CUTOFF + "T23:59:59Z", "c": 10}],
+            currency="SEK",
+        )
+        == 1
+    )
+    assert (
+        upsert_kpi_observations(
+            conn,
+            cid,
+            37,
+            "year",
+            "mean",
+            [
+                {
+                    "observationDate": CUTOFF,
+                    "date": CUTOFF + "T12:00:00+02:00",
+                    "y": 2026,
+                    "p": 5,
+                    "v": 30,
+                }
+            ],
+        )
+        == 1
+    )
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["selection"]["price"]["selected_date"] == CUTOFF
+    assert loaded["fundamental_kpis"][37] == 30
+    assert not loaded["selection"]["rejected_prices"]
+    assert not loaded["selection"]["rejected_kpis"]
+
+
+def test_rejected_market_inputs_survive_early_missing_financial_exports(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[], price_date=None)
+    price = {"c": 10}
+    kpi = {"y": 2026, "p": 5, "v": 30}
+    assert upsert_prices(conn, cid, [price], currency="SEK") == 0
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 0
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["selection"]["rejected_prices"][0]["raw_payload"] == price
+    assert loaded["selection"]["rejected_kpis"][0]["raw_payload"] == kpi
+    assert loaded["reverse_dcf"]["selection"] == loaded["selection"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["input_selection"]["rejected_prices"][0]["value"] == 10
+    assert score["input_selection"]["rejected_kpis"][0]["value"] == 30
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+
+def test_future_and_historical_price_rejections_remain_audit_only():
+    conn, cid = setup()
+    future = {"d": "2026-06-10", "c": 12}
+    older_invalid = {"d": "2025-06-01", "c": "invalid"}
+    corrected_invalid = {"d": CUTOFF, "c": "invalid"}
+    assert upsert_prices(conn, cid, [future], currency="SEK") == 1
+    assert upsert_prices(conn, cid, [older_invalid, corrected_invalid], currency="SEK") == 0
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["reverse_dcf"]["current_price"] == 10
+    by_raw = {
+        json.dumps(item["raw_payload"], sort_keys=True): item
+        for item in loaded["selection"]["rejected_prices"]
+    }
+    assert not by_raw[json.dumps(future, sort_keys=True)]["current_refusal"]
+    assert not by_raw[json.dumps(older_invalid, sort_keys=True)]["current_refusal"]
+    assert not by_raw[json.dumps(corrected_invalid, sort_keys=True)]["current_refusal"]
+    assert not any("price" in reason for reason in loaded["selection"]["refusal_reasons"])
+
+
+def test_malformed_kpi_replacement_preserves_prior_date_authority():
     conn, cid = setup()
     upsert_kpi_observations(
         conn,
@@ -254,10 +390,13 @@ def test_malformed_kpi_replacement_removes_prior_date_authority():
     stored = conn.execute(
         "SELECT value, observation_date FROM kpi_observations WHERE kpi_id=37"
     ).fetchone()
-    assert tuple(stored) == (40, None)
+    assert tuple(stored) == (30, CUTOFF)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    assert 37 not in loaded["fundamental_kpis"]
-    assert loaded["selection"]["rejected_kpis"][0]["reason"] == ("KPI observation date unverified")
+    assert loaded["fundamental_kpis"][37] == 30
+    rejected = loaded["selection"]["rejected_kpis"][0]
+    assert rejected["reason"] == "KPI observation date invalid"
+    assert rejected["raw_payload"]["v"] == 40
+    assert not rejected["current_refusal"]
 
 
 @pytest.mark.parametrize("order", ["forward", "reverse", "rotated"])
@@ -527,6 +666,11 @@ def test_price_ingestion_parses_complete_iso_dates(raw_date, expected_count, sto
     assert (stored["price_date"] if stored else None) == stored_date
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert loaded["selection"]["price"]["selected_date"] == stored_date
+    if stored_date is None:
+        rejected = loaded["selection"]["rejected_prices"][0]
+        assert rejected["raw_payload"] == {"d": raw_date, "c": 10}
+        assert rejected["value"] == 10
+        assert rejected["date_facts"] == {"d": raw_date}
 
 
 @pytest.mark.parametrize(
@@ -857,7 +1001,7 @@ def test_future_report_and_placeholder_do_not_change_selected_growth():
     assert after["reverse_dcf"]["current_revenue"] == before["reverse_dcf"]["current_revenue"]
 
 
-def test_actual_rank_excludes_undated_kpi_and_exports_provisional_roic(monkeypatch, tmp_path):
+def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path):
     conn, cid = setup(
         periods=[annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     )
@@ -877,11 +1021,14 @@ def test_actual_rank_excludes_undated_kpi_and_exports_provisional_roic(monkeypat
         for component in score["scoring_audit"]["quality"]["components"]
         if component["name"] == "roic"
     )
-    assert roic["raw_value"] is None and not roic["available"]
-    assert "roic" in row["missing_data"]
-    assert "roic" in dcf[str(cid)]["dcf"]["missing_information"]
-    assert dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] == 0
-    assert score["readiness_status"] == "ready"  # Explicit provisional ROIC remains supported.
+    assert roic["raw_value"] == 0.3 and roic["available"]
+    assert "roic" not in row["missing_data"]
+    assert "roic" not in dcf[str(cid)]["dcf"]["missing_information"]
+    assert dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] > 0
+    rejected = score["input_selection"]["rejected_kpis"][0]
+    assert rejected["raw_payload"]["v"] == 40
+    assert not rejected["current_refusal"]
+    assert score["readiness_status"] == "ready"
     upsert_kpi_observations(
         conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 50, "observationDate": CUTOFF}]
     )
@@ -941,12 +1088,13 @@ def test_all_selection_refusals_retain_provenance_and_reach_exports(monkeypatch,
     assert ingestion["current_refusal"]
     assert ingestion["payload_hash"]
     assert selection["rejected_kpis"][0]["observation_date"] is None
+    assert selection["rejected_kpis"][0]["raw_payload"]["v"] == 30
     assert selection["historical_price_pairings"][0]["period_end"] == "2024-03-31"
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     reasons = score["missing_data"]
     assert any("fiscal end unavailable or invalid" in reason for reason in reasons)
-    assert any("KPI observation date unverified" in reason for reason in reasons)
+    assert any("KPI observation date unavailable" in reason for reason in reasons)
     assert any("historical price missing" in reason for reason in reasons)
     assert all(
         any(reason in limitation for limitation in score["readiness_limitations"])

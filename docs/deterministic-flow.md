@@ -114,17 +114,18 @@ network fetch. Its effective date predicates are:
   without a valid explicit fiscal end rather than inventing a key from a
   publication date or year/quarter. Rows sort by fiscal end, publication date,
   then quarter/annual/R12 (R12 wins exact ties).
-- Prices: verified `price_date <= as_of`; the latest eligible close must be
-  **at most seven calendar days old**, inclusive. Historical valuation pairs
-  each report with the last close at/before its verified fiscal end, also
-  with an inclusive seven-calendar-day maximum gap. Older/missing pairs do
-  not contribute to historical valuation anchors.
+- Prices: every populated date alias must parse completely and agree before
+  normalization, and the verified `price_date` must be `<= as_of`; the latest
+  eligible close must be **at most seven calendar days old**, inclusive.
+  Historical valuation pairs each report with the last close at/before its
+  verified fiscal end, also with an inclusive seven-calendar-day maximum gap.
+  Older/missing pairs do not contribute to historical valuation anchors.
 - KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
-  `observation_date <= as_of`. Undated/year-only history stays stored but is
-  not numerical authority. Replacement values replace observation-date
-  assurance atomically rather than inheriting an older row's date. Latest
-  eligible values are collected per KPI; R12 overrides non-R12 history.
-  Yearless `last` snapshots remain excluded.
+  `observation_date <= as_of`. Every populated observation-date alias must
+  parse completely and agree. Invalid input is retained in rejection audit
+  rather than replacing a verified same-slot observation. Latest eligible
+  values are collected per KPI; R12 overrides non-R12 history. Yearless
+  `last` snapshots remain excluded.
 - Dividend inputs: trailing calendar twelve months ending at `as_of`, with
   `(start,end]` ex-date bounds. The previous-year anniversary clamps February 29
   to February 28; e.g. `2028-02-29` uses `(2027-02-28,2028-02-29]`, and
@@ -147,9 +148,10 @@ dates**, not historical-known-then correctness or an ingestion-vintage query.
 Generic [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not
 replace these loader predicates. `SELECTION_VERSION` is
 `verified-dates-consecutive-annual-v2`. The loader returns `selection` diagnostics
-also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI provenance,
-selected price date/age, historical pairings and annual fiscal ends/refusal
-reasons. Refusal reasons also appear in ranking missing data and readiness
+also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI/price
+provenance with original payload/value/date facts, selected price date/age,
+historical pairings and annual fiscal ends/refusal reasons. Applicable refusal
+reasons also appear in ranking missing data and readiness
 limitations. A quarter/R12 refusal is superseded only by a unique same-type row
 matching its verified end or its fiscal year plus report period; otherwise only
 chronology provably older than the latest same-type row becomes audit-only.

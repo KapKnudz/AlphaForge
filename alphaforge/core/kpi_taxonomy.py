@@ -84,6 +84,9 @@ KNOWN_KPI_IDS: dict[int, str] = {
 }
 
 # Report property metadata canonical names
+PRICE_DATE_ALIASES = ("price_Date", "price_date", "d", "date")
+KPI_DATE_ALIASES = ("observationDate", "observation_date", "date")
+
 REPORT_PROPERTY_MAP: dict[str, str] = {
     "revenues": "revenue",
     "gross_Income": "gross_income",
@@ -122,6 +125,21 @@ def parse_iso_date(value: Any) -> date | None:
             return datetime.fromisoformat(value).date()
         except ValueError:
             return None
+
+
+def aliased_iso_date(
+    payload: dict[str, Any], aliases: tuple[str, ...]
+) -> tuple[date | None, str | None]:
+    values = [payload[key] for key in aliases if key in payload and payload[key] is not None]
+    if not values:
+        return None, "unavailable"
+    parsed = [parse_iso_date(value) for value in values]
+    if any(value is None for value in parsed):
+        return None, "invalid"
+    days = {value for value in parsed if value is not None}
+    if len(days) != 1:
+        return None, "aliases conflict"
+    return next(iter(days)), None
 
 
 def report_date_aliases(

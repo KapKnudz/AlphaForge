@@ -11,6 +11,9 @@ from alphaforge.core.financial.calculator import FinancialCalculator
 from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
 from alphaforge.core.kpi_taxonomy import (
+    KPI_DATE_ALIASES,
+    PRICE_DATE_ALIASES,
+    aliased_iso_date,
     parse_iso_date,
     report_date_aliases,
     report_integer_aliases,
@@ -174,6 +177,26 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     return [item[0] for item in selected], reasons, omitted
 
 
+def _integer_alias(
+    payload: dict[str, Any], aliases: tuple[str, ...]
+) -> tuple[int | None, bool]:
+    values = [payload[key] for key in aliases if key in payload and payload[key] is not None]
+    if not values:
+        return None, False
+    parsed = {_fiscal_year(value) for value in values}
+    if None in parsed or len(parsed) != 1:
+        return None, True
+    return next(iter(parsed)), False
+
+
+def _date_facts(payload: dict[str, Any], aliases: tuple[str, ...]) -> dict[str, Any]:
+    return {key: payload[key] for key in aliases if key in payload and payload[key] is not None}
+
+
+def _raw_value(payload: dict[str, Any], aliases: tuple[str, ...]) -> Any:
+    return next((payload[key] for key in aliases if key in payload), None)
+
+
 def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
     kpi_r12: dict[int, float] = {}
     kpi_annual: dict[int, float] = {}
@@ -182,14 +205,21 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
     rows = conn.execute(
         """
         SELECT id, kpi_id, value, period_type, observation_date, year,
-               price_type, report_period
+               price_type, report_period, raw_payload
         FROM kpi_observations WHERE company_id=? AND value IS NOT NULL
         ORDER BY observation_date ASC, year ASC, report_period ASC, price_type ASC
         """,
         (company_id,),
     ).fetchall()
     for row in rows:
-        observed = _date(row["observation_date"])
+        raw = _payload(row)
+        stored_observed = _date(row["observation_date"])
+        if raw:
+            observed, date_issue = aliased_iso_date(raw, KPI_DATE_ALIASES)
+            if date_issue or observed != stored_observed:
+                observed = None
+        else:
+            observed = stored_observed
         fiscal_year = _fiscal_year(row["year"])
         reason = None
         if (observed is not None and observed > cutoff) or (
@@ -204,12 +234,16 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
             rejected.append(
                 {
                     "id": row["id"],
+                    "source": "kpi_observations",
                     "kpi_id": row["kpi_id"],
                     "period_type": row["period_type"],
                     "price_type": row["price_type"],
                     "year": row["year"],
                     "report_period": row["report_period"],
                     "observation_date": row["observation_date"],
+                    "value": row["value"],
+                    "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
+                    "raw_payload": raw,
                     "reason": reason,
                 }
             )
@@ -219,26 +253,71 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         target[kpi_id] = float(row["value"])
         selected_rows[(kpi_id, row["period_type"], row["price_type"])] = row
 
+    for row in conn.execute(
+        """
+        SELECT id, reason, kpi_id, period_type, price_type, payload_hash,
+               raw_payload, rejected_at
+        FROM market_input_rejections
+        WHERE company_id=? AND input_type='kpi' ORDER BY id ASC
+        """,
+        (company_id,),
+    ).fetchall():
+        raw = _payload(row)
+        year, malformed_year = _integer_alias(raw, ("year", "y"))
+        report_period, malformed_period = _integer_alias(
+            raw, ("reportPeriod", "report_period", "p")
+        )
+        observed, _ = aliased_iso_date(raw, KPI_DATE_ALIASES)
+        rejected.append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "kpi_id": row["kpi_id"],
+                "period_type": row["period_type"],
+                "price_type": row["price_type"],
+                "year": year,
+                "report_period": report_period,
+                "observation_date": observed.isoformat() if observed is not None else None,
+                "value": _raw_value(raw, ("v", "value")),
+                "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
+                "raw_payload": raw,
+                "payload_hash": row["payload_hash"],
+                "rejected_at": row["rejected_at"],
+                "invalid_slot": malformed_year or malformed_period,
+                "reason": row["reason"],
+            }
+        )
+
     selected_r12 = set(kpi_r12)
     for item in rejected:
-        current = item["reason"] != "KPI after cutoff"
+        rejected_year = _fiscal_year(item["year"])
+        rejected_period = item["report_period"]
+        rejected_date = _date(item["observation_date"])
+        current = not (
+            (rejected_date is not None and rejected_date > cutoff)
+            or (rejected_year is not None and rejected_year > cutoff.year)
+            or item["reason"] == "KPI after cutoff"
+        )
         if current and item["period_type"] != "r12" and item["kpi_id"] in selected_r12:
             current = False
-        selected = selected_rows.get((int(item["kpi_id"]), item["period_type"], item["price_type"]))
-        rejected_year = _fiscal_year(item["year"])
+        selected = selected_rows.get(
+            (int(item["kpi_id"]), item["period_type"], item["price_type"])
+        )
         selected_year = _fiscal_year(selected["year"]) if selected is not None else None
-        if current and rejected_year is not None and selected_year is not None:
-            if selected_year > rejected_year:
+        selected_period = selected["report_period"] if selected is not None else None
+        if current and item["period_type"] == "last":
+            selected_date = _date(selected["observation_date"]) if selected is not None else None
+            if rejected_date is not None and selected_date is not None:
+                current = rejected_date > selected_date
+        elif current and not item.get("invalid_slot") and rejected_year is not None:
+            if selected_year is not None and selected_year > rejected_year:
                 current = False
             elif selected_year == rejected_year:
-                rejected_period = item["report_period"]
-                selected_period = selected["report_period"]
-                if (
-                    rejected_period is not None
-                    and selected_period is not None
-                    and int(selected_period) >= int(rejected_period)
-                ):
+                if selected_period == rejected_period:
                     current = False
+                elif selected_period is not None and rejected_period is not None:
+                    current = int(selected_period) < int(rejected_period)
+        item.pop("invalid_slot", None)
         item["current_refusal"] = current
     return ({**kpi_annual, **kpi_r12}, rejected)
 
@@ -247,6 +326,11 @@ def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
     annual_history = selection.get("annual_history", {})
     reasons = list(annual_history.get("reasons", []))
     reasons.extend(selection.get("price", {}).get("reasons", []))
+    reasons.extend(
+        f"price {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
+        for item in selection.get("rejected_prices", [])
+        if item.get("reason") and item.get("current_refusal", True)
+    )
     reasons.extend(
         f"report {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
         for item in selection.get("rejected_reports", [])
@@ -353,6 +437,25 @@ def _rejection_is_current(
     if ends and anchor_end is not None:
         comparisons.append(any(end >= anchor_end for end in ends))
     return any(comparisons) if comparisons else True
+
+
+def _price_rejection_is_current(
+    item: dict[str, Any], cutoff: date, admitted_rows: list
+) -> bool:
+    raw = item.get("raw_payload") or {}
+    rejected_date, date_issue = aliased_iso_date(raw, PRICE_DATE_ALIASES)
+    if not raw:
+        rejected_date = _date(item.get("price_date"))
+        date_issue = None if rejected_date is not None else "unavailable"
+    if date_issue is None and rejected_date is not None and rejected_date > cutoff:
+        return False
+    if date_issue is not None or rejected_date is None:
+        return True
+    admitted_dates = {_date(row["price_date"]) for row in admitted_rows}
+    if rejected_date in admitted_dates:
+        return False
+    latest_date = max((value for value in admitted_dates if value is not None), default=None)
+    return latest_date is None or rejected_date > latest_date
 
 
 def _number(value: Any) -> float | None:
@@ -474,6 +577,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "rejected_reports": rejected_reports,
         "historical_price_pairings": [],
         "rejected_kpis": rejected_kpis,
+        "rejected_prices": [],
     }
 
     stored_period_rows = conn.execute(
@@ -561,27 +665,88 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "reasons": annual_reasons,
         "excluded": excluded_annuals,
     }
-    price_rows = conn.execute(
-        """
-        SELECT * FROM prices
-        WHERE company_id=? AND substr(price_date, 1, 10) <= ?
-        ORDER BY price_date ASC
-        """,
-        (company_id, cutoff.isoformat()),
+    stored_price_rows = conn.execute(
+        "SELECT * FROM prices WHERE company_id=? ORDER BY price_date ASC",
+        (company_id,),
     ).fetchall()
-    price_rows = [row for row in price_rows if _date(row["price_date"]) is not None]
-    latest_price = _price(price_rows[-1], stock_currency) if price_rows else None
+    price_rows = []
+    for row in stored_price_rows:
+        raw = _payload(row)
+        stored_date = _date(row["price_date"])
+        if raw:
+            verified_date, date_issue = aliased_iso_date(raw, PRICE_DATE_ALIASES)
+            if date_issue or verified_date != stored_date:
+                verified_date = None
+        else:
+            verified_date = stored_date
+        if verified_date is None or verified_date > cutoff:
+            selection["rejected_prices"].append(
+                {
+                    "id": f"price:{row['price_date']}",
+                    "source": "prices",
+                    "price_date": row["price_date"],
+                    "value": row["close"],
+                    "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+                    "raw_payload": raw,
+                    "reason": (
+                        "stock price after cutoff"
+                        if verified_date is not None and verified_date > cutoff
+                        else "stock price date unverified"
+                    ),
+                }
+            )
+        else:
+            price_rows.append(row)
+    for row in conn.execute(
+        """
+        SELECT id, reason, payload_hash, raw_payload, rejected_at
+        FROM market_input_rejections
+        WHERE company_id=? AND input_type='price' ORDER BY id ASC
+        """,
+        (company_id,),
+    ).fetchall():
+        raw = _payload(row)
+        rejected_date, _ = aliased_iso_date(raw, PRICE_DATE_ALIASES)
+        selection["rejected_prices"].append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "price_date": rejected_date.isoformat() if rejected_date is not None else None,
+                "value": _raw_value(raw, ("close", "c", "price")),
+                "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+                "raw_payload": raw,
+                "payload_hash": row["payload_hash"],
+                "rejected_at": row["rejected_at"],
+                "reason": row["reason"],
+            }
+        )
+    for item in selection["rejected_prices"]:
+        item["current_refusal"] = _price_rejection_is_current(item, cutoff, price_rows)
+
+    candidate_price = _price(price_rows[-1], stock_currency) if price_rows else None
+    current_price_rejections = [
+        item for item in selection["rejected_prices"] if item["current_refusal"]
+    ]
+    latest_price = candidate_price
     price_missing = []
-    selection["price"] = {
-        "selected_date": latest_price.date.isoformat() if latest_price else None,
-        "age_calendar_days": (cutoff - latest_price.date).days if latest_price else None,
-    }
     if latest_price is None:
         price_missing.append("latest stock price unavailable")
+    elif current_price_rejections:
+        price_missing.append(
+            "unresolved applicable stock price rejection: "
+            + "; ".join(sorted({item["reason"] for item in current_price_rejections}))
+        )
+        price_missing.append("latest stock price unavailable")
+        latest_price = None
     elif (cutoff - latest_price.date).days > MAX_PRICE_AGE_DAYS:
         price_missing.append("stock price is older than seven calendar days")
         latest_price = None
-    selection["price"]["reasons"] = price_missing
+    selection["price"] = {
+        "selected_date": latest_price.date.isoformat() if latest_price else None,
+        "candidate_date": candidate_price.date.isoformat() if candidate_price else None,
+        "age_calendar_days": (cutoff - candidate_price.date).days if candidate_price else None,
+        "reasons": price_missing,
+    }
     if not period_rows:
         selection["refusal_reasons"] = _selection_refusal_reasons(selection)
         _missing = ["financial_period", *price_missing]
