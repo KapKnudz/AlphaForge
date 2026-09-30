@@ -22,15 +22,17 @@ ranking never masquerades as a discounted-cash-flow.
   ex-date window and matching denominations from the explicit MVP allowlist:
   `CAD`, `CHF`, `DKK`, `EUR`, `GBP`, `ISK`, `NOK`, `PLN`, `SEK`, and `USD`.
   Alphabetic shape alone does not verify a code. February 29's prior-year
-  anniversary clamps to February 28. Verified complete empty windows give `0`;
-  zero-valued observations do so only when their currencies are verified and
-  match the close. Unknown/partial coverage and mismatched/unknown currency give
-  `None` with a typed reason. Matching known non-SEK distribution and close
+  anniversary clamps to February 28. Verified complete empty windows give `0`
+  only when the selected close has a supported denomination; zero-valued
+  observations do so only when their currencies are verified and match the
+  close. Unknown/partial coverage and mismatched/unknown currency give `None`
+  with a typed reason. Matching supported non-SEK distribution and close
   currencies are valid without conversion. No report FX or
   realized-return/reinvestment substitution. The v2 provenance rule admits the
-  first authoritative known denomination for an unverified, conflict-free row,
+  first authoritative supported denomination for an unverified, conflict-free
+  row,
   including a valid-looking legacy tag such as assumed SEK. Only contradictory
-  **verified** known denominations establish a sticky conflict; unusable/missing
+  **verified** supported denominations establish a sticky conflict; unusable/missing
   fresh tags do not erase earlier verified denomination evidence or certify a
   window.
   General/property/bank scoring consume this same guarded value. General audit
