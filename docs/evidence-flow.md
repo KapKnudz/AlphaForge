@@ -6,10 +6,12 @@ This document owns the deterministic **textual evidence lane**: issuer mapping,
 MFN discovery/admission, covered identity, PDF retention/extraction, immutable
 observations/relations, manifest selection/completeness/cache, frozen packets,
 and their ranking/readiness provenance contract. It does not define financial,
-valuation, return or ranking arithmetic; the authoritative
-[high-level design](plans/2026-09-16-alphaforge-mvp.md), especially §§3.2,3.5,7,
-owns those deterministic calculation boundaries. Models own neither this
-lane's validation nor those calculations.
+valuation, return or ranking arithmetic. The [architecture overview](architecture.md)
+routes implemented calculation wiring to the
+[deterministic-flow contract](deterministic-flow.md) and formulas and policies to
+[the valuation contract](valuation.md); the
+[high-level design](plans/2026-09-16-alphaforge-mvp.md) remains the target design.
+Models own neither this lane's validation nor those calculations.
 
 Issuer identity is source-of-truth data keyed by `companies.id`. MFN discovery
 stores observed candidates in `mfn_issuer_candidates`; only a `mapped` row in
@@ -360,14 +362,14 @@ database-local observation and relation IDs are normalized. Run timestamps
 (`issuer.verified_at`, per-source `ingestion_date`) stay in the stored JSON for
 auditability but are excluded from the hash, so identical artifacts hash
 identically across databases built at different times; packets hashed before
-this change keep validating against their stored hash. Every packet also stamps `evidence_rules_version` (currently
-v7 in `alphaforge/core/frozen_packet.py`): the monotonic version of the
-evidence/filter/completeness rule set (report/invitation taxonomy,
-issuer confirmation, attachment-tier selection, completeness counting). Stale
-is defined narrowly as a packet built under an older rule version — including
-pre-versioning packets without the marker. Older packets stay hash-valid but
-readiness rejects them with `stale_evidence_packet`; rerun the lane to rebuild
-under the current rules. Readiness for the evidence lane requires that frozen packet
+this change keep validating against their stored hash. Every packet also stamps
+`evidence_rules_version`; `EVIDENCE_RULES_VERSION` in
+`alphaforge/core/frozen_packet.py` is the source of the current monotonic
+readiness version for packet-affecting evidence interpretation. Stale is defined
+narrowly as a packet built under an older rule version — including pre-versioning
+packets without the marker. Older packets stay hash-valid but readiness rejects
+them with `stale_evidence_packet`; rerun the lane to rebuild under the current
+rules. Readiness for the evidence lane requires that frozen packet
 hash to validate; a stray document row is not sufficient. Packet rows also carry
 `report_rules_fingerprint`, `usable`, and `usable_reason`. A later non-complete
 run marks every prior packet for the same `(company_id, as_of)` unusable in the
@@ -375,10 +377,11 @@ same transaction as its terminal job record; rows remain queryable for audit
 history, while the loader reuses only valid, current-fingerprint, usable rows.
 Run diagnostics are persisted in the packet on complete runs or the job error
 on terminal failures, and `describe_evidence_state` is the replay source for
-CLI/result diagnostics. Report rules v5 deliberately invalidate the prior
-provider/state/fiscal/slot/cache interpretations in the fingerprint; evidence
-rules v7 invalidate prior packet readiness. Historical packets still validate
-against their original hashes, but old rules cannot confer current readiness.
+CLI/result diagnostics. The current report-rule fingerprint deliberately
+invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
+current evidence-rule version invalidates prior packet readiness. Historical
+packets still validate against their original hashes, but old rules cannot
+confer current readiness.
 
 ### Cross-boundary correction coverage
 
