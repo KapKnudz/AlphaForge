@@ -12,7 +12,7 @@ from datetime import date, timedelta
 import pytest
 
 from alphaforge.cli.main import cmd_rank
-from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.cli.ranking_loader import _annual_series, load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.core.frozen_packet import (
     EVIDENCE_RULES_VERSION,
@@ -177,16 +177,38 @@ def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_pat
         assert dcf[str(cid)]["current_price"] is None
 
 
-def test_undated_kpi_is_not_admitted_by_year_alone():
+@pytest.mark.parametrize("report_period", [None, 5])
+def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     conn, cid = setup()
-    upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
-    assert 37 not in load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"]
+
+    def observation(value, observed=True):
+        row = {"y": 2026, "v": value}
+        if report_period is not None:
+            row["p"] = report_period
+        if observed:
+            row["observationDate"] = CUTOFF
+        return row
+
     upsert_kpi_observations(
-        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}]
+        conn, cid, 37, "year", "mean", [observation(30)]
     )
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 30
-    conn.execute("UPDATE kpi_observations SET observation_date='2026-06-02'")
-    assert 37 not in load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"]
+
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [observation(40, observed=False)]
+    )
+    stored = conn.execute(
+        "SELECT value, observation_date FROM kpi_observations WHERE kpi_id=37"
+    ).fetchone()
+    assert tuple(stored) == (40, None)
+    result = load_results_for_company(conn, cid, CUTOFF)
+    assert 37 not in result["fundamental_kpis"]
+    assert result["selection"]["rejected_kpis"][0]["reason"] == "KPI observation date unverified"
+
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [observation(50)]
+    )
+    assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 50
 
 
 @pytest.mark.parametrize("order", ["forward", "reverse", "rotated"])
@@ -230,6 +252,15 @@ def test_annual_growth_invariant_with_quarter_r12_insertions(order, monkeypatch,
     assert row["growth_score"] == str(score["growth_score"])
 
 
+def test_provider_declared_annual_period_four_is_comparable():
+    rows = [annual(year, 100 * 1.1 ** (year - 2023), period=4) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    result = load_results_for_company(conn, cid, CUTOFF)
+    assert result["financial"].revenue_growth == pytest.approx(0.1)
+    assert result["financial"].revenue_growth_years == 3
+    assert result["selection"]["annual_history"]["reasons"] == []
+
+
 @pytest.mark.parametrize(
     "defect",
     [
@@ -241,33 +272,29 @@ def test_annual_growth_invariant_with_quarter_r12_insertions(order, monkeypatch,
         "unknown_end",
         "start_stub",
         "invalid_start",
-        "period_label",
     ],
 )
-def test_incomparable_annual_history_is_unavailable(defect):
+def test_incomparable_latest_annual_history_is_unavailable(defect):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     if defect == "gap":
-        rows.pop(1)
+        rows.pop(-2)
     elif defect == "duplicate":
-        rows.append(annual(2025, period_end="2025-04-30"))
+        rows.append(annual(2026, period_end="2026-04-30"))
     elif defect == "stub":
-        rows[1]["period_end"] = "2024-09-30"
+        rows[-1]["period_end"] = "2026-04-30"
     elif defect == "unknown_year":
-        rows[1].pop("year")
+        rows[-1].pop("year")
     elif defect == "currency":
-        rows[1]["currency"] = "USD"
+        rows[-1]["currency"] = "USD"
     elif defect == "start_stub":
-        rows[1]["period_start"] = "2023-10-01"
+        rows[-1]["period_start"] = "2025-10-01"
     elif defect == "invalid_start":
-        rows[1]["period_start"] = "2023"
-    elif defect == "period_label":
-        rows[1]["period"] = 2
+        rows[-1]["period_start"] = "2026"
     conn, cid = setup(periods=rows)
     if defect == "unknown_end":
-        # Legacy publication-as-period-end key; raw payload does not verify it.
         conn.execute(
-            "UPDATE financial_periods SET raw_payload=? WHERE report_year=2024",
-            (json.dumps({"year": 2024, "report_Date": "2024-03-31"}),),
+            "UPDATE financial_periods SET raw_payload=? WHERE report_year=2026",
+            (json.dumps({"year": 2026, "report_Date": "2026-03-31"}),),
         )
     result = load_results_for_company(conn, cid, CUTOFF)
     fin = result["financial"]
@@ -276,7 +303,86 @@ def test_incomparable_annual_history_is_unavailable(defect):
     assert fin.share_count_growth is None
     assert fin.positive_fcf_ratio is None
     assert fin.revenue_growth_years == fin.per_share_growth_years == 0
-    assert result["selection"]["annual_history"]["reasons"]
+    selection = result["selection"]
+    assert (
+        selection["annual_history"]["reasons"]
+        or selection["annual_history"]["excluded"]
+        or selection["rejected_reports"]
+    )
+
+
+@pytest.mark.parametrize(
+    "defect", ["gap", "duplicate", "stub", "unknown_year", "currency", "unknown_end"]
+)
+def test_older_annual_defect_preserves_latest_comparable_suffix(defect):
+    older = [annual(2019, 80), annual(2020, 88)]
+    if defect == "duplicate":
+        older.append(annual(2020, 88, period_end="2020-04-30"))
+    elif defect == "stub":
+        older[-1]["period_end"] = "2020-09-30"
+    elif defect == "unknown_year":
+        older[-1].pop("year")
+    elif defect == "currency":
+        older[-1]["currency"] = "USD"
+    recent = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=[*older, *recent])
+    if defect == "unknown_end":
+        conn.execute(
+            "UPDATE financial_periods SET raw_payload=? WHERE report_year=2020",
+            (json.dumps({"year": 2020, "report_Date": "2020-03-31"}),),
+        )
+    result = load_results_for_company(conn, cid, CUTOFF)
+    assert result["financial"].revenue_growth == pytest.approx(0.1)
+    assert result["financial"].revenue_growth_years == 3
+    selection = result["selection"]
+    assert selection["annual_history"]["period_ends"] == [
+        "2023-03-31",
+        "2024-03-31",
+        "2025-03-31",
+        "2026-03-31",
+    ]
+    assert selection["annual_history"]["excluded"] or selection["rejected_reports"]
+
+
+def test_gap_before_latest_pair_uses_only_one_year_horizon():
+    rows = [annual(2023, 100), annual(2025, 121), annual(2026, 133.1)]
+    conn, cid = setup(periods=rows)
+    result = load_results_for_company(conn, cid, CUTOFF)
+    assert result["financial"].revenue_growth == pytest.approx(0.1)
+    assert result["financial"].revenue_growth_years == 1
+    assert result["selection"]["annual_history"]["period_ends"] == [
+        "2025-03-31",
+        "2026-03-31",
+    ]
+
+
+def test_latest_suffix_survives_actual_rank_exports(monkeypatch, tmp_path):
+    rows = [annual(2018, 70), annual(2020, 80)] + [
+        annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)
+    ]
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+    score, csv_row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    selected = ["2023-03-31", "2024-03-31", "2025-03-31", "2026-03-31"]
+    assert score["growth_score"] > 0
+    assert score["input_selection"]["annual_history"]["period_ends"] == selected
+    assert json.loads(csv_row["input_selection"])["annual_history"]["period_ends"] == selected
+    assert dcf[str(cid)]["selection"]["annual_history"]["period_ends"] == selected
+
+
+def test_nonnumeric_older_fiscal_year_is_excluded_without_arithmetic():
+    conn, cid = setup(periods=[annual(2025), annual(2026, 110)])
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT * FROM financial_periods ORDER BY period_end"
+        ).fetchall()
+    ]
+    rows[0]["report_year"] = "not-a-year"
+    selected, reasons, excluded = _annual_series(rows)
+    assert [row["report_year"] for row in selected] == [2026]
+    assert reasons == []
+    assert excluded[0]["reason"] == "annual fiscal-year metadata unverified"
 
 
 @pytest.mark.parametrize("age,count", [(0, 1), (7, 1), (8, 0)])
@@ -451,7 +557,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     assert any("not consecutive" in item for item in score["missing_data"])
     assert "not consecutive" in row["missing_data"]
-    assert dcf[str(cid)]["selection"]["annual_history"]["reasons"]
+    assert dcf[str(cid)]["selection"]["annual_history"]["excluded"]
     assert score["growth_score"] == 0
     assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-verified-annual-v12"
 
@@ -503,7 +609,15 @@ def test_actual_rank_excludes_undated_kpi_and_exports_provisional_roic(monkeypat
         periods=[annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     )
     packet(conn, cid)
-    upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}],
+    )
+    upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 40}])
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     roic = next(
         component
@@ -516,7 +630,7 @@ def test_actual_rank_excludes_undated_kpi_and_exports_provisional_roic(monkeypat
     assert dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] == 0
     assert score["readiness_status"] == "ready"  # Explicit provisional ROIC remains supported.
     upsert_kpi_observations(
-        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30, "observationDate": CUTOFF}]
+        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 50, "observationDate": CUTOFF}]
     )
     dated, _, dated_dcf = rank_exports(conn, monkeypatch, tmp_path)
     dated_roic = next(
@@ -524,7 +638,7 @@ def test_actual_rank_excludes_undated_kpi_and_exports_provisional_roic(monkeypat
         for component in dated["scoring_audit"]["quality"]["components"]
         if component["name"] == "roic"
     )
-    assert dated_roic["raw_value"] == 0.3 and dated_roic["available"]
+    assert dated_roic["raw_value"] == 0.5 and dated_roic["available"]
     assert dated_dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] > 0
 
 

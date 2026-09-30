@@ -57,50 +57,108 @@ def _verified_fiscal_end(row) -> date | None:
     return stored if stored is not None and ends == {stored} else None
 
 
-def _annual_series(rows) -> tuple[list, list[str]]:
+def _fiscal_year(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        year = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        year = int(value.strip())
+    else:
+        return None
+    return year if 1 <= year <= 9999 else None
+
+
+def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     annuals = [row for row in rows if row["period_type"] == "year"]
-    reasons = []
     if not annuals:
-        return [], ["annual history unavailable"]
-    years = [row["report_year"] for row in annuals]
-    if any(year is None for year in years):
-        reasons.append("annual fiscal-year metadata unverified")
-    elif len(set(years)) != len(years):
-        reasons.append("duplicate annual fiscal slot")
-    ends = [_verified_fiscal_end(row) for row in annuals]
-    if any(end is None for end in ends):
-        reasons.append("annual fiscal end unverified")
-    for index, row in enumerate(annuals):
+        return [], ["annual history unavailable"], []
+
+    metadata = []
+    year_counts: dict[int, int] = {}
+    for row in annuals:
+        year = _fiscal_year(row["report_year"])
+        end = _verified_fiscal_end(row)
+        currency = str(row["currency"]).upper() if row["currency"] else None
+        issues = []
+        if year is None:
+            issues.append("annual fiscal-year metadata unverified")
+        else:
+            year_counts[year] = year_counts.get(year, 0) + 1
+        if end is None:
+            issues.append("annual fiscal end unverified")
         raw = _payload(row)
-        if row["report_period"] is not None and row["report_period"] != 5:
-            reasons.append("annual period label is not annual")
-        # An explicit start, when supplied, must describe a full annual period.
         start_value = raw.get("period_start", raw.get("period_Start"))
         if start_value is not None:
             start = _date(start_value)
-            end = ends[index]
             if start is None or end is None or not 365 <= (end - start).days + 1 <= 366:
-                reasons.append("annual stub or duration unverified")
-        if index and ends[index] is not None and ends[index - 1] is not None:
-            previous, end = ends[index - 1], ends[index]
-            # Calendar and non-calendar anniversaries, including leap month-end.
-            same_month_end = (
-                previous.month == end.month
-                and (previous + timedelta(days=1)).day == (end + timedelta(days=1)).day == 1
+                issues.append("annual stub or duration unverified")
+        if currency is None:
+            issues.append("annual currency comparability unverified")
+        metadata.append((row, year, end, currency, issues))
+
+    def excluded(items, boundary_reason: str) -> list[dict]:
+        values = []
+        for row, _, _, _, issues in items:
+            values.append(
+                {
+                    "id": row["id"],
+                    "period_end": row["period_end"],
+                    "report_year": row["report_year"],
+                    "report_period": row["report_period"],
+                    "raw_payload": _payload(row),
+                    "reason": "; ".join(issues) if issues else boundary_reason,
+                }
             )
-            if (
-                end.year != previous.year + 1
-                or ((previous.month, previous.day) != (end.month, end.day) and not same_month_end)
-                or years[index] is None
-                or years[index - 1] is None
-                or years[index] != years[index - 1] + 1
-            ):
-                reasons.append("annual periods are not consecutive fiscal anniversaries")
-    currencies = {str(row["currency"]).upper() for row in annuals if row["currency"]}
-    if len(currencies) != 1 or any(not row["currency"] for row in annuals):
-        reasons.append("annual currency comparability unverified")
-    reasons = sorted(set(reasons))
-    return ([] if reasons else annuals), reasons
+        return values
+
+    latest = metadata[-1]
+    latest_reasons = list(latest[4])
+    if latest[1] is not None and year_counts[latest[1]] > 1:
+        latest_reasons.append("duplicate annual fiscal slot")
+    if latest_reasons:
+        reasons = sorted(set(latest_reasons))
+        return [], reasons, excluded(metadata, "; ".join(reasons))
+
+    selected = [latest]
+    boundary_index = -1
+    boundary_reason = ""
+    for index in range(len(metadata) - 2, -1, -1):
+        candidate = metadata[index]
+        newer = selected[0]
+        if candidate[4]:
+            boundary_index = index
+            boundary_reason = "; ".join(candidate[4])
+            break
+        if candidate[1] is not None and year_counts[candidate[1]] > 1:
+            boundary_index = index
+            boundary_reason = "duplicate annual fiscal slot"
+            break
+        previous, end = candidate[2], newer[2]
+        same_month_end = (
+            previous.month == end.month
+            and (previous + timedelta(days=1)).day == (end + timedelta(days=1)).day == 1
+        )
+        if (
+            end.year != previous.year + 1
+            or ((previous.month, previous.day) != (end.month, end.day) and not same_month_end)
+            or newer[1] != candidate[1] + 1
+        ):
+            boundary_index = index
+            boundary_reason = "annual periods are not consecutive fiscal anniversaries"
+            break
+        if candidate[3] != newer[3]:
+            boundary_index = index
+            boundary_reason = "annual currency comparability unverified"
+            break
+        selected.insert(0, candidate)
+
+    omitted = (
+        excluded(metadata[: boundary_index + 1], boundary_reason)
+        if boundary_index >= 0
+        else []
+    )
+    return [item[0] for item in selected], [], omitted
 
 
 def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
@@ -145,7 +203,13 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
 
 
 def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
-    reasons = list(selection.get("annual_history", {}).get("reasons", []))
+    annual_history = selection.get("annual_history", {})
+    reasons = list(annual_history.get("reasons", []))
+    reasons.extend(
+        f"annual history report {item.get('id', 'unknown')}: {item['reason']}"
+        for item in annual_history.get("excluded", [])
+        if item.get("reason")
+    )
     reasons.extend(selection.get("price", {}).get("reasons", []))
     reasons.extend(
         f"report {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
@@ -205,7 +269,7 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         cash=_number(row["cash"]),
         eps=_number(row["eps"]),
         dividend_per_share=_number(row["dividend_per_share"]),
-        year=row["report_year"],
+        year=_fiscal_year(row["report_year"]),
         period=row["report_period"],
         period_end=_verified_fiscal_end(row),
         report_date=_date(row["report_date"]),
@@ -293,7 +357,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         (company_id,),
     ).fetchall()
     period_rows = []
-    unverified_annual = False
+    rejected_annual_dates = []
     for row in stored_period_rows:
         end, publication = _verified_fiscal_end(row), _date(row["report_date"])
         reason = None
@@ -305,11 +369,14 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reason = "after cutoff"
         elif end is None or publication is None:
             reason = "fiscal end or publication date unverified"
-            unverified_annual |= row["period_type"] == "year"
         elif publication < end:
             reason = "publication precedes fiscal end"
-            unverified_annual |= row["period_type"] == "year"
         if reason:
+            if row["period_type"] == "year" and reason in {
+                "fiscal end or publication date unverified",
+                "publication precedes fiscal end",
+            }:
+                rejected_annual_dates.append(row)
             selection["rejected_reports"].append(
                 {
                     "id": row["id"],
@@ -325,13 +392,22 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             )
         else:
             period_rows.append(row)
-    annual_period_rows, annual_reasons = _annual_series(period_rows)
-    if unverified_annual:
-        annual_period_rows = []
-        annual_reasons.append("excluded annual date metadata unverified")
+    annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
+    if annual_period_rows:
+        first_selected_end = _verified_fiscal_end(annual_period_rows[0])
+        blocking_rejections = [
+            row
+            for row in rejected_annual_dates
+            if _date(row["period_end"]) is None
+            or _date(row["period_end"]) >= first_selected_end
+        ]
+        if blocking_rejections:
+            annual_period_rows = []
+            annual_reasons = ["excluded annual date metadata unverified"]
     selection["annual_history"] = {
         "period_ends": [row["period_end"] for row in annual_period_rows],
         "reasons": annual_reasons,
+        "excluded": excluded_annuals,
     }
     price_rows = conn.execute(
         """
@@ -453,7 +529,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         financial_mapper.to_current(current_report),
         financial_mapper.to_historical(historical_annuals),
         growth_current=financial_mapper.to_current(latest_annual) if latest_annual else None,
-        growth_available=bool(annual_reports),
+        growth_available=len(annual_reports) >= 2,
     )
     current_raw = compute_raw_valuation(latest_price, current_report)
     dcf_raw = compute_raw_valuation(latest_price, dcf_current_report)

@@ -116,8 +116,10 @@ network fetch. Its effective date predicates are:
   not contribute to historical valuation anchors.
 - KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
   `observation_date <= as_of`. Undated/year-only history stays stored but is
-  not numerical authority. Latest eligible values are collected per KPI;
-  R12 overrides non-R12 history. Yearless `last` snapshots remain excluded.
+  not numerical authority. Replacement values replace observation-date
+  assurance atomically rather than inheriting an older row's date. Latest
+  eligible values are collected per KPI; R12 overrides non-R12 history.
+  Yearless `last` snapshots remain excluded.
 - Dividend inputs: trailing calendar twelve months ending at `as_of`, with
   `(start,end]` ex-date bounds. The previous-year anniversary clamps February 29
   to February 28; e.g. `2028-02-29` uses `(2027-02-28,2028-02-29]`, and
@@ -149,14 +151,18 @@ inputs; current financial margins/balance facts can still be available.
 
 The latest eligible report remains the current financial/heuristic basis.
 Growth, per-share growth, dilution and consistency instead use the latest
-annual anchor and a validated **consecutive annual fiscal series**. Fiscal-year
-labels must be known, unique and consecutive; verified ends must be annual
-anniversaries (including non-calendar years and leap month-end). Explicit starts,
-when supplied, must describe 365/366-day periods; non-annual labels, gaps, duplicate
-slots, stubs, excluded unverified annual dates and unknown/mixed currencies make
-that history unavailable with reasons. `broken_fiscal_year` alone is not a stub
-flag and does not exclude a non-calendar fiscal series. Quarter/R12 insertions
-cannot change annual growth. No quarter YoY is supplied without a matched pair.
+annual anchor and the maximal latest **consecutive annual fiscal suffix**.
+`period_type="year"` is authoritative; provider report-period labels do not
+reclassify it. Fiscal-year labels must normalize to known, unique consecutive
+integers, and verified ends must be annual anniversaries (including non-calendar
+years and leap month-end). Explicit starts, when supplied, must describe
+365/366-day periods. A gap, duplicate, stub, unverified date or currency mismatch
+stops the suffix without bridging it; older omitted rows remain in selection
+provenance and do not suppress a valid latest suffix. A defect at the latest
+anchor leaves annual metrics unavailable. `broken_fiscal_year` alone is not a
+stub flag and does not exclude a non-calendar fiscal series. Quarter/R12
+insertions cannot change annual growth. No quarter YoY is supplied without a
+matched pair.
 Each total, per-share and share-count growth result carries its own actual validated
 horizon; score descriptions use the horizon of the selected metric. Uncomputable
 growth carries a zero-year horizon, not a fabricated year or rate.

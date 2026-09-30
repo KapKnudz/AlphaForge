@@ -473,7 +473,7 @@ def upsert_kpi_observations(
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE kpi_observations SET value=?, observation_date=COALESCE(?, observation_date) WHERE id=?",
+                        "UPDATE kpi_observations SET value=?, observation_date=? WHERE id=?",
                         (val_f, observation_date, int(existing[0])),
                     )
                     count += 1
@@ -483,7 +483,7 @@ def upsert_kpi_observations(
                 INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, observation_date, value)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, year, report_period)
-                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=COALESCE(excluded.observation_date, kpi_observations.observation_date)
+                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=excluded.observation_date
                 """,
                 (
                     company_id,
