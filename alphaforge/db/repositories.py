@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
+from alphaforge.core.valuation.dividend_yield import is_known_currency
 
 
 def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
@@ -317,8 +319,7 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
         amount = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
         if ex_date is None or amount is None:
             continue
-        if isinstance(ex_date, str) and len(ex_date) > 10:
-            ex_date = ex_date[:10]
+        ex_date = date.fromisoformat(str(ex_date)[:10]).isoformat()
         # Empty is an explicit unknown sentinel for the legacy NOT NULL column.
         # Never invent SEK; the verification bit distinguishes legacy defaults.
         currency = str(r.get("currency") or r.get("currencyShortName") or "").strip()
@@ -333,15 +334,33 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
                  distribution_frequency, currency_verified, currency_conflicted)
             VALUES (?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(company_id, ex_date, dividend_type, amount) DO UPDATE SET
+                currency=CASE
+                    WHEN dividends.currency_conflicted=0
+                         AND excluded.currency_verified=1
+                         AND NOT (
+                             length(dividends.currency)=3
+                             AND dividends.currency NOT GLOB '*[^A-Z]*'
+                             AND dividends.currency NOT IN ('XXX','XTS')
+                         ) THEN excluded.currency
+                    ELSE dividends.currency END,
                 currency_verified=CASE
                     WHEN dividends.currency_conflicted=0
-                         AND dividends.currency=excluded.currency
-                         AND excluded.currency_verified=1 THEN 1 ELSE 0 END,
+                         AND excluded.currency_verified=1
+                         AND (
+                             dividends.currency=excluded.currency
+                             OR NOT (
+                                 length(dividends.currency)=3
+                                 AND dividends.currency NOT GLOB '*[^A-Z]*'
+                                 AND dividends.currency NOT IN ('XXX','XTS')
+                             )
+                         ) THEN 1 ELSE 0 END,
                 currency_conflicted=CASE
                     WHEN dividends.currency_conflicted=1 THEN 1
-                    WHEN dividends.currency<>excluded.currency
-                         AND dividends.currency<>''
-                         AND excluded.currency<>'' THEN 1
+                    WHEN excluded.currency_verified=1
+                         AND length(dividends.currency)=3
+                         AND dividends.currency NOT GLOB '*[^A-Z]*'
+                         AND dividends.currency NOT IN ('XXX','XTS')
+                         AND dividends.currency<>excluded.currency THEN 1
                     ELSE 0 END,
                 distribution_frequency=excluded.distribution_frequency
             """,
@@ -352,7 +371,7 @@ def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> 
                 currency,
                 dividend_type,
                 distribution_frequency,
-                int(bool(currency)),
+                int(is_known_currency(currency)),
             ),
         )
         count += 1
@@ -376,8 +395,6 @@ def upsert_dividend_window_coverage(
     A complete assertion requires external source evidence, not row extrema,
     HTTP success, or absence of rows. Börsdata acquisition cannot assert it.
     """
-    from datetime import date
-
     start, end = date.fromisoformat(window_start), date.fromisoformat(window_end)
     if end <= start:
         raise ValueError("dividend coverage requires start < end")

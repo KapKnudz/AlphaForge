@@ -360,7 +360,7 @@ class BorsdataAdapter:
             rows = rows[-max_count:]
         return rows
 
-    # ---- dividends (zero-row dropped at adapter) ----
+    # ---- dividends ----
 
     @staticmethod
     def _is_zero_dividend(row: dict[str, Any]) -> bool:

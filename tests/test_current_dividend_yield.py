@@ -197,6 +197,24 @@ def test_unknown_or_foreign_denomination_never_assumed(amount_currency, price_cu
     assert loaded["dividend_yield"]["reason"] == reason
 
 
+@pytest.mark.parametrize("initial_currency", [None, "XXX", "GBp"])
+def test_first_valid_currency_replaces_unverified_unknown(initial_currency):
+    conn, cid = seeded()
+    coverage(conn, cid)
+    row = {"exDate": "2025-06-01", "amount": 1, "currency": initial_currency}
+    upsert_dividends(conn, cid, [row])
+    assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_currency_unknown"
+    assert conn.execute(
+        "SELECT currency, currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == (initial_currency or "", 0, 0)
+    row["currency"] = "SEK"
+    upsert_dividends(conn, cid, [row])
+    assert rank(conn, cid)[0]["valuation"].dividend_yield == 10
+    assert conn.execute(
+        "SELECT currency, currency_verified, currency_conflicted FROM dividends"
+    ).fetchone()[:] == ("SEK", 1, 0)
+
+
 def test_matching_foreign_currency_yield_does_not_enable_sek_dcf():
     conn, cid = seeded()
     coverage(conn, cid)
@@ -219,6 +237,39 @@ def test_conflicting_relevant_currencies_and_duplicate_currency_conflict():
     upsert_dividends(conn, cid, [{"exDate": "2025-06-01", "amount": 1, "currency": "USD"}])
     upsert_dividends(conn, cid, rows)
     assert rank(conn, cid)[0]["dividend_yield"]["reason"] == "dividend_currency_unknown"
+
+
+@pytest.mark.parametrize("field", ["exDate", "ex_date", "date"])
+def test_repository_canonicalizes_valid_dividend_date_aliases(field):
+    conn, cid = seeded()
+    assert upsert_dividends(
+        conn,
+        cid,
+        [{field: "2025-06-01T23:59:59Z", "amount": 1, "currency": "SEK"}],
+    ) == 1
+    assert conn.execute("SELECT ex_date FROM dividends").fetchone()[0] == "2025-06-01"
+
+
+def test_repository_rejects_invalid_dates_without_inventing_missing_values():
+    conn, cid = seeded()
+    assert (
+        upsert_dividends(
+            conn,
+            cid,
+            [
+                {"amount": 0, "currency": "SEK"},
+                {"exDate": "2025-06-01", "currency": "SEK"},
+            ],
+        )
+        == 0
+    )
+    with pytest.raises(ValueError):
+        upsert_dividends(
+            conn,
+            cid,
+            [{"exDate": "2025-06-99", "amount": 0, "currency": "SEK"}],
+        )
+    assert conn.execute("SELECT count(*) FROM dividends").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

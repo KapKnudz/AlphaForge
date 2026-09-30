@@ -44,6 +44,19 @@ class DividendYieldResult:
         return asdict(self)
 
 
+def is_known_currency(value: str | None) -> bool:
+    # Do not case-fold denomination tags (GBp is not GBP), or admit
+    # unknown/test currency markers as verified units.
+    return bool(
+        value
+        and len(value) == 3
+        and value.isascii()
+        and value.isalpha()
+        and value.isupper()
+        and value not in {"XXX", "XTS"}
+    )
+
+
 def calculate_dividend_yield(
     as_of: date,
     close: float | None,
@@ -54,18 +67,6 @@ def calculate_dividend_yield(
     start, end = trailing_dividend_window(as_of)
     relevant = [r for r in distributions if start.isoformat() < r["ex_date"] <= end.isoformat()]
     currency = price_currency.strip() if price_currency else None
-
-    def known_currency(value):
-        # Do not case-fold denomination tags (GBp is not GBP), or admit
-        # unknown/test currency markers as verified units.
-        return bool(
-            value
-            and len(value) == 3
-            and value.isascii()
-            and value.isalpha()
-            and value.isupper()
-            and value not in {"XXX", "XTS"}
-        )
 
     def result(value=None, reason=None):
         return DividendYieldResult(
@@ -87,11 +88,11 @@ def calculate_dividend_yield(
         return result(reason=DividendYieldReason.COVERAGE_UNKNOWN)
     if close is None or not isfinite(close) or close <= 0:
         return result(reason=DividendYieldReason.PRICE_UNAVAILABLE)
-    if not known_currency(currency):
+    if not is_known_currency(currency):
         return result(reason=DividendYieldReason.CURRENCY_UNKNOWN)
     for row in relevant:
         amount_currency = (row.get("currency") or "").strip()
-        if not known_currency(amount_currency) or not row.get("currency_verified"):
+        if not is_known_currency(amount_currency) or not row.get("currency_verified"):
             return result(reason=DividendYieldReason.CURRENCY_UNKNOWN)
         if amount_currency != currency:
             return result(reason=DividendYieldReason.CURRENCY_MISMATCH)
