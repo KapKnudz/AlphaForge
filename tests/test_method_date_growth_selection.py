@@ -189,14 +189,10 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
             row["observationDate"] = CUTOFF
         return row
 
-    upsert_kpi_observations(
-        conn, cid, 37, "year", "mean", [observation(30)]
-    )
+    upsert_kpi_observations(conn, cid, 37, "year", "mean", [observation(30)])
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 30
 
-    upsert_kpi_observations(
-        conn, cid, 37, "year", "mean", [observation(40, observed=False)]
-    )
+    upsert_kpi_observations(conn, cid, 37, "year", "mean", [observation(40, observed=False)])
     stored = conn.execute(
         "SELECT value, observation_date FROM kpi_observations WHERE kpi_id=37"
     ).fetchone()
@@ -205,9 +201,7 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     assert 37 not in result["fundamental_kpis"]
     assert result["selection"]["rejected_kpis"][0]["reason"] == "KPI observation date unverified"
 
-    upsert_kpi_observations(
-        conn, cid, 37, "year", "mean", [observation(50)]
-    )
+    upsert_kpi_observations(conn, cid, 37, "year", "mean", [observation(50)])
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 50
 
 
@@ -228,10 +222,7 @@ def test_kpi_ingestion_parses_complete_iso_dates(
     if period_type == "year":
         row.update({"y": 2026, "p": 5})
 
-    assert (
-        upsert_kpi_observations(conn, cid, 37, period_type, "mean", [row])
-        == expected_count
-    )
+    assert upsert_kpi_observations(conn, cid, 37, period_type, "mean", [row]) == expected_count
     stored = conn.execute(
         "SELECT observation_date FROM kpi_observations WHERE kpi_id=37"
     ).fetchone()
@@ -266,9 +257,7 @@ def test_malformed_kpi_replacement_removes_prior_date_authority():
     assert tuple(stored) == (40, None)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert 37 not in loaded["fundamental_kpis"]
-    assert loaded["selection"]["rejected_kpis"][0]["reason"] == (
-        "KPI observation date unverified"
-    )
+    assert loaded["selection"]["rejected_kpis"][0]["reason"] == ("KPI observation date unverified")
 
 
 @pytest.mark.parametrize("order", ["forward", "reverse", "rotated"])
@@ -463,9 +452,7 @@ def test_nonnumeric_older_fiscal_year_is_excluded_without_arithmetic():
     conn, cid = setup(periods=[annual(2025), annual(2026, 110)])
     rows = [
         dict(row)
-        for row in conn.execute(
-            "SELECT * FROM financial_periods ORDER BY period_end"
-        ).fetchall()
+        for row in conn.execute("SELECT * FROM financial_periods ORDER BY period_end").fetchall()
     ]
     rows[0]["report_year"] = "not-a-year"
     selected, reasons, excluded = _annual_series(rows)
@@ -535,9 +522,7 @@ def test_missing_future_or_invalid_price_cannot_authorize_valuation(
 )
 def test_price_ingestion_parses_complete_iso_dates(raw_date, expected_count, stored_date):
     conn, cid = setup(price_date=None)
-    assert upsert_prices(conn, cid, [{"d": raw_date, "c": 10}], currency="SEK") == (
-        expected_count
-    )
+    assert upsert_prices(conn, cid, [{"d": raw_date, "c": 10}], currency="SEK") == (expected_count)
     stored = conn.execute("SELECT price_date FROM prices").fetchone()
     assert (stored["price_date"] if stored else None) == stored_date
     loaded = load_results_for_company(conn, cid, CUTOFF)
@@ -681,15 +666,11 @@ def test_fiscal_end_aliases_are_order_independent(aliases, admitted):
     conn, cid = setup(periods=[])
 
     assert upsert_financial_periods(conn, cid, [payload]) == int(admitted)
-    assert conn.execute("SELECT count(*) FROM financial_periods").fetchone()[0] == int(
-        admitted
-    )
+    assert conn.execute("SELECT count(*) FROM financial_periods").fetchone()[0] == int(admitted)
     if admitted:
         assert load_results_for_company(conn, cid, CUTOFF)["financial"] is not None
     else:
-        rejection = load_results_for_company(conn, cid, CUTOFF)["selection"][
-            "rejected_reports"
-        ][0]
+        rejection = load_results_for_company(conn, cid, CUTOFF)["selection"]["rejected_reports"][0]
         assert rejection["raw_payload"] == payload
         assert rejection["current_refusal"]
 
@@ -943,9 +924,7 @@ def test_foreign_report_currency_does_not_expand_valuation_availability():
     assert not result["reverse_dcf"]["dcf"]["available"]
 
 
-def test_all_selection_refusals_retain_provenance_and_reach_exports(
-    monkeypatch, tmp_path
-):
+def test_all_selection_refusals_retain_provenance_and_reach_exports(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
     rejected = annual(2026, 121)
     rejected.pop("period_end")
@@ -977,9 +956,7 @@ def test_all_selection_refusals_retain_provenance_and_reach_exports(
     assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
-def test_annual_rejections_block_only_while_unresolved_and_applicable(
-    monkeypatch, tmp_path
-):
+def test_annual_rejections_block_only_while_unresolved_and_applicable(monkeypatch, tmp_path):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2026)]
     conn, cid = setup(periods=rows)
     rejected = annual(2026, 133.1)
@@ -1064,15 +1041,16 @@ def test_future_publication_is_audit_only_without_hiding_alias_conflicts(
         if item["source"] == "ingestion_rejection"
     )
     assert retained["current_refusal"] is current_refusal
-    assert any(
-        "fiscal end unavailable or invalid" in reason
-        for reason in loaded["selection"]["refusal_reasons"]
-    ) is current_refusal
+    assert (
+        any(
+            "fiscal end unavailable or invalid" in reason
+            for reason in loaded["selection"]["refusal_reasons"]
+        )
+        is current_refusal
+    )
 
 
-def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
-    monkeypatch, tmp_path
-):
+def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch, tmp_path):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
     transition = annual(
@@ -1088,8 +1066,7 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
     transition_rejection = next(
         item
         for item in loaded["selection"]["rejected_reports"]
-        if item["source"] == "financial_periods"
-        and item["period_end"] == "2026-04-30"
+        if item["source"] == "financial_periods" and item["period_end"] == "2026-04-30"
     )
     assert transition_rejection["report_year"] == 2026
     assert transition_rejection["current_refusal"]
@@ -1191,18 +1168,13 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
     assert not audit["current_refusal"]
     assert loaded["financial"].revenue_growth == pytest.approx(0.1)
     assert loaded["financial"].revenue_growth_years == 3
-    assert not any(
-        expected_reason in reason
-        for reason in loaded["selection"]["refusal_reasons"]
-    )
+    assert not any(expected_reason in reason for reason in loaded["selection"]["refusal_reasons"])
 
     packet(conn, cid)
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
     exported_audit = next(
-        item
-        for item in exported["rejected_reports"]
-        if item["source"] == "ingestion_rejection"
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
     )
     assert exported_audit["raw_payload"] == rejected
     assert not exported_audit["current_refusal"]
@@ -1234,9 +1206,7 @@ def test_conflicting_alias_original_is_retained_once_across_repeated_replacement
 
     audit = next(
         item
-        for item in load_results_for_company(conn, cid, CUTOFF)["selection"][
-            "rejected_reports"
-        ]
+        for item in load_results_for_company(conn, cid, CUTOFF)["selection"]["rejected_reports"]
         if item["source"] == "ingestion_rejection"
     )
     assert audit["raw_payload"] == rejected
@@ -1285,9 +1255,7 @@ def test_conflicting_fiscal_aliases_remain_current_after_same_key_correction(
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
     exported_audit = next(
-        item
-        for item in exported["rejected_reports"]
-        if item["source"] == "ingestion_rejection"
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
     )
     assert exported_audit["current_refusal"]
     assert any("fiscal end" in item for item in score["missing_data"])
@@ -1305,9 +1273,7 @@ def test_conflicting_fiscal_aliases_remain_current_after_same_key_correction(
         ("ordinary", None),
     ],
 )
-def test_contextual_annual_rejections_archive_only_rejected_restatements(
-    case, expected_reason
-):
+def test_contextual_annual_rejections_archive_only_rejected_restatements(case, expected_reason):
     if case == "duplicate":
         rows = [annual(2025), annual(2026, 110), annual(2026, 120, period_end="2026-04-30")]
         target = rows[-1]
@@ -1375,7 +1341,12 @@ def test_kpi_rejections_only_refuse_applicable_selection(
         )
     else:
         upsert_kpi_observations(
-            conn, cid, 37, "year", "mean", [{"y": 2025, "p": 5, "v": 20, "observationDate": "2025-05-01"}]
+            conn,
+            cid,
+            37,
+            "year",
+            "mean",
+            [{"y": 2025, "p": 5, "v": 20, "observationDate": "2025-05-01"}],
         )
         upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
     packet(conn, cid)
@@ -1383,7 +1354,9 @@ def test_kpi_rejections_only_refuse_applicable_selection(
     loaded = load_results_for_company(conn, cid, CUTOFF)
     rejected = loaded["selection"]["rejected_kpis"][0]
     assert rejected["current_refusal"] is current_refusal
-    assert any("KPI" in reason for reason in loaded["selection"]["refusal_reasons"]) is current_refusal
+    assert (
+        any("KPI" in reason for reason in loaded["selection"]["refusal_reasons"]) is current_refusal
+    )
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
@@ -1432,9 +1405,7 @@ def test_corrected_nonannual_rejection_is_audit_only_in_rank_exports(
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
     retained_export = next(
-        item
-        for item in exported["rejected_reports"]
-        if item["source"] == "ingestion_rejection"
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
     )
     assert not retained_export["current_refusal"]
     assert not any("fiscal end unavailable or invalid" in item for item in score["missing_data"])
@@ -1485,23 +1456,22 @@ def test_nonannual_rejections_use_exact_slots_and_latest_applicability(
         if item["source"] == "ingestion_rejection"
     )
     assert retained["current_refusal"] is current_refusal, case
-    assert any(
-        retained["reason"] in reason
-        for reason in loaded["selection"]["refusal_reasons"]
-    ) is current_refusal
+    assert (
+        any(retained["reason"] in reason for reason in loaded["selection"]["refusal_reasons"])
+        is current_refusal
+    )
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
     exported_rejection = next(
-        item
-        for item in exported["rejected_reports"]
-        if item["source"] == "ingestion_rejection"
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
     )
     assert exported_rejection["current_refusal"] is current_refusal
     assert any(retained["reason"] in item for item in score["missing_data"]) is current_refusal
-    assert any(
-        retained["reason"] in item for item in score["readiness_limitations"]
-    ) is current_refusal
+    assert (
+        any(retained["reason"] in item for item in score["readiness_limitations"])
+        is current_refusal
+    )
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
 
@@ -1536,9 +1506,7 @@ def test_nonannual_year_period_identity_must_match_one_admitted_slot(period_type
 
     retained = next(
         item
-        for item in load_results_for_company(conn, cid, CUTOFF)["selection"][
-            "rejected_reports"
-        ]
+        for item in load_results_for_company(conn, cid, CUTOFF)["selection"]["rejected_reports"]
         if item["source"] == "ingestion_rejection"
     )
     assert retained["current_refusal"]
@@ -1575,9 +1543,7 @@ def test_report_period_alone_never_supersedes_a_rejection(period_type):
 
 
 @pytest.mark.parametrize("case", ["known_end_conflict", "cross_type", "unknown_slot"])
-def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(
-    case, monkeypatch, tmp_path
-):
+def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(case, monkeypatch, tmp_path):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
     if case == "known_end_conflict":
@@ -1623,10 +1589,7 @@ def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(
         if item["period_type"] == "r12" and item["reason"] != "after cutoff"
     )
     assert retained["current_refusal"]
-    assert any(
-        retained["reason"] in reason
-        for reason in loaded["selection"]["refusal_reasons"]
-    )
+    assert any(retained["reason"] in reason for reason in loaded["selection"]["refusal_reasons"])
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     exported = score["input_selection"]
@@ -1660,12 +1623,9 @@ def test_metric_spans_use_latest_contiguous_complete_suffix(interior_revenue):
     assert financial.share_count_growth_years == 3
     assert financial.positive_fcf_ratio == 0.5
     assert financial.operating_margin_volatility == pytest.approx(0.1)
-    assert result["reverse_dcf"]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(
-        0.15
-    )
+    assert result["reverse_dcf"]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.15)
     assert any(
-        "clamped from 0.2000" in warning
-        for warning in result["reverse_dcf"]["dcf"]["warnings"]
+        "clamped from 0.2000" in warning for warning in result["reverse_dcf"]["dcf"]["warnings"]
     )
 
 
@@ -1696,8 +1656,7 @@ def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
     assert row["fcf_per_share_growth_years"] == "3"
     assert row["book_value_per_share_growth_years"] == "3"
     assert any(
-        "Revenue/share growth" in item and "(2y CAGR)" in item
-        for item in score["positives"]
+        "Revenue/share growth" in item and "(2y CAGR)" in item for item in score["positives"]
     )
     assert any("EBIT/share growth" in item and "(3y CAGR)" in item for item in score["positives"])
 

@@ -180,18 +180,13 @@ def _intrinsic_period_rejection_reason(row: Any) -> str | None:
     stored_publications, stored_publication_malformed = report_date_aliases(
         {"report_date": row["report_date"]}, "report_date"
     )
-    stored_years, _ = report_integer_aliases(
-        {"report_year": row["report_year"]}, "report_year"
-    )
+    stored_years, _ = report_integer_aliases({"report_year": row["report_year"]}, "report_year")
     stored_periods, _ = report_integer_aliases(
         {"report_period": row["report_period"]}, "report_period"
     )
     verified_end = (
         next(iter(ends))
-        if not malformed_end
-        and not stored_end_malformed
-        and len(ends) == 1
-        and ends == stored_ends
+        if not malformed_end and not stored_end_malformed and len(ends) == 1 and ends == stored_ends
         else None
     )
     publication = (
@@ -269,15 +264,12 @@ def _contextual_annual_rejection_reason(conn: Any, company_id: int, target: Any)
         newer_end = date.fromisoformat(str(newer["period_end"])[:10])
         same_month_end = (
             previous_end.month == newer_end.month
-            and (previous_end + timedelta(days=1)).day
-            == (newer_end + timedelta(days=1)).day
-            == 1
+            and (previous_end + timedelta(days=1)).day == (newer_end + timedelta(days=1)).day == 1
         )
         if (
             newer_end.year != previous_end.year + 1
             or (
-                (previous_end.month, previous_end.day)
-                != (newer_end.month, newer_end.day)
+                (previous_end.month, previous_end.day) != (newer_end.month, newer_end.day)
                 and not same_month_end
             )
             or years[selected_start] != years[index] + 1
@@ -310,9 +302,7 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             if not malformed_publication and len(publications) == 1
             else None
         )
-        report_year = (
-            next(iter(years)) if not malformed_year and len(years) == 1 else None
-        )
+        report_year = next(iter(years)) if not malformed_year and len(years) == 1 else None
         report_period = (
             next(iter(report_periods))
             if not malformed_period and len(report_periods) == 1
@@ -649,9 +639,7 @@ def upsert_kpi_observations(
             year_int = int(year)
             report_period_int = int(report_period) if report_period is not None else None
             observation_date = (
-                parsed_observation_date.isoformat()
-                if parsed_observation_date is not None
-                else None
+                parsed_observation_date.isoformat() if parsed_observation_date is not None else None
             )
             if report_period_int is None:
                 existing = conn.execute(

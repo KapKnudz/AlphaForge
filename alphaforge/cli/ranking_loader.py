@@ -166,9 +166,7 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
         selected.insert(0, candidate)
 
     omitted = (
-        excluded(metadata[: boundary_index + 1], boundary_reason)
-        if boundary_index >= 0
-        else []
+        excluded(metadata[: boundary_index + 1], boundary_reason) if boundary_index >= 0 else []
     )
     reasons = []
     if len(selected) < 2:
@@ -226,9 +224,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         current = item["reason"] != "KPI after cutoff"
         if current and item["period_type"] != "r12" and item["kpi_id"] in selected_r12:
             current = False
-        selected = selected_rows.get(
-            (int(item["kpi_id"]), item["period_type"], item["price_type"])
-        )
+        selected = selected_rows.get((int(item["kpi_id"]), item["period_type"], item["price_type"]))
         rejected_year = _fiscal_year(item["year"])
         selected_year = _fiscal_year(selected["year"]) if selected is not None else None
         if current and rejected_year is not None and selected_year is not None:
@@ -513,8 +509,10 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reason = "report period metadata unverified"
         elif malformed_start or len(starts) > 1:
             reason = "fiscal start metadata unverified"
-        elif end > cutoff or publication > cutoff or (
-            fiscal_year is not None and fiscal_year > cutoff.year
+        elif (
+            end > cutoff
+            or publication > cutoff
+            or (fiscal_year is not None and fiscal_year > cutoff.year)
         ):
             reason = "after cutoff"
         elif publication < end:
@@ -537,8 +535,10 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             period_rows.append(row)
     annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
     admitted_annuals = [row for row in period_rows if row["period_type"] == "year"]
-    latest_annual_row = annual_period_rows[-1] if annual_period_rows else (
-        admitted_annuals[-1] if admitted_annuals else None
+    latest_annual_row = (
+        annual_period_rows[-1]
+        if annual_period_rows
+        else (admitted_annuals[-1] if admitted_annuals else None)
     )
     for item in selection["rejected_reports"]:
         item["current_refusal"] = _rejection_is_current(

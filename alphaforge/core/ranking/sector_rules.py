@@ -128,9 +128,7 @@ def _property_growth(financial, histories):
                 1,
             )
             period = f"{years}y CAGR" if years > 1 else "YoY"
-            label = (
-                "Property revenue/share growth" if per_share else "Property revenue growth"
-            )
+            label = "Property revenue/share growth" if per_share else "Property revenue growth"
             if revenue_growth >= 0.10:
                 positives.append(f"{label} {revenue_growth:.0%} ({period}) — strong")
             elif revenue_growth < 0:
