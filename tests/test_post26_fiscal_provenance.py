@@ -53,6 +53,36 @@ def test_provider_identity_is_preserved_or_explicitly_conflicted(
     )
 
 
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("AQ Group AB (publ), interim report January-March, 2026", "2026/2026-q1"),
+        ("AQ Group AB (publ), interim report January-June, 2025", "2025/2025-q2"),
+        ("AQ Group AB (publ), interim report January - September, 2024", "2024/2024-q3"),
+        ("AQ Group AB (publ): Year-end report 2024", "2024/2024-q4"),
+        ("AQ Group AB (publ): Bokslutskommuniké 2025", "2025/2025-q4"),
+        ("Flow AB Interim report January—June, 2026", "2026/2026-q2"),
+    ],
+)
+def test_public_aq_punctuation_and_year_end_keep_covered_quarter(lane, title, expected):
+    entry = item(title=title)
+    entry["properties"]["tags"] = ["sub:report", f"sub:report:interim:q{expected[-1]}"]
+    first, _ = run(lane, [entry])
+    assert first.status == "complete"
+    assert first.packet["sources"][0]["fiscal_period"] == expected
+    assert view(lane)[1].deduplication[0]["slot_key"] == "quarterly:" + expected
+    old = current_candidate_observations(lane[0], company_id=lane[1], as_of=AS_OF)[0]
+    replay, _ = run(lane, [entry], fetch=False)
+    assert replay.status == "complete"
+    assert replay.packet_hash == first.packet_hash
+    assert (
+        current_candidate_observations(lane[0], company_id=lane[1], as_of=AS_OF)[0][
+            "candidate_observation_id"
+        ]
+        == old["candidate_observation_id"]
+    )
+
+
 def test_annual_and_year_end_identity_remain_distinct(lane):
     annual = item("annual-en", "Flow AB Annual Report 2025")
     annual["properties"]["tags"] = ["sub:report", "sub:report:annual"]

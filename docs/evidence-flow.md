@@ -108,7 +108,10 @@ before immutable observation and relation creation. The fiscal resolver in
 `evidence/ingest.py` gives explicit provider fields precedence over a covered
 report title, then falls back only to report-labelled body headings. It does
 not scan arbitrary narrative for the first year/quarter: publication dates,
-forecasts and comparator mentions are not covered identity. Contradictory
+forecasts and comparator mentions are not covered identity. Covered month spans
+accept separator punctuation (including a comma before the year); explicit
+year-end report titles retain fiscal Q4, distinct from annual-report identity.
+Neither normalization changes report-class horizons. Contradictory
 covered headings or provider/title identities remain null with
 `fiscal_identity_ambiguous`; absent covered identity records
 `fiscal_identity_unresolved`. These are source/packet limitations, not invented

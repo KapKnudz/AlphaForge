@@ -337,7 +337,15 @@ def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
 
 
 def _quarter_period(text: str) -> str | None:
-    text = text.casefold()
+    text = text.casefold().replace(",", " ")
+    text = re.sub(r"[‐‑‒–—]", "-", text)
+    year_end = re.search(
+        r"\b(?:year[- ]end\s+report|bokslutskommunik[eé])\s*[:–-]?\s*"
+        r"(20\d{2})(?:\s*/\s*((?:20)?\d{2}))?\b",
+        text,
+    )
+    if year_end:
+        return f"{year_end.group(1)}/{_expand_fiscal_year(year_end.group(1), year_end.group(2))}-q4"
     for ordinal, quarter in (
         ("första|first", "q1"),
         ("andra|second", "q2"),
