@@ -31,12 +31,11 @@ bytes; hashes the raw bytes; extracts with `pypdf`; and persists logical
 documents, bilingual sibling provenance, attachments, extraction metadata, and
 page anchors through repository helpers.
 
-Each non-dry-run feed check persists a distinct `mfn_feed_checks.id` audit event,
-including zero delta. `checked_at` retains the actual SQLite clock timestamp;
-equal timestamps do not conflate events. Chronological reads order by
-`checked_at DESC, id DESC` (scoped to the issuer). Schema 12 / migration
-`012_mfn_feed_check_event_identity.sql` preserves old rowids as event ids and
-all existing audit values while replacing the timestamp-based primary key.
+Each non-dry-run feed check persists a distinct audit event, including zero
+delta. Event identity is independent of the SQLite wall-clock timestamp, so
+equal `checked_at` values do not conflate checks. The [live SQLite
+schema](../db/alphaforge.sqlite.sql) and [migration history](../db/migrations/)
+own the table shape and upgrade details.
 
 Historical retrieval is bounded: interim reports keep a 2-year lookback and
 annual reports a 5-year lookback relative to `--as-of` (calendar-year

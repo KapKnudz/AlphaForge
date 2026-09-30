@@ -840,14 +840,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     UNIQUE (job_type, company_id)
 ) STRICT;
 
-CREATE TABLE IF NOT EXISTS mfn_feed_checks (
-    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    mfn_slug            TEXT NOT NULL,
-    checked_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    discovered_count    INTEGER NOT NULL,
-    unseen_count        INTEGER NOT NULL,
-    PRIMARY KEY (company_id, checked_at)
-) STRICT;
+-- The live mfn_feed_checks definition and its event-identity upgrades are owned
+-- by db/alphaforge.sqlite.sql and db/migrations/, not this historical DDL sketch.
 
 CREATE TABLE IF NOT EXISTS news_releases (
     company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
