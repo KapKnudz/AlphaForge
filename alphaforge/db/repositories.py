@@ -169,29 +169,13 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 mapped[canon] = v
         # period_type / period_end handling — caller supplies period_type if not in payload
         period_type = p.get("period_type") or mapped.get("period_type") or "year"
-        period_end = (
-            p.get("period_End")
-            or p.get("report_End_Date")
-            or p.get("period_end")
-            or p.get("periodEnd")
-            or p.get("report_Date")
-            or p.get("reportDate")
-            or p.get("date")
-        )
-        # Fallback: use report_year/period to synthesize period_end if missing → skip
-        if not period_end:
-            # Try to derive from year/period for quarantine check
-            if is_placeholder:
-                # For placeholder rows, use a synthetic period_end to allow quarantine visibility
-                # Use report year or current placeholder key
-                ry = p.get("year") or p.get("report_year") or 0
-                rp = p.get("period") or p.get("report_period") or 0
-                period_end = f"{ry:04d}-{rp:02d}-01" if ry else None
-            if not period_end:
-                continue
-        # Normalize to YYYY-MM-DD
-        if isinstance(period_end, str) and len(period_end) > 10:
-            period_end = period_end[:10]
+        period_end = p.get("period_end") or mapped.get("period_end")
+        # Publication and year/quarter labels are not fiscal-end evidence.
+        # Unkeyable rows are not persisted under a manufactured fiscal date.
+        try:
+            period_end = date.fromisoformat(str(period_end)[:10]).isoformat()
+        except ValueError:
+            continue
         # Use mapped for other financials — REPORT_FIELD_MAP now covers live keys
         # (total_Equity, net_Debt, cash_Flow_From_Operating_Activities …) so that
         # ROE, D/E and cash conversion are not silently dropped.
@@ -237,7 +221,7 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 p.get("year") or p.get("report_year"),
                 p.get("period") or p.get("report_period"),
                 report_date,
-                p.get("broken_Fiscal_Year") or p.get("broken_fiscal_year"),
+                p.get("broken_Fiscal_Year", p.get("broken_fiscal_year")),
                 currency,
                 currency_ratio,
                 fx_rate_to_sek,

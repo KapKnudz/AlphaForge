@@ -12,9 +12,15 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v13"`
-  (v13 corrects first-authoritative denomination refresh of unverified legacy rows;
-  DCF policy/engine are unchanged and exported separately).
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-verified-annual-v14"`
+  (v14 combines verified dividend-yield provenance with date/freshness selection,
+  comparable annual growth and method propagation to readiness;
+  `valuation_score` remains heuristic and DCF separate).
+  Financial selection is `verified-dates-consecutive-annual-v1` in the loader.
+  Current price age and historical report-price pairing are limited to seven
+  calendar days inclusive; unavailable prices cannot supply multiples or DCF.
+  Pairing refusals and annual-history reasons are auditable in `dcf.json.selection`,
+  with current-price/annual-history refusals also in ranking `missing_data` (JSON/CSV).
 * **Current dividend yield:** policy `calendar-ttm-verified-v2` in
   [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
   percentage points from `sum(amount) / selected_close * 100` only for an
@@ -30,8 +36,7 @@ ranking never masquerades as a discounted-cash-flow.
   currencies are valid without conversion. No report FX or
   realized-return/reinvestment substitution. The v2 provenance rule admits the
   first authoritative supported denomination for an unverified, conflict-free
-  row,
-  including a valid-looking legacy tag such as assumed SEK. Only contradictory
+  row, including a valid-looking legacy tag such as assumed SEK. Only contradictory
   **verified** supported denominations establish a sticky conflict; unusable/missing
   fresh tags do not erase earlier verified denomination evidence or certify a
   window.
@@ -59,11 +64,15 @@ ranking never masquerades as a discounted-cash-flow.
   with linear fade of `revenue_growth` and `ebit_margin`, then
   `terminal_value = terminal_fcff / (discount - terminal_growth)`.
 * **Wiring:** `alphaforge/cli/ranking_loader.py:load_results_for_company`
-  builds `DcfPolicyDecision` from PIT-filtered annuals and `kpi_observations`
-  (37), then `ReverseDcfEngine` → `DcfValue` (enterprise/equity/value per
-  share, terminal value, 5 `ProjectedCashFlow` with `fcff`/`discounted_fcff`).
-  PIT means `year <= cutoff.year AND observation_date <= as_of`; KPI 37/42
-  prefer R12 over annual explicitly. DCF market cap, enterprise value, and the
+  builds `DcfPolicyDecision` from validated consecutive annual fiscal history
+  and dated `kpi_observations` (37), then `ReverseDcfEngine` → `DcfValue`
+  (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
+  with `fcff`/`discounted_fcff`). This is cutoff-filtered stored data with
+  verified applicable dates, **not historical-known-then PIT**. KPI selection
+  requires `year <= cutoff.year AND observation_date IS NOT NULL AND
+  observation_date <= as_of` with valid dates; KPI 37/42 prefer R12 over annual.
+  Undated history stays stored but cannot drive ROIC or leverage calculations;
+  missing ROIC retains the policy's explicit provisional behavior. DCF market cap, enterprise value, and the
   required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
@@ -118,5 +127,7 @@ without error.
   stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`
   — except missing ROIC, which yields a provisional available DCF at 0%
   reinvestment (see policy above).
-* Deterministic: identical PIT inputs → identical `DcfValue` and `valuation_score`.
+* Deterministic: identical selected stored inputs under identical rules →
+  identical `DcfValue` and `valuation_score`; this does not retain financial
+  vintages or implement executed-run numerical replay.
 * Credentials never appear in exports or logs (`authKey` redacted in adapter).

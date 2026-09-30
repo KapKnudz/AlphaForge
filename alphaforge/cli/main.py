@@ -995,6 +995,7 @@ def export_ranking_files(
                 "readiness_limitations",
                 "evidence_packet_hash",
                 "data_quality",
+                "missing_data",
             ]
         )
         for i, score in enumerate(ranking.scores, 1):
@@ -1017,6 +1018,7 @@ def export_ranking_files(
                     ";".join(score.readiness_limitations),
                     score.evidence_packet_hash or "",
                     score.data_quality,
+                    ";".join(score.missing_data),
                 ]
             )
 
@@ -1139,10 +1141,15 @@ def cmd_rank(args: argparse.Namespace) -> int:
         loaded = results_by_company.get(score.company_id, {})
         candidate = loaded.get("candidate")
         if candidate is None:
-            score.readiness_status = "evidence_blocked"
-            score.readiness_blockers = ["ranking inputs unavailable"]
-            continue
+            from types import SimpleNamespace
+
+            candidate = SimpleNamespace(
+                company_id=score.company_id,
+                research_evidence=loaded.get("research_evidence") or {},
+                full_results=loaded,
+            )
         candidate.ticker = score.ticker
+        candidate.ranking_model = score.ranking_model
         assessment = gate.assess(candidate)
         score.readiness_status = assessment.status
         score.readiness_blockers = [f"{item.code}: {item.message}" for item in assessment.blockers]

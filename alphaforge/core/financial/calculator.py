@@ -12,9 +12,26 @@ class FinancialCalculator:
         growth_current: CurrentFinancials | None = None,
         latest_quarter: CurrentFinancials | None = None,
         prior_year_quarter: CurrentFinancials | None = None,
+        *,
+        growth_available: bool = True,
     ) -> FinancialResult:
 
         growth_current = growth_current or current
+        if not growth_available:
+            # Preserve current margins/balance inputs without substituting a
+            # mixed or unverified series for annual growth and consistency.
+            growth_current = CurrentFinancials(
+                revenue=None,
+                operating_profit=None,
+                ebit=None,
+                ebitda=None,
+                net_income=None,
+                free_cash_flow=None,
+                equity=None,
+                total_assets=None,
+                total_debt=None,
+            )
+            historical = HistoricalFinancials([], [], [], [])
 
         (
             revenue_growth,
@@ -198,11 +215,11 @@ class FinancialCalculator:
         history: list[float | None],
     ) -> tuple[float | None, int]:
         if current_value is None or current_value <= 0 or not history:
-            return None, 1
+            return None, 0
 
         previous_value = history[-1]
         if previous_value is None or previous_value <= 0:
-            return None, 1
+            return None, 0
 
         periods = min(3, len(history))
         baseline = history[-periods]

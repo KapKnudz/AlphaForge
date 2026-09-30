@@ -174,8 +174,14 @@ def test_kpi_37_and_42_persist_when_summary_omits_them():
     )
     upsert_prices(conn, cid, [{"d": "2026-02-02T00:00:00", "c": 20, "v": 100}], currency="SEK")
     results = load_results_for_company(conn, cid, "2026-02-03")
-    assert results["fundamental_kpis"][KpiIds.ROIC] == 15.0
-    assert results["fundamental_kpis"][KpiIds.NET_DEBT_EBITDA] == 0.5
+    # Persistence is not date assurance: retain undated provider history for
+    # audit, but do not admit it as a selected numerical input by year alone.
+    assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 4
+    assert KpiIds.ROIC not in results["fundamental_kpis"]
+    assert KpiIds.NET_DEBT_EBITDA not in results["fundamental_kpis"]
+    assert {item["reason"] for item in results["selection"]["rejected_kpis"]} == {
+        "KPI observation date unverified"
+    }
 
 
 def test_dcf_wired_and_distinguished_from_heuristic_score():

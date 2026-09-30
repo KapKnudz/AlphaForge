@@ -225,7 +225,7 @@ class TestGoldenPacketRoundTrip:
             company_id,
             [
                 {"d": "2025-03-01T00:00:00", "c": 10, "v": 100},
-                {"d": "2026-03-01", "c": 20, "v": 100},
+                {"d": "2026-09-19", "c": 20, "v": 100},
             ],
             currency="SEK",
         )
@@ -360,7 +360,7 @@ class TestModelNumberFidelity:
     def test_ranking_model_version_constant(self):
         """Ranking model version is constant across runs."""
         engine = RankingEngine()
-        assert engine.RANKING_MODEL_VERSION == "2026-09-30-verified-dividend-yield-v13"
+        assert engine.RANKING_MODEL_VERSION == "2026-09-30-verified-annual-v14"
 
     def test_score_determinism(self):
         """Same company produces same scores regardless of order."""

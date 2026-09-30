@@ -151,10 +151,9 @@ def _compute_candidate_reason(quality: dict, growth: dict, val: dict, balance: d
 
 
 class RankingEngine:
-    # v11 wires the auditable DCF (policy + engine) into the loader and
-    # exports, so valuation_score remains a heuristic while DCF fair-value
-    # is presented separately with provenance.
-    RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v13"
+    # v14 combines verified dividend yield with verified date/freshness
+    # selection, consecutive annual growth, and readiness method propagation.
+    RANKING_MODEL_VERSION = "2026-09-30-verified-annual-v14"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository
@@ -252,6 +251,11 @@ class RankingEngine:
             missing_data = (
                 quality["missing"] + growth["missing"] + val["missing"] + balance["missing"]
             )
+            selection = results.get("selection") or {}
+            missing_data += [
+                *selection.get("annual_history", {}).get("reasons", []),
+                *selection.get("price", {}).get("reasons", []),
+            ]
             flags = _compute_flags(quality, growth, val, balance, missing_data)
             for category in (quality, growth, val, balance):
                 for flag in category.get("flags", []):
