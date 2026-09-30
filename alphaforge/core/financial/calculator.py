@@ -48,8 +48,13 @@ class FinancialCalculator:
             net_income_per_share_growth,
             fcf_per_share_growth,
             book_value_per_share_growth,
-            per_share_years,
+            revenue_per_share_years,
+            ebit_per_share_years,
+            net_income_per_share_years,
+            fcf_per_share_years,
+            book_value_per_share_years,
             share_count_growth,
+            share_count_years,
         ) = self._per_share_metrics(growth_current, historical)
         (
             margin_volatility,
@@ -110,7 +115,13 @@ class FinancialCalculator:
             fcf_per_share_growth=fcf_per_share_growth,
             book_value_per_share_growth=book_value_per_share_growth,
             share_count_growth=share_count_growth,
-            per_share_growth_years=per_share_years,
+            per_share_growth_years=revenue_per_share_years,
+            revenue_per_share_growth_years=revenue_per_share_years,
+            ebit_per_share_growth_years=ebit_per_share_years,
+            net_income_per_share_growth_years=net_income_per_share_years,
+            fcf_per_share_growth_years=fcf_per_share_years,
+            book_value_per_share_growth_years=book_value_per_share_years,
+            share_count_growth_years=share_count_years,
             share_dilution=bool(share_count_growth is not None and share_count_growth > 0.05),
             gross_margin=self.calculate_ratio(current.gross_income, current.revenue),
             cash_conversion=(
@@ -174,7 +185,12 @@ class FinancialCalculator:
             for name, value in values.items()
         ]
         share_growth = self._growth(current.shares_outstanding, historical.shares_history)
-        return (*[item[0] for item in growths], growths[0][1], share_growth[0])
+        return (
+            *[item[0] for item in growths],
+            *[item[1] for item in growths],
+            share_growth[0],
+            share_growth[1],
+        )
 
     def _quality_metrics(self, current, historical, latest_quarter, prior_year_quarter, growth):
         recent = (

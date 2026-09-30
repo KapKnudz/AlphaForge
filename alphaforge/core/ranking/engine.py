@@ -252,10 +252,8 @@ class RankingEngine:
                 quality["missing"] + growth["missing"] + val["missing"] + balance["missing"]
             )
             selection = results.get("selection") or {}
-            missing_data += [
-                *selection.get("annual_history", {}).get("reasons", []),
-                *selection.get("price", {}).get("reasons", []),
-            ]
+            missing_data += selection.get("refusal_reasons", [])
+            missing_data = list(dict.fromkeys(missing_data))
             flags = _compute_flags(quality, growth, val, balance, missing_data)
             for category in (quality, growth, val, balance):
                 for flag in category.get("flags", []):
@@ -303,6 +301,7 @@ class RankingEngine:
                 eligibility_reasons=eligibility_reasons,
                 evidence_packet_hash=evidence_packet_hash,
                 scoring_audit=scoring_audit,
+                input_selection=selection,
             )
             scores.append(cs)
 

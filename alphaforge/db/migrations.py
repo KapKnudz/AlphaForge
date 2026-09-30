@@ -304,6 +304,21 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         ) STRICT;
 
+        CREATE TABLE IF NOT EXISTS financial_period_rejections (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            reason              TEXT NOT NULL,
+            period_type         TEXT,
+            report_year         TEXT,
+            report_period       TEXT,
+            payload_hash        TEXT NOT NULL,
+            raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+            rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, payload_hash, reason)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_financial_period_rejections_company
+            ON financial_period_rejections(company_id, rejected_at DESC);
+
         -- Deterministic MFN identity is explicit source-of-truth data.  A
         -- candidate row is deliberately separate from the verified mapping so
         -- an ambiguous discovery can never become an issuer link implicitly.

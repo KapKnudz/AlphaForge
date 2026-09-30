@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS financial_periods (
 CREATE INDEX IF NOT EXISTS idx_financials_company_period_end ON financial_periods(company_id, period_type, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_financials_pit ON financial_periods(company_id, period_type, report_date, period_end) WHERE is_placeholder = 0;
 
+CREATE TABLE IF NOT EXISTS financial_period_rejections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    reason              TEXT NOT NULL,
+    period_type         TEXT,
+    report_year         TEXT,
+    report_period       TEXT,
+    payload_hash        TEXT NOT NULL,
+    raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+    rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (company_id, payload_hash, reason)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_financial_period_rejections_company
+    ON financial_period_rejections(company_id, rejected_at DESC);
+
 CREATE TABLE IF NOT EXISTS kpi_observations (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,

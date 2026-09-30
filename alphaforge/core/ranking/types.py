@@ -36,6 +36,7 @@ class CompanyScore:
     # must never replace this with a hash of the score JSON itself.
     evidence_packet_hash: str | None = None
     scoring_audit: dict = field(default_factory=dict)
+    input_selection: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.rank_eligible and self.ranking_section == "ranked":
@@ -66,6 +67,7 @@ class CompanyScore:
             "readiness_limitations": self.readiness_limitations,
             "evidence_packet_hash": self.evidence_packet_hash,
             "scoring_audit": self.scoring_audit,
+            "input_selection": self.input_selection,
         }
 
 

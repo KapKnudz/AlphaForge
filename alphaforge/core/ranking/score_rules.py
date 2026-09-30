@@ -274,7 +274,18 @@ def _growth_metrics_definitions(financial) -> list[Metric]:
     revenue_per_share_growth = getattr(financial, "revenue_per_share_growth", None)
     ebit_per_share_growth = getattr(financial, "ebit_per_share_growth", None)
     net_income_per_share_growth = getattr(financial, "net_income_per_share_growth", None)
-    per_share_growth_years = getattr(financial, "per_share_growth_years", 1)
+    revenue_per_share_years = getattr(
+        financial, "revenue_per_share_growth_years", getattr(financial, "per_share_growth_years", 1)
+    )
+    ebit_per_share_years = getattr(
+        financial, "ebit_per_share_growth_years", getattr(financial, "per_share_growth_years", 1)
+    )
+    net_income_per_share_years = getattr(
+        financial,
+        "net_income_per_share_growth_years",
+        getattr(financial, "per_share_growth_years", 1),
+    )
+    share_count_years = getattr(financial, "share_count_growth_years", 1)
     revenue_growth = (
         revenue_per_share_growth
         if revenue_per_share_growth is not None
@@ -318,7 +329,7 @@ def _growth_metrics_definitions(financial) -> list[Metric]:
         elif revenue_deterioration:
             n.append("Revenue turned non-positive")
         if v is not None:
-            years = per_share_growth_years if per_share_basis else revenue_years
+            years = revenue_per_share_years if per_share_basis else revenue_years
             period = f"{years}y CAGR" if years > 1 else "YoY"
             label = "Revenue/share growth" if per_share_basis else "Revenue growth"
             if v >= 0.15:
@@ -347,7 +358,7 @@ def _growth_metrics_definitions(financial) -> list[Metric]:
         elif ebit_deterioration:
             n.append("EBIT turned negative")
         if v is not None:
-            years = per_share_growth_years if ebit_per_share_growth is not None else ebit_years
+            years = ebit_per_share_years if ebit_per_share_growth is not None else ebit_years
             period = f"{years}y CAGR" if years > 1 else "YoY"
             label = "EBIT/share growth" if ebit_per_share_growth is not None else "EBIT growth"
             if v >= 0.15:
@@ -377,7 +388,7 @@ def _growth_metrics_definitions(financial) -> list[Metric]:
             n.append("Net income turned negative")
         if v is not None:
             years = (
-                per_share_growth_years
+                net_income_per_share_years
                 if net_income_per_share_growth is not None
                 else net_income_years
             )
@@ -405,8 +416,10 @@ def _growth_metrics_definitions(financial) -> list[Metric]:
     def _dilution_desc(_):
         n, f = [], []
         if getattr(financial, "share_dilution", False):
+            period = f"{share_count_years}y CAGR" if share_count_years > 1 else "YoY"
             n.append(
-                f"Share count growth {getattr(financial, 'share_count_growth', 0.0):.0%} — dilution"
+                f"Share count growth {getattr(financial, 'share_count_growth', 0.0):.0%} "
+                f"({period}) — dilution"
             )
             f.append("share_dilution")
         return [], n, f

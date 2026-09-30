@@ -54,7 +54,7 @@ acquisition to that date.
 | Input | Identity / retained meaning |
 | --- | --- |
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |
-| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. If period end is absent, the writer can fall back to publication date; it is not always a verified fiscal-period end. |
+| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
 | KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. The writer handles missing report-period keys explicitly for idempotence. |
 | Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency; no OHLC history. |
 | Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
@@ -140,8 +140,10 @@ dates**, not historical-known-then correctness or an ingestion-vintage query.
 Generic [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not
 replace these loader predicates. `SELECTION_VERSION` is
 `verified-dates-consecutive-annual-v1`. The loader returns `selection` diagnostics
-also carried by `dcf.json`: rejected report/KPI reasons, selected price date/age,
-historical pairings and annual fiscal ends/refusal reasons. Stale prices are
+also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI provenance,
+selected price date/age, historical pairings and annual fiscal ends/refusal
+reasons. Refusal reasons also appear in ranking missing data and readiness
+limitations. Stale prices are
 retained only as diagnostic dates, not as available closes, raw multiples or DCF
 inputs; current financial margins/balance facts can still be available.
 
@@ -155,7 +157,9 @@ slots, stubs, excluded unverified annual dates and unknown/mixed currencies make
 that history unavailable with reasons. `broken_fiscal_year` alone is not a stub
 flag and does not exclude a non-calendar fiscal series. Quarter/R12 insertions
 cannot change annual growth. No quarter YoY is supplied without a matched pair.
-Uncomputable growth carries a zero-year horizon, not a fabricated year or rate.
+Each total, per-share and share-count growth result carries its own actual validated
+horizon; score descriptions use the horizon of the selected metric. Uncomputable
+growth carries a zero-year horizon, not a fabricated year or rate.
 
 The loader adjusts historical shares, including the annual anchor, into the
 latest report's share basis using stored splits without changing raw rows
@@ -204,8 +208,8 @@ persists assessments but makes no paid thesis-model call.
 
 | Output | Contract |
 | --- | --- |
-| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data and scoring audit survive serialization. |
-| `exports/<as_of>/ranking.csv` | Display subset of scores, eligibility/readiness reasons, `missing_data` (including selection refusals) and evidence hash; unranked rows have blank rank, list fields use semicolons. |
+| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data, input-selection provenance and scoring audit survive serialization. |
+| `exports/<as_of>/ranking.csv` | Display subset of scores, eligibility/readiness reasons, `missing_data`, structured `input_selection` and evidence hash; unranked rows have blank rank, list fields use semicolons. |
 | `exports/<as_of>/dcf.json` | Company-ID-keyed auditable DCF/reverse-DCF payloads, including structured unavailable outcomes; not a score replacement. |
 | `ranking_runs` | New run row with scores, `as_of`, model version, universe hash and inputs summary. Scalar `packet_hash` is populated only for a one-company run with a packet; multi-company evidence provenance lives in `inputs_summary.evidence_packet_hashes`. |
 

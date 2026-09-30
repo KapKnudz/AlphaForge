@@ -74,6 +74,12 @@ class FinancialResult:
     book_value_per_share_growth: float | None = None
     share_count_growth: float | None = None
     per_share_growth_years: int = 1
+    revenue_per_share_growth_years: int = 1
+    ebit_per_share_growth_years: int = 1
+    net_income_per_share_growth_years: int = 1
+    fcf_per_share_growth_years: int = 1
+    book_value_per_share_growth_years: int = 1
+    share_count_growth_years: int = 1
     share_dilution: bool = False
 
     # Current cash quality and multi-year consistency.

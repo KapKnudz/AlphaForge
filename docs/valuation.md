@@ -19,8 +19,9 @@ ranking never masquerades as a discounted-cash-flow.
   Financial selection is `verified-dates-consecutive-annual-v1` in the loader.
   Current price age and historical report-price pairing are limited to seven
   calendar days inclusive; unavailable prices cannot supply multiples or DCF.
-  Pairing refusals and annual-history reasons are auditable in `dcf.json.selection`,
-  with current-price/annual-history refusals also in ranking `missing_data` (JSON/CSV).
+  Report, KPI, price-pairing and annual-history refusals are auditable in
+  `input_selection` in ranking JSON/CSV and `dcf.json.selection`; their reasons
+  also appear in ranking `missing_data` and readiness limitations.
 * **Current dividend yield:** policy `calendar-ttm-verified-v2` in
   [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
   percentage points from `sum(amount) / selected_close * 100` only for an

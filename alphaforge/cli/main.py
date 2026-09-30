@@ -996,6 +996,7 @@ def export_ranking_files(
                 "evidence_packet_hash",
                 "data_quality",
                 "missing_data",
+                "input_selection",
             ]
         )
         for i, score in enumerate(ranking.scores, 1):
@@ -1019,6 +1020,7 @@ def export_ranking_files(
                     score.evidence_packet_hash or "",
                     score.data_quality,
                     ";".join(score.missing_data),
+                    json.dumps(score.input_selection, ensure_ascii=False, sort_keys=True),
                 ]
             )
 

@@ -555,3 +555,58 @@ def test_foreign_report_currency_does_not_expand_valuation_availability():
     assert result["valuation"].raw_market_cap is None
     assert result["reverse_dcf"]["status"] == "unavailable"
     assert not result["reverse_dcf"]["dcf"]["available"]
+
+
+def test_all_selection_refusals_retain_provenance_and_reach_exports(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2025), annual(2026, 110)])
+    rejected = annual(2027, 121)
+    rejected.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    upsert_kpi_observations(conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 30}])
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    selection = loaded["selection"]
+    ingestion = next(
+        item for item in selection["rejected_reports"] if item["source"] == "ingestion_rejection"
+    )
+    assert ingestion["raw_payload"]["year"] == 2027
+    assert ingestion["payload_hash"]
+    assert selection["rejected_kpis"][0]["observation_date"] is None
+    assert selection["historical_price_pairings"][0]["period_end"] == "2025-03-31"
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    reasons = score["missing_data"]
+    assert any("fiscal end unavailable or invalid" in reason for reason in reasons)
+    assert any("KPI observation date unverified" in reason for reason in reasons)
+    assert any("historical price missing" in reason for reason in reasons)
+    assert all(
+        any(reason in limitation for limitation in score["readiness_limitations"])
+        for reason in selection["refusal_reasons"]
+    )
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+
+def test_each_per_share_growth_uses_its_actual_horizon(monkeypatch, tmp_path):
+    rows = []
+    for year in range(2023, 2027):
+        revenue = 100 * 1.2 ** (year - 2023)
+        rows.append(annual(year, revenue, ebit=revenue * 0.2))
+    rows[0]["revenues"] = None
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+
+    financial = load_results_for_company(conn, cid, CUTOFF)["financial"]
+    assert financial.revenue_per_share_growth_years == 1
+    assert financial.ebit_per_share_growth_years == 3
+    assert financial.net_income_per_share_growth_years == 3
+    assert financial.fcf_per_share_growth_years == 3
+    assert financial.book_value_per_share_growth_years == 3
+    assert financial.share_count_growth_years == 3
+
+    score, _, _ = rank_exports(conn, monkeypatch, tmp_path)
+    assert any("Revenue/share growth" in item and "(YoY)" in item for item in score["positives"])
+    assert any("EBIT/share growth" in item and "(3y CAGR)" in item for item in score["positives"])

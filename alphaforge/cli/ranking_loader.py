@@ -103,6 +103,68 @@ def _annual_series(rows) -> tuple[list, list[str]]:
     return ([] if reasons else annuals), reasons
 
 
+def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
+    kpi_r12: dict[int, float] = {}
+    kpi_annual: dict[int, float] = {}
+    rejected = []
+    rows = conn.execute(
+        """
+        SELECT id, kpi_id, value, period_type, observation_date, year,
+               price_type, report_period
+        FROM kpi_observations WHERE company_id=? AND value IS NOT NULL
+        ORDER BY observation_date ASC, year ASC, report_period ASC, price_type ASC
+        """,
+        (company_id,),
+    ).fetchall()
+    for row in rows:
+        observed = _date(row["observation_date"])
+        reason = None
+        if observed is None:
+            reason = "KPI observation date unverified"
+        elif row["year"] is None:
+            reason = "KPI fiscal-year metadata unavailable"
+        elif observed > cutoff or row["year"] > cutoff.year:
+            reason = "KPI after cutoff"
+        if reason:
+            rejected.append(
+                {
+                    "id": row["id"],
+                    "kpi_id": row["kpi_id"],
+                    "period_type": row["period_type"],
+                    "price_type": row["price_type"],
+                    "year": row["year"],
+                    "report_period": row["report_period"],
+                    "observation_date": row["observation_date"],
+                    "reason": reason,
+                }
+            )
+            continue
+        target = kpi_r12 if row["period_type"] == "r12" else kpi_annual
+        target[int(row["kpi_id"])] = float(row["value"])
+    return ({**kpi_annual, **kpi_r12}, rejected)
+
+
+def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
+    reasons = list(selection.get("annual_history", {}).get("reasons", []))
+    reasons.extend(selection.get("price", {}).get("reasons", []))
+    reasons.extend(
+        f"report {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
+        for item in selection.get("rejected_reports", [])
+        if item.get("reason")
+    )
+    reasons.extend(
+        f"historical price for {item.get('period_end', 'unknown')}: {item['reason']}"
+        for item in selection.get("historical_price_pairings", [])
+        if item.get("reason")
+    )
+    reasons.extend(
+        f"KPI {item.get('kpi_id', 'unknown')}: {item['reason']}"
+        for item in selection.get("rejected_kpis", [])
+        if item.get("reason")
+    )
+    return list(dict.fromkeys(reasons))
+
+
 def _number(value: Any) -> float | None:
     if value is None:
         return None
@@ -189,12 +251,36 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "evidence_manifest": selection_manifest.to_dict(),
         "evidence_lane": bool(evidence_packet),
     }
+    rejected_reports = []
+    for row in conn.execute(
+        """
+        SELECT id, reason, period_type, report_year, report_period,
+               payload_hash, raw_payload, rejected_at
+        FROM financial_period_rejections
+        WHERE company_id=? ORDER BY id ASC
+        """,
+        (company_id,),
+    ).fetchall():
+        rejected_reports.append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "reason": row["reason"],
+                "period_type": row["period_type"],
+                "report_year": row["report_year"],
+                "report_period": row["report_period"],
+                "payload_hash": row["payload_hash"],
+                "raw_payload": _payload(row),
+                "rejected_at": row["rejected_at"],
+            }
+        )
+    kpis, rejected_kpis = _select_kpis(conn, company_id, cutoff)
     selection: dict[str, Any] = {
         "version": SELECTION_VERSION,
         "max_price_age_calendar_days": MAX_PRICE_AGE_DAYS,
-        "rejected_reports": [],
+        "rejected_reports": rejected_reports,
         "historical_price_pairings": [],
-        "rejected_kpis": [],
+        "rejected_kpis": rejected_kpis,
     }
 
     stored_period_rows = conn.execute(
@@ -224,7 +310,19 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reason = "publication precedes fiscal end"
             unverified_annual |= row["period_type"] == "year"
         if reason:
-            selection["rejected_reports"].append({"id": row["id"], "reason": reason})
+            selection["rejected_reports"].append(
+                {
+                    "id": row["id"],
+                    "source": "financial_periods",
+                    "period_type": row["period_type"],
+                    "period_end": row["period_end"],
+                    "report_year": row["report_year"],
+                    "report_period": row["report_period"],
+                    "report_date": row["report_date"],
+                    "raw_payload": _payload(row),
+                    "reason": reason,
+                }
+            )
         else:
             period_rows.append(row)
     annual_period_rows, annual_reasons = _annual_series(period_rows)
@@ -257,6 +355,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         latest_price = None
     selection["price"]["reasons"] = price_missing
     if not period_rows:
+        selection["refusal_reasons"] = _selection_refusal_reasons(selection)
         _missing = ["financial_period", *price_missing]
         if selection["rejected_reports"]:
             _missing.append(
@@ -276,7 +375,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         return {
             "financial": None,
             "valuation": None,
-            "fundamental_kpis": {},
+            "fundamental_kpis": kpis,
+            "sector_kpis": {"current": kpis, "histories": {}},
             "research_evidence": research_evidence,
             "selection": selection,
             "candidate": SimpleNamespace(
@@ -284,7 +384,11 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 ticker="",
                 ranking_model=ranking_model_for_branch(branch_id),
                 research_evidence=research_evidence,
-                full_results={"valuation": None, "reverse_dcf": _unavailable},
+                full_results={
+                    "valuation": None,
+                    "reverse_dcf": _unavailable,
+                    "selection": selection,
+                },
             ),
             "dcf": {
                 "policy": None,
@@ -428,33 +532,6 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     )
     current.dividend_yield = dividend_yield.value
     valuation = ValuationCalculator().calculate(current, historical, current_raw)
-
-    kpi_r12: dict[int, float] = {}
-    kpi_annual: dict[int, float] = {}
-    for row in conn.execute(
-        """
-        SELECT kpi_id, value, period_type, observation_date, year, price_type, report_period
-        FROM kpi_observations WHERE company_id=? AND value IS NOT NULL
-        ORDER BY observation_date ASC, year ASC, report_period ASC, price_type ASC
-        """,
-        (company_id,),
-    ).fetchall():
-        observed = _date(row[3])
-        reason = None
-        if observed is None:
-            reason = "KPI observation date unverified"
-        elif row[4] is None:
-            reason = "KPI fiscal-year metadata unavailable"
-        elif observed > cutoff or row[4] > cutoff.year:
-            reason = "KPI after cutoff"
-        if reason:
-            selection["rejected_kpis"].append({"kpi_id": row[0], "reason": reason})
-            continue
-        if row[2] == "r12":
-            kpi_r12[int(row[0])] = float(row[1])
-        else:
-            kpi_annual[int(row[0])] = float(row[1])
-    kpis: dict[int, float] = {**kpi_annual, **kpi_r12}
 
     if dcf_current_report is not None and dcf_current_report.net_debt is not None:
         current_net_debt = dcf_current_report.net_debt
@@ -717,6 +794,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "implied": reverse_dcf_results,
         "reverse_dcf": reverse_dcf,
     }
+    selection["refusal_reasons"] = _selection_refusal_reasons(selection)
     candidate = SimpleNamespace(
         company_id=company_id,
         ticker="",
@@ -726,6 +804,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             "valuation": valuation,
             "reverse_dcf": reverse_dcf,
             "dcf": dcf_payload,
+            "selection": selection,
         },
     )
     return {

@@ -174,7 +174,28 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         # Unkeyable rows are not persisted under a manufactured fiscal date.
         try:
             period_end = date.fromisoformat(str(period_end)[:10]).isoformat()
-        except ValueError:
+        except (TypeError, ValueError):
+            payload_hash = hashlib.sha256(
+                json.dumps(p, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            ).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO financial_period_rejections
+                    (company_id, reason, period_type, report_year, report_period,
+                     payload_hash, raw_payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
+                """,
+                (
+                    company_id,
+                    "fiscal end unavailable or invalid",
+                    str(period_type) if period_type is not None else None,
+                    str(p.get("year") or p.get("report_year") or "") or None,
+                    str(p.get("period") or p.get("report_period") or "") or None,
+                    payload_hash,
+                    raw_payload,
+                ),
+            )
             continue
         # Use mapped for other financials — REPORT_FIELD_MAP now covers live keys
         # (total_Equity, net_Debt, cash_Flow_From_Operating_Activities …) so that
