@@ -217,6 +217,90 @@ def _has_current_attachment_provenance(raw_metadata: Any) -> bool:
     )
 
 
+def _retained_type_consistent(cached: dict[str, Any], article: dict[str, Any]) -> bool:
+    """Do not silently discard a historical provider subtype assertion.
+
+    Current raw feed facts can independently re-prove it. Without them, title
+    admission must not contradict the recorded attested subtype (e.g. changing
+    a provider's quarterly year-end report into the title filter's annual class).
+    Old classification alone never supplies admission.
+    """
+    return (
+        not cached["raw_metadata"].get("feed_report_identity")
+        or bool(article.get("feed_report_identity"))
+        or (article.get("report_kind"), article.get("document_type"))
+        == (cached["report_kind"], cached["document_type"])
+    )
+
+
+def _retained_source_article(
+    cached: dict[str, Any], *, mfn_slug: str, issuer_token: str, base_url: str
+) -> tuple[dict[str, Any], bool]:
+    """Rebuild source inputs, never copy the old eligibility/classification.
+
+    Re-parse captured original detail HTML with the provider's current parser,
+    proving timestamp, title, attachment selection and canonical issuer anew.
+    Narrative admission additionally needs independent raw MFN tag/PDF facts,
+    not the old decoded report kind, selection tier or eligibility flag.
+    """
+    from alphaforge.providers.mfn.scraper import (
+        _feed_report_attachment_url,
+        _feed_report_identity,
+        _is_mfn_release_url,
+        _parse_html,
+    )
+
+    metadata = cached["raw_metadata"]
+    evidence = metadata.get("feed_report_evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    identity = _feed_report_identity(evidence)
+    title = str(cached.get("title") or "")
+    html = metadata.get("mfn_detail_html")
+    parsed = _parse_html(html, corroborated_report=bool(identity)) if isinstance(html, str) else {}
+    detail_title = str(parsed.get("title") or "")
+    article = {
+        **metadata,
+        "url": cached["source_url"],
+        "source_url": cached["source_url"],
+        "title": title,
+        "detail_title": detail_title,
+        "published_at": parsed.get("published_at"),
+        "content_text": parsed.get("body"),
+        "body": parsed.get("body"),
+        "attachment_url": parsed.get("storage_url"),
+        "storage_url": parsed.get("storage_url"),
+        "attachment_tier": parsed.get("attachment_tier"),
+        "canonical_url": parsed.get("canonical_url"),
+        "lang": cached["language"],
+        "report_kind": identity[0] if identity else report_kind(title),
+        "document_type": identity[1] if identity else document_type(title),
+        "feed_report_identity": "mfn-report-tag+archive-report-pdf" if identity else None,
+        "feed_report_attachment_url": _feed_report_attachment_url(evidence) if identity else None,
+        # A derived old fiscal period is not a new provider assertion. Original
+        # provider input/key provenance, if present, is retained in metadata.
+        "fiscal_period": None,
+        "retained_source_observation_id": cached["candidate_observation_id"],
+    }
+    sufficient = bool(
+        metadata.get("mfn_slug") == mfn_slug
+        and _is_mfn_release_url(cached["source_url"], base_url)
+        and parsed.get("body")
+        and parsed.get("published_at")
+        and parsed.get("attachment_tier") in ATTACHMENT_TIERS[:3]
+        and parsed.get("storage_url") == cached["attachment_url"]
+        and not _confirm_cis_issuer(
+            cached["source_url"], parsed.get("canonical_url"), issuer_token=issuer_token
+        )
+        and not is_invitation_or_presentation(title)
+        and not is_invitation_or_presentation(detail_title)
+        and (is_report(title) or identity)
+        and (is_report(detail_title) or identity)
+        and (not identity or article["feed_report_attachment_url"] == cached["attachment_url"])
+        and _retained_type_consistent(cached, article)
+    )
+    return article, sufficient
+
+
 def _prepare_selected_article(
     variant: dict[str, Any], downloaded: PdfDownload, extracted: Any
 ) -> dict[str, Any]:
@@ -656,6 +740,10 @@ def build_frozen_evidence_packet(
                 "report_period_end": raw_metadata.get("report_period_end"),
             }
         )
+        fiscal_limitation = raw_metadata.get("fiscal_period_limitation")
+        if fiscal_limitation:
+            row_limitations.append(str(fiscal_limitation))
+            limitations.add(str(fiscal_limitation))
         language_evidence = str(raw_metadata.get("language_evidence") or "")
         if language_evidence.startswith("release_hint:"):
             fallback_source_count += 1
@@ -666,6 +754,7 @@ def build_frozen_evidence_packet(
             "title": row["title"] or "",
             "report_kind": row.get("report_kind") or raw_metadata.get("report_kind"),
             "document_type": row.get("document_type") or raw_metadata.get("document_type"),
+            "fiscal_period_source": raw_metadata.get("fiscal_period_source"),
             "fiscal_period": (
                 row.get("fiscal_period")
                 or raw_metadata.get("fiscal_period")
@@ -813,6 +902,8 @@ class EvidenceFlowResult:
     discovered: int = 0
     eligible: int = 0
     downloaded: int = 0
+    pdf_fetch_attempts: int = 0
+    pdf_fetch_succeeded: int = 0
     persisted: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
     packet_hash: str | None = None
@@ -851,6 +942,8 @@ class EvidenceFlowResult:
             "discovered": self.discovered,
             "eligible": self.eligible,
             "downloaded": self.downloaded,
+            "pdf_fetch_attempts": self.pdf_fetch_attempts,
+            "pdf_fetch_succeeded": self.pdf_fetch_succeeded,
             "skipped": dict(sorted(self.skipped.items())),
             "filtered_before_download": self.filtered_before_download(),
             "download_failed": self.download_failed(),
@@ -1186,6 +1279,8 @@ class OneCompanyEvidenceFlow:
         borsdata_id = company.get("borsdata_id")
         window = DEFAULT_HISTORY_WINDOW
         active_rules = report_rules_metadata()
+        pdf_fetch_attempts = 0
+        pdf_fetch_succeeded = 0
         if not dry_run:
             record_job(
                 self.conn,
@@ -1196,6 +1291,8 @@ class OneCompanyEvidenceFlow:
             )
 
         def finish(result: EvidenceFlowResult) -> EvidenceFlowResult:
+            result.pdf_fetch_attempts = pdf_fetch_attempts
+            result.pdf_fetch_succeeded = pdf_fetch_succeeded
             if dry_run:
                 return result
             if result.status != "complete":
@@ -1456,10 +1553,91 @@ class OneCompanyEvidenceFlow:
             ).encode("utf-8")
         ).hexdigest()
         revision_recorder = None
+        cached_v2: dict[str, dict[str, Any]] = {}
+        current_v2: dict[str, dict[str, Any]] = {}
+        retained_retries: set[str] = set()
         if self.artifact_store is not None and not dry_run:
-            from alphaforge.db.evidence_repository import current_candidate_observations
+            from alphaforge.db.evidence_repository import (
+                current_candidate_observations,
+                retained_candidate_binding,
+            )
             from alphaforge.evidence.revision_flow import RevisionRecorder
 
+            current_v2 = {
+                str(record["release_source_url"]): record
+                for record in current_candidate_observations(
+                    self.conn, company_id=company_id, as_of=as_of[:10]
+                )
+            }
+            # Cache and packet selection are roles of the same verified view.
+            # Missing/corrupt retained bytes block before any URL reacquisition.
+            try:
+                prior_view = load_evidence_selection_manifest(
+                    self.conn,
+                    company_id=company_id,
+                    as_of=as_of,
+                    report_rules=active_rules,
+                    publication_cutoff=today.isoformat(),
+                    artifact_store=self.artifact_store,
+                    excluded_source_urls=revoked_feed_urls,
+                )
+                cached_v2 = {
+                    str(record["source_url"]): record
+                    for record in prior_view.cache
+                    if record.get("candidate_observation_id")
+                }
+                for source_url, current in current_v2.items():
+                    metadata = json.loads(current["raw_metadata"])
+                    if not isinstance(metadata, dict):
+                        continue
+                    reference = metadata.get("retained_source_observation_id")
+                    if (
+                        current["eligibility"] != "incomplete"
+                        and not (
+                            current["eligibility"] == "rejected"
+                            and (
+                                reference
+                                or current["eligibility_reason"]
+                                in {
+                                    "canonical_issuer_unconfirmed",
+                                    "issuer_mismatch",
+                                    "mfn_report_attachment_mismatch",
+                                    AMBIGUOUS_SELECTION_SKIP_REASON,
+                                }
+                            )
+                        )
+                    ) or source_url in revoked_feed_urls:
+                        continue
+                    retained = retained_candidate_binding(
+                        self.conn,
+                        company_id=company_id,
+                        as_of=as_of[:10],
+                        source_url=source_url,
+                        candidate_id=current["candidate_id"],
+                        observation_id=reference,
+                        publication_cutoffs={
+                            kind: _resolve_cutoff(as_of, window, kind)
+                            for kind in ("annual", "quarterly")
+                        },
+                        artifact_store=self.artifact_store,
+                    )
+                    if retained is not None:
+                        cached_v2[source_url] = retained
+                        retained_retries.add(source_url)
+            except Exception as exc:
+                from alphaforge.evidence.artifact_store import ArtifactStoreError
+
+                if not isinstance(exc, ArtifactStoreError):
+                    raise
+                return finish(
+                    EvidenceFlowResult(
+                        "evidence_incomplete",
+                        company_id,
+                        mapping_status="mapped",
+                        skipped={exc.code: 1},
+                        message=str(exc),
+                    )
+                )
             revision_recorder = RevisionRecorder(
                 self.conn,
                 self.artifact_store,
@@ -1471,28 +1649,18 @@ class OneCompanyEvidenceFlow:
                 max_pages=self.limits.max_pages,
                 max_pdf_bytes=self.limits.max_pdf_bytes,
             )
-            observed_immutable_urls = {
-                str(observation["release_source_url"])
-                for observation in current_candidate_observations(
-                    self.conn, company_id=company_id, as_of=as_of[:10]
-                )
-            }
-            for source_url in sorted(revoked_feed_urls):
-                if (
-                    source_url not in observed_immutable_urls
-                    and find_complete_evidence_document(self.conn, company_id, source_url) is None
-                ):
-                    continue
-                disposition = feed_dispositions[source_url]
-                revision_recorder.record(
-                    disposition,
-                    eligibility="revoked",
-                    eligibility_reason=(
-                        "invitation_veto"
-                        if disposition.get("invitation_veto")
-                        else "current_feed_revoked"
-                    ),
-                )
+            # Feed and detail dispositions are composed below, before append.
+            # Never record a provisional revocation then a conflicting rejection.
+
+        def current_extraction(cached: dict[str, Any]) -> bool:
+            from alphaforge.evidence.revision_flow import _extractor_version
+
+            return (
+                revision_recorder is not None
+                and cached["config_fingerprint"] == revision_recorder.config_fingerprint
+                and cached["extractor_version"] == _extractor_version()
+            )
+
         unseen_feed = []
         future_dated_complete_release = False
         not_yet_published_complete_release = False
@@ -1500,6 +1668,37 @@ class OneCompanyEvidenceFlow:
             entry_url = (
                 entry if isinstance(entry, str) else entry.get("url") or entry.get("source_url")
             )
+            if revision_recorder is not None:
+                if str(entry_url) in revoked_feed_urls:
+                    continue  # Canonical feed veto outranks fallback/detail admission.
+                cached = cached_v2.get(str(entry_url))
+                if cached is not None and str(entry_url) not in retained_retries:
+                    metadata = cached["raw_metadata"]
+                    disposition = feed_dispositions.get(str(entry_url))
+                    matches = disposition is None or (
+                        cached["title"] == disposition.get("title")
+                        and cached["report_kind"] == disposition.get("report_kind")
+                        and cached["document_type"] == disposition.get("document_type")
+                        and metadata.get("feed_report_identity")
+                        == disposition.get("feed_report_identity")
+                        and metadata.get("feed_report_attachment_url")
+                        == disposition.get("feed_report_attachment_url")
+                    )
+                    from alphaforge.evidence.ingest import resolve_fiscal_identity
+
+                    fiscal, basis, _ = resolve_fiscal_identity(
+                        {**metadata, **cached, "content_text": cached["release_body"]}
+                    )
+                    if (
+                        matches
+                        and cached["report_rules_fingerprint"] == active_rules["fingerprint"]
+                        and cached["fiscal_period"] == fiscal
+                        and metadata.get("fiscal_period_source") == basis
+                        and current_extraction(cached)
+                    ):
+                        continue
+                unseen_feed.append(entry)
+                continue
             if entry_url:
                 complete = find_complete_evidence_document(self.conn, company_id, entry_url)
                 if complete is not None:
@@ -1578,24 +1777,92 @@ class OneCompanyEvidenceFlow:
                     ):
                         continue
             unseen_feed.append(entry)
-        complete_documents = complete_evidence_identity_documents(self.conn, company_id, as_of=None)
+        complete_documents = (
+            list(cached_v2.values())
+            if revision_recorder is not None
+            else complete_evidence_identity_documents(self.conn, company_id, as_of=None)
+        )
         for document in complete_documents:
             published_date = str(document.get("published_at") or "")[:10]
             if published_date > as_of[:10]:
                 future_dated_complete_release = True
             elif published_date > today.isoformat():
                 not_yet_published_complete_release = True
+        feed_unseen_count = len(unseen_feed)
+        retained_details: list[dict[str, Any]] = []
+        retained_deferrals: set[str] = set()
+        retained_rebuilds: dict[str, dict[str, Any]] = {}
+        if revision_recorder is not None:
+            from alphaforge.providers.mfn.scraper import _is_mfn_release_url
+
+            detail_budget = min(
+                window.max_detail_fetches,
+                getattr(self.scraper, "max_articles", window.max_detail_fetches),
+            )
+            for source_url, cached in sorted(cached_v2.items()):
+                if (
+                    source_url in seen_feed_urls
+                    or source_url in revoked_feed_urls
+                    or (
+                        cached["report_rules_fingerprint"] == active_rules["fingerprint"]
+                        and source_url not in retained_retries
+                    )
+                ):
+                    continue
+                source_inputs = cached
+                if source_url in retained_retries:
+                    # Byte ownership is original, but the source inputs must
+                    # reflect the latest failed evidence, never an older title
+                    # or provider assertion hidden by a healthy cached snapshot.
+                    current = current_v2[source_url]
+                    source_inputs = {
+                        **cached,
+                        "title": current["authoritative_feed_title"] or current["detail_title"],
+                        "raw_metadata": json.loads(current["raw_metadata"]),
+                    }
+                article, sufficient = _retained_source_article(
+                    source_inputs,
+                    mfn_slug=mapping["mfn_slug"],
+                    issuer_token=issuer_token,
+                    base_url=getattr(self.scraper, "base_url", "https://mfn.se"),
+                )
+                retained_rebuilds[source_url] = article
+                # More recent failed evidence cannot be replaced by an earlier
+                # healthy snapshot. Retry must acquire fresh exact-URL proof.
+                if sufficient and source_url not in retained_retries:
+                    retained_details.append(article)
+                elif (
+                    len(unseen_feed) < detail_budget
+                    and _is_mfn_release_url(
+                        source_url, getattr(self.scraper, "base_url", "https://mfn.se")
+                    )
+                    and _cis_release_issuer(source_url) in {None, issuer_token}
+                ):
+                    # Only this catalogued URL, not discovery. The provider
+                    # re-proves detail title, publication, attachment and issuer.
+                    unseen_feed.append(article)
+                else:
+                    retained_deferrals.add(source_url)
         if not dry_run:
             record_mfn_feed_check(
                 self.conn,
                 company_id,
                 mapping["mfn_slug"],
                 len(unique_feed),
-                len(unseen_feed),
+                feed_unseen_count,
             )
             self.conn.commit()
         try:
-            details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+            fetched_details = self.scraper.scrape_details(unseen_feed, reports_only=True)
+            details = retained_details + [
+                {
+                    **retained_rebuilds.get(
+                        str(article.get("source_url") or article.get("url")), {}
+                    ),
+                    **article,
+                }
+                for article in fetched_details
+            ]
         except MfnAcquisitionError as exc:
             return finish(
                 EvidenceFlowResult(
@@ -1610,15 +1877,86 @@ class OneCompanyEvidenceFlow:
         for reason, count in _drain_skips(self.scraper, "drain_detail_skips").items():
             early_skips[reason] = early_skips.get(reason, 0) + count
         detail_dispositions = _drain_dispositions(self.scraper, "drain_detail_dispositions")
+        # A budget/scope deferral observes no new provider fact. Keep the old
+        # binding available for a later bounded attempt, but still unselectable
+        # under the current fingerprint; do not erase retention with a new row.
+        for article in details:
+            source_url = str(article.get("source_url") or article.get("url") or "")
+            if source_url in retained_rebuilds and not _retained_type_consistent(
+                cached_v2[source_url], article
+            ):
+                detail_dispositions[source_url] = {
+                    **article,
+                    "eligibility": "incomplete",
+                    "eligibility_reason": "retained_provider_type_unproven",
+                }
+        # Failed revalidation of a previously expected report is not evidence
+        # that its denominator disappeared. Keep it incomplete and unselectable.
+        for source_url in retained_rebuilds.keys() & detail_dispositions.keys():
+            cached = cached_v2[source_url]
+            detail_dispositions[source_url] = {
+                **retained_rebuilds[source_url],
+                **detail_dispositions[source_url],
+                "eligibility": "incomplete",
+                "report_kind": cached["report_kind"],
+                "document_type": cached["document_type"],
+                # This historical publication fact is for expected coverage,
+                # not proof that the failed current admission succeeded.
+                "published_at": detail_dispositions[source_url].get("published_at")
+                or cached["published_at"],
+            }
         if revision_recorder is not None:
-            for disposition in detail_dispositions.values():
-                revision_recorder.record(
-                    disposition,
-                    eligibility=str(disposition.get("eligibility") or "incomplete"),
-                    eligibility_reason=str(
-                        disposition.get("eligibility_reason") or "detail_candidate_incomplete"
-                    ),
+            final_dispositions = dict(detail_dispositions)
+            for source_url in sorted(revoked_feed_urls):
+                current = current_v2.get(source_url)
+                if current is None and source_url not in detail_dispositions:
+                    continue
+                disposition = {
+                    **final_dispositions.get(source_url, {}),
+                    **feed_dispositions[source_url],
+                }
+                terminal_rejection = (
+                    current is not None
+                    and current["eligibility"] == "rejected"
+                    and current["eligibility_reason"]
+                    in {"invitation_veto", "non_report_detail_title", "non_report_release"}
                 )
+                disposition["eligibility"] = (
+                    "rejected" if terminal_rejection or current is None else "revoked"
+                )
+                disposition["eligibility_reason"] = (
+                    current["eligibility_reason"]
+                    if terminal_rejection
+                    else "invitation_veto"
+                    if disposition.get("invitation_veto")
+                    else "current_feed_revoked"
+                )
+                final_dispositions[source_url] = disposition
+            details = [
+                article
+                for article in details
+                if str(article.get("source_url") or article.get("url") or "")
+                not in final_dispositions
+                and str(article.get("source_url") or article.get("url") or "")
+                not in revoked_feed_urls
+            ]
+            for source_url, disposition in final_dispositions.items():
+                state = str(disposition.get("eligibility") or "incomplete")
+                reason = str(disposition.get("eligibility_reason") or "detail_candidate_incomplete")
+                current = current_v2.get(source_url)
+                if current is not None and (
+                    current["eligibility"] == state
+                    and current["eligibility_reason"] == reason
+                    and current["report_rules_fingerprint"] == active_rules["fingerprint"]
+                    and current["authoritative_feed_title"] == disposition.get("title")
+                    and (
+                        not disposition.get("detail_title")
+                        or current["detail_title"] == disposition["detail_title"]
+                    )
+                ):
+                    continue  # An unchanged terminal fact is not a new observation.
+                revision_recorder.record(disposition, eligibility=state, eligibility_reason=reason)
+            detail_dispositions = final_dispositions
         result = EvidenceFlowResult(
             "dry_run" if dry_run else "running",
             company_id,
@@ -1643,6 +1981,9 @@ class OneCompanyEvidenceFlow:
         )
         if discovery_truncated:
             result.skipped["discovery_truncated"] = 1
+        if retained_deferrals:
+            result.skipped["retained_detail_revalidation_unavailable"] = len(retained_deferrals)
+            hard_blocks += len(retained_deferrals)
         for article in details:
             title = article.get("title") or ""
             corroborated_feed_report = bool(article.get("feed_report_identity")) and article.get(
@@ -1797,8 +2138,10 @@ class OneCompanyEvidenceFlow:
             )
         persisted_identity = []
         persisted_cutoff = min(as_of[:10], today.isoformat())
-        for persisted in complete_evidence_identity_documents(
-            self.conn, company_id, as_of=persisted_cutoff
+        for persisted in (
+            []
+            if revision_recorder is not None
+            else complete_evidence_identity_documents(self.conn, company_id, as_of=persisted_cutoff)
         ):
             metadata = {}
             if persisted["raw_metadata"]:
@@ -1850,14 +2193,60 @@ class OneCompanyEvidenceFlow:
                     "_persisted_evidence": True,
                 }
             )
+        if revision_recorder is not None:
+            new_urls = {
+                str(article.get("source_url") or article.get("url") or "") for article in eligible
+            }
+            for source_url, cached in cached_v2.items():
+                if (
+                    source_url in new_urls
+                    or source_url in revoked_feed_urls
+                    or source_url in detail_dispositions
+                ):
+                    continue
+                if cached["report_rules_fingerprint"] != active_rules["fingerprint"]:
+                    continue  # Old rules' classifications must be superseded, not restamped.
+                metadata = cached["raw_metadata"]
+                persisted_identity.append(
+                    {
+                        **metadata,
+                        **cached,
+                        "content_text": cached["release_body"],
+                        "pdf_language": cached["language"]
+                        if _is_replayable_language_evidence(metadata.get("language_evidence"))
+                        else "",
+                        "attachment_checksum": cached["attachment_sha256"],
+                        "pdf_checksum": cached["attachment_sha256"],
+                        "lang": cached["language"],
+                        # Off-feed byte ownership is still verified, but a stale
+                        # extraction must traverse exact-byte acquisition/recording.
+                        "_persisted_evidence": current_extraction(cached),
+                    }
+                )
         identity_candidates = persisted_identity + eligible
         for article in identity_candidates:
             if not (article.get("attachment_url") or article.get("storage_url")):
                 article["_pdf_language_unresolved"] = True
             if article.get("document_type") is None:
                 article["document_type"] = document_type(str(article.get("title") or ""))
-            if not article.get("fiscal_period"):
-                article["fiscal_period"] = _fiscal_period(article) or None
+            from alphaforge.evidence.ingest import resolve_fiscal_identity
+
+            if not article.get("fiscal_period_source"):
+                input_key = next(
+                    (
+                        key
+                        for key in ("fiscal_period", "report_period", "period")
+                        if article.get(key)
+                    ),
+                    None,
+                )
+                if input_key:
+                    article["fiscal_period_input"] = article[input_key]
+                    article["fiscal_period_input_key"] = input_key
+            fiscal, basis, limitation = resolve_fiscal_identity(article)
+            article["fiscal_period"] = fiscal
+            article["fiscal_period_source"] = basis
+            article["fiscal_period_limitation"] = limitation
             if article.get("period_start") is None:
                 article["period_start"] = article.get("report_period_start") or _period_start(
                     article
@@ -1909,6 +2298,61 @@ class OneCompanyEvidenceFlow:
         resolved_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
         indeterminate_pdf_cache: dict[str, tuple[PdfDownload, Any, str, str]] = {}
         stored_pdf_language_cache: dict[str, tuple[str, str]] = {}
+        retained_bindings: dict[str, dict[str, Any]] = {}
+
+        def acquire_candidate(
+            candidate: dict[str, Any], attachment_url: str
+        ) -> tuple[PdfDownload, Any]:
+            nonlocal pdf_fetch_attempts, pdf_fetch_succeeded
+            source_url = str(candidate.get("source_url") or candidate.get("url") or "")
+            cached = cached_v2.get(source_url)
+            if cached is not None and (
+                cached["attachment_url"] == attachment_url
+                and cached["title"] == candidate.get("title")
+                and cached["published_at"] == candidate.get("published_at")
+                and cached["release_body"]
+                == str(candidate.get("content_text") or candidate.get("body") or "")
+            ):
+                from alphaforge.evidence.ingest import PdfExtraction
+
+                content = self.artifact_store.read_pdf(
+                    cached["attachment_sha256"],
+                    expected_size=cached["byte_size"],
+                    max_pdf_bytes=cached["acquisition_max_pdf_bytes"],
+                )
+                if current_extraction(cached):
+                    text = "\n\n".join(
+                        f"[page {page['page_number']}]\n{page['text']}".rstrip()
+                        for page in cached["pages"]
+                    )
+                    extraction = PdfExtraction(
+                        text=text,
+                        page_count=cached["page_count"],
+                        pages_included=cached["pages_included"],
+                        page_truncated=cached["page_truncated"],
+                        scanned=bool(cached["scanned"]),
+                        pages=tuple(cached["pages"]),
+                        limitations=tuple(json.loads(cached["limitations"])),
+                    )
+                else:
+                    extraction = ingestion.extract_pdf_pages(
+                        content, max_pages=self.limits.max_pages
+                    )
+                retained_bindings[source_url] = cached
+                return PdfDownload(
+                    source_url=attachment_url,
+                    content=content,
+                    sha256=cached["attachment_sha256"],
+                    content_type=cached["content_type"],
+                    http_status=cached["http_status"],
+                ), extraction
+            pdf_fetch_attempts += 1
+            downloaded = download_pdf(attachment_url, limits=self.limits)
+            pdf_fetch_succeeded += 1
+            return downloaded, ingestion.extract_pdf_pages(
+                downloaded.content, max_pages=self.limits.max_pages
+            )
+
         unresolved_existing_source_urls: set[str] = set(revoked_feed_urls)
         revision_observations: dict[str, dict[str, Any]] = {}
 
@@ -1930,7 +2374,17 @@ class OneCompanyEvidenceFlow:
             attachment_url = candidate.get("attachment_url") or candidate.get("storage_url")
             if not attachment_url:
                 continue
-            existing = find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
+            if revision_recorder is not None and candidate.get("_persisted_evidence"):
+                stored_pdf_language_cache[str(attachment_url)] = (
+                    str(candidate.get("ingested_lang") or candidate.get("lang") or ""),
+                    str(candidate.get("language_evidence") or "unresolved"),
+                )
+                continue  # Already verified independent V2 binding, not a legacy parent.
+            existing = (
+                None
+                if revision_recorder is not None
+                else find_complete_evidence_attachment(self.conn, str(attachment_url), company_id)
+            )
             if (
                 existing is not None
                 and existing.get("canonical_report_rules_fingerprint")
@@ -1957,9 +2411,8 @@ class OneCompanyEvidenceFlow:
                 stored_pdf_language_cache[str(attachment_url)] = stored_pdf_language
                 continue
             try:
-                candidate_download = download_pdf(str(attachment_url), limits=self.limits)
-                candidate_extracted = ingestion.extract_pdf_pages(
-                    candidate_download.content, max_pages=self.limits.max_pages
+                candidate_download, candidate_extracted = acquire_candidate(
+                    candidate, str(attachment_url)
                 )
             except Exception:
                 if stored_pdf_language is not None:
@@ -2054,8 +2507,12 @@ class OneCompanyEvidenceFlow:
                         failures.get("missing_pdf_attachment", 0) + 1
                     )
                     continue
-                existing = find_complete_evidence_attachment(
-                    self.conn, str(attachment_url), company_id
+                existing = (
+                    None
+                    if revision_recorder is not None
+                    else find_complete_evidence_attachment(
+                        self.conn, str(attachment_url), company_id
+                    )
                 )
                 resolved_pdf = resolved_pdf_cache.get(str(attachment_url))
                 if resolved_pdf is not None:
@@ -2113,15 +2570,16 @@ class OneCompanyEvidenceFlow:
                     candidate_options.append((prepared, None, None, existing))
                     continue
                 try:
-                    candidate_download = download_pdf(str(attachment_url), limits=self.limits)
+                    candidate_download, candidate_extracted = acquire_candidate(
+                        variant, str(attachment_url)
+                    )
                 except PdfAcquisitionError as exc:
                     prepared_variants.append(variant)
                     failures[exc.code] = failures.get(exc.code, 0) + 1
                     continue
                 try:
-                    candidate_extracted = ingestion.extract_pdf_pages(
-                        candidate_download.content, max_pages=self.limits.max_pages
-                    )
+                    if not candidate_extracted.pages:
+                        raise ValueError("no extracted pages")
                 except Exception:
                     prepared_variants.append(variant)
                     failures["pdf_extraction_failed"] = failures.get("pdf_extraction_failed", 0) + 1
@@ -2210,6 +2668,7 @@ class OneCompanyEvidenceFlow:
                         ),
                         downloaded=option_download,
                         extracted=option_extracted,
+                        retained=retained_bindings.get(option_url),
                     )
                 for failed_variant in variants:
                     failed_url = str(
@@ -2346,6 +2805,18 @@ class OneCompanyEvidenceFlow:
                                 )
                             except ValueError:
                                 continue
+
+            if revision_recorder is not None:
+                result.persisted += sum(
+                    bool(option[0].get("_persisted_evidence")) for option in candidate_options
+                )
+                result.downloaded += sum(
+                    option[1] is not None
+                    and str(option[0].get("source_url") or option[0].get("url") or "")
+                    not in retained_bindings
+                    for option in candidate_options
+                )
+                continue  # V2 acquisition/selection never falls back to legacy roots.
 
             def persist_option(
                 article: dict[str, Any],
@@ -2640,6 +3111,8 @@ class OneCompanyEvidenceFlow:
                     message="incomplete report history: " + "; ".join(parts),
                 )
             )
+        result.pdf_fetch_attempts = pdf_fetch_attempts
+        result.pdf_fetch_succeeded = pdf_fetch_succeeded
         # Freeze the diagnostic into the packet before hashing.  The
         # repository can therefore reproduce the same CLI result after the
         # in-memory flow has gone away.

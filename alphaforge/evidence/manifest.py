@@ -185,7 +185,12 @@ def _slot_key(record: dict[str, Any]) -> str:
         or metadata.get("fiscal_period")
     )
     if period:
-        return f"{_report_class(record)}:{str(period)[:10]}"
+        label = str(period).strip()
+        try:
+            label = date.fromisoformat(label[:10]).isoformat()
+        except ValueError:
+            pass  # Fiscal labels are not dates; retain the entire quarter label.
+        return f"{_report_class(record)}:{label}"
     return f"{_report_class(record)}:source:{_source_url(record)}"
 
 
@@ -376,6 +381,18 @@ def select_evidence_manifest(
     selected_packet_rows = [
         row for row in selected_packet_rows if _source_url(row) in selected_urls
     ]
+    reusable_rows = (
+        _packet_rows(
+            [
+                record
+                for record in group_records
+                if record.get("eligibility") == "eligible"
+                and not record.get("rejection_reason")
+                and _stable_selection(record) is not None
+            ]
+        )
+        or selected_packet_rows
+    )
     return EvidenceSelectionManifest(
         manifest_version=MANIFEST_VERSION,
         company_id=company_id,
@@ -383,7 +400,7 @@ def select_evidence_manifest(
         report_rules_fingerprint=fingerprint,
         history_window=dict(history_values),
         audit_history=tuple(audit_by_url.values()),
-        cache=tuple(selected_packet_rows),
+        cache=tuple(reusable_rows),
         reuse=tuple(
             {
                 "attachment_sha256": row.get("attachment_sha256"),
@@ -391,7 +408,7 @@ def select_evidence_manifest(
                 "extraction_checksum": row.get("text_checksum"),
                 "valid_as_of": as_of[:10],
             }
-            for row in selected_packet_rows
+            for row in reusable_rows
         ),
         deduplication=tuple(groups[key] for key in sorted(groups)),
         packet_inputs=tuple(selected_packet_rows),

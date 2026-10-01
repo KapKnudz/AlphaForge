@@ -784,7 +784,9 @@ def test_v2_relation_persists_derived_fiscal_period(tmp_path):
         ).run(company_id, as_of="2026-09-20")
 
     assert result.status == "complete"
-    assert set(requested) == {article["attachment_url"] for article in articles}
+    # Fiscal refresh appends a new classification while reusing this candidate's
+    # independently retained verified bytes; only the new Swedish edition fetches.
+    assert set(requested) == {articles[1]["attachment_url"]}
     assert len(result.packet["sources"]) == 1
     assert result.packet["sources"][0]["language"] == "en"
     assert (

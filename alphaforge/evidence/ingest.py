@@ -336,8 +336,22 @@ def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
     return expanded
 
 
+_NON_COVERED_FISCAL_CONTEXT = re.compile(
+    r"\b(?:forecast|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
+    re.IGNORECASE,
+)
+
+
 def _quarter_period(text: str) -> str | None:
-    text = text.casefold()
+    text = text.casefold().replace(",", " ")
+    text = re.sub(r"[‐‑‒–—]", "-", text)
+    # Normalize in place: a later year-end comparator must not outrank coverage.
+    text = re.sub(
+        r"\b(?:year[- ]end\s+report|bokslutskommunik[eé])\s*[:–-]?\s*"
+        r"(20\d{2})(?:\s*/\s*((?:20)?\d{2}))?\b",
+        lambda match: f"q4 {match.group(1)}/{_expand_fiscal_year(match.group(1), match.group(2))}",
+        text,
+    )
     for ordinal, quarter in (
         ("första|first", "q1"),
         ("andra|second", "q2"),
@@ -349,72 +363,120 @@ def _quarter_period(text: str) -> str | None:
             f" {quarter} ",
             text,
         )
-    fiscal_range = re.search(
+    text = re.sub(
         r"\b(?:\d{1,2}\s+)?(?:may|maj)\s*[-–]\s*"
         r"(?:\d{1,2}\s+)?(?:july|juli)\s+(20\d{2})\b",
+        lambda match: f"q1 {match.group(1)}/{int(match.group(1)) + 1}",
         text,
     )
-    if fiscal_range:
-        year = int(fiscal_range.group(1))
-        return f"{year}/{year + 1}-q1"
     text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:march|mars)\b", "q1", text)
+    text = re.sub(r"\b(?:january|januari)\s*[-–]\s*(?:june|juni)\b", "q2", text)
+    text = re.sub(r"\b(?:january|januari)\s*[-–]\s*september\b", "q3", text)
+    text = re.sub(r"\b(?:january|januari)\s*[-–]\s*december\b", "q4", text)
     text = re.sub(r"\bapril\s*[-–]\s*(?:june|juni)\b", "q2", text)
     text = re.sub(r"\b(?:july|juli)\s*[-–]\s*september\b", "q3", text)
     text = re.sub(r"\b(?:october|oktober)\s*[-–]\s*december\b", "q4", text)
-    match = re.search(
-        r"\bq\s*([1-4])\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\b",
+    quarter_first = re.search(
+        r"\bq\s*([1-4])\s*[-–:]?\s*(?:fy\s*)?(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\b",
         text,
     )
-    if match:
-        end_year = _expand_fiscal_year(match.group(2), match.group(3))
-        return f"{match.group(2)}/{end_year}-q{match.group(1)}"
-    match = re.search(
+    year_first = re.search(
         r"\b(20\d{2})(?:\s*[/\-]\s*((?:20)?\d{2}))?\s*[-/]?\s*q\s*([1-4])\b",
         text,
     )
-    if match:
-        end_year = _expand_fiscal_year(match.group(1), match.group(2))
-        return f"{match.group(1)}/{end_year}-q{match.group(3)}"
+    if quarter_first and (not year_first or quarter_first.start() < year_first.start()):
+        end_year = _expand_fiscal_year(quarter_first.group(2), quarter_first.group(3))
+        return f"{quarter_first.group(2)}/{end_year}-q{quarter_first.group(1)}"
+    if year_first:
+        end_year = _expand_fiscal_year(year_first.group(1), year_first.group(2))
+        return f"{year_first.group(1)}/{end_year}-q{year_first.group(3)}"
     return None
 
 
-def _fiscal_period(doc: dict[str, Any]) -> str:
-    text = " ".join(str(doc.get(key) or "") for key in ("title", "content_text", "body"))
-    explicit = next(
-        (
-            str(doc[key]).casefold().strip()
-            for key in ("fiscal_period", "report_period", "period")
-            if doc.get(key) not in (None, "")
-        ),
-        None,
+def _year_period(text: str) -> str | None:
+    """Preserve a single covered year/range, never invent its calendar dates."""
+    periods = {
+        f"{start}/{_expand_fiscal_year(start, end)}" if end else start
+        for start, end in re.findall(r"\b(20\d{2})(?:\s*/\s*((?:20)?\d{2}))?\b", text)
+    }
+    return next(iter(periods)) if len(periods) == 1 else None
+
+
+def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str | None]:
+    """Resolve covered identity, never a forecast/comparator or publication year.
+
+    Provider fields outrank report titles; body fallback requires a report-labelled
+    heading. Previously derived fields are outputs, not new provider assertions.
+    Conflicting covered headings remain explicitly unresolved. No calendar dates
+    are invented from quarter labels.
+    """
+    title = _NON_COVERED_FISCAL_CONTEXT.split(str(doc.get("title") or ""), maxsplit=1)[0]
+    annual = doc.get("report_kind") == "annual"
+    title_period = None if annual else _quarter_period(title)
+    if not title_period and is_report(title):
+        title_period = _year_period(title)
+    explicit_key = next(
+        (key for key in ("fiscal_period", "report_period", "period") if doc.get(key)), None
     )
-    if explicit:
-        normalized = _quarter_period(explicit)
-        if normalized:
-            return normalized
-        title_period = _quarter_period(str(doc.get("title") or ""))
-        if title_period:
-            quarter = re.search(r"-q([1-4])$", title_period)
-            years = re.fullmatch(r"(20\d{2})(?:[/\-]((?:20)?\d{2}))?", explicit)
-            if quarter and years:
-                end_year = _expand_fiscal_year(years.group(1), years.group(2))
-                return f"{years.group(1)}/{end_year}-q{quarter.group(1)}"
-            return title_period
-        return explicit
-    title_period = _quarter_period(str(doc.get("title") or ""))
+    basis = str(doc.get("fiscal_period_source") or "")
+    provider_input = (
+        doc.get("fiscal_period_input")
+        if basis.startswith("provider_metadata") or basis == "conflicting_provider_title"
+        else None
+    )
+    if provider_input:
+        explicit_key = doc.get("fiscal_period_input_key") or (
+            basis.removeprefix("provider_metadata:").split("+")[0]
+            if basis.startswith("provider_metadata:")
+            else "fiscal_period"
+        )
+    if explicit_key and (provider_input or not basis or basis.startswith("provider_metadata")):
+        value = str(provider_input or doc[explicit_key]).strip()
+        normalized = _quarter_period(value) or value.casefold()
+        if annual and re.fullmatch(r"20\d{2}\s*/\s*(?:20)?\d{2}", value):
+            normalized = _year_period(value) or normalized
+            value = normalized  # Original spelling remains fiscal_period_input provenance.
+        if title_period and normalized != title_period:
+            # A provider year and the same year's covered quarter are compatible.
+            # A bare provider year does not prove a two-year annual range.
+            if "-q" in title_period and normalized == title_period.split("/")[0]:
+                return title_period, f"provider_metadata:{explicit_key}+title", None
+            return None, "conflicting_provider_title", "fiscal_identity_ambiguous"
+        return value, f"provider_metadata:{explicit_key}", None
     if title_period:
-        return title_period
-    quarter_period = _quarter_period(text)
-    if quarter_period:
-        return quarter_period
-    text = text.casefold()
-    match = re.search(r"\b(?:h\s*([12])\s*)?(20\d{2})(?:\s*[/\-]\s*(20\d{2}))?\b", text)
-    if match:
-        end_year = match.group(3) or match.group(2)
-        if match.group(1):
-            return f"{match.group(2)}/{end_year}-h{match.group(1)}"
-        return match.group(2)
-    return ""
+        return title_period, "report_title", None
+    body = str(doc.get("content_text") or doc.get("body") or "")
+    labelled = re.compile(
+        r"\b(?:interim\s+report|quarterly\s+report|year[- ]end\s+report|"
+        r"annual\s+report|delårsrapport|delarsrapport|kvartalsrapport|"
+        r"bokslutskommunik[eé]|årsredovisning|arsredovisning)"
+        r"\s*(?:for\b|för\b|[:–-])?\s*([^.!?\n]{0,100}?20\d{2}(?:\s*/\s*(?:20)?\d{2})?)",
+        re.IGNORECASE,
+    )
+    periods: set[str] = set()
+    for match in labelled.finditer(body):
+        # Match the heading itself and its own sentence prefix, not a preceding
+        # independent forecast/comparator sentence. Use the label's delimiters.
+        sentence_start = max(body.rfind(mark, 0, match.start()) for mark in ".!?\n") + 1
+        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
+            continue
+        heading = match.group(0)
+        period = None if annual else _quarter_period(heading)
+        if not period:
+            period = _year_period(match.group(1))
+        if period:
+            periods.add(period)
+    if len(periods) == 1:
+        return next(iter(periods)), "covered_report_heading", None
+    if len(periods) > 1:
+        return None, "conflicting_covered_headings", "fiscal_identity_ambiguous"
+    return None, "unresolved", "fiscal_identity_unresolved"
+
+
+def _fiscal_period(doc: dict[str, Any]) -> str:
+    if str(doc.get("fiscal_period_source") or "").startswith("conflicting_"):
+        return ""  # An unresolved conflict cannot become a relation's period proof.
+    return resolve_fiscal_identity(doc)[0] or ""
 
 
 def canonical_release_url(url: str) -> str:

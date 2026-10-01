@@ -6,16 +6,16 @@ import hashlib
 import json
 from typing import Any
 
-EVIDENCE_RULES_VERSION = 6
+EVIDENCE_RULES_VERSION = 13
 """Monotonic version of the evidence/filter/completeness rule set.
 
-Stamped on every frozen packet as ``evidence_rules_version``. Bump it when a
-deterministic rule that decides what counts as report evidence changes: the
-report/invitation taxonomy, the issuer-confirmation filter, attachment-tier
-selection, or completeness counting. Packets stamped with an older version —
-including packets built before versioning existed — are stale: they stay
-structurally valid (hash and schema still verify) but readiness must not
-trust them; rerun the evidence lane to rebuild under the current rules.
+Stamped on every frozen packet as ``evidence_rules_version``. Bump it whenever
+deterministic evidence interpretation changes what a packet can select or what
+readiness can trust; ``docs/evidence-flow.md`` owns the detailed contract.
+Packets stamped with an older version — including packets built before
+versioning existed — are stale: they stay structurally valid (hash and schema
+still verify) but readiness must not trust them; rerun the evidence lane to
+rebuild under the current rules.
 """
 
 

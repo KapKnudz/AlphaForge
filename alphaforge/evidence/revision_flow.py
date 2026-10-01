@@ -83,6 +83,7 @@ class RevisionRecorder:
         eligibility_reason: str,
         downloaded: Any | None = None,
         extracted: Any | None = None,
+        retained: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append one candidate state; bytes/extraction are optional for failures."""
         from alphaforge.db.evidence_repository import (
@@ -115,7 +116,39 @@ class RevisionRecorder:
         attachment_row = None
         extraction_row = None
         artifact_row = None
-        if downloaded is not None:
+        if retained is not None:
+            if str(retained["source_url"]) != source_url:
+                raise ValueError("retained binding must belong to this exact candidate")
+            self.artifact_store.read_pdf(
+                retained["attachment_sha256"],
+                expected_size=retained["byte_size"],
+                max_pdf_bytes=retained["acquisition_max_pdf_bytes"],
+            )
+            artifact_row = append_artifact(
+                self.conn,
+                ArtifactInput(
+                    sha256=retained["attachment_sha256"],
+                    byte_size=retained["byte_size"],
+                    content_type=retained["content_type"],
+                    first_observed_at=self.effective_at,
+                ),
+            )
+            attachment_row = append_attachment_observation(
+                self.conn,
+                AttachmentObservationInput(
+                    candidate_key=candidate["candidate_key"],
+                    artifact_id=artifact_row["artifact_id"],
+                    batch_id=self.batch_id,
+                    attachment_source_url=retained["attachment_url"],
+                    content_type=retained["content_type"],
+                    http_status=retained["http_status"],
+                    feed_attachment_attested=(
+                        retained["attachment_url"] == article.get("feed_report_attachment_url")
+                    ),
+                    raw_metadata={"attachment_tier": article.get("attachment_tier")},
+                ),
+            )
+        elif downloaded is not None:
             stored = self.artifact_store.put_pdf(io.BytesIO(downloaded.content))
             artifact_row = append_artifact(
                 self.conn,
@@ -196,6 +229,15 @@ class RevisionRecorder:
                 "body",
                 "authoritative_publication_timestamp",
                 "feed_report_attachment_url",
+                "feed_report_identity",
+                "feed_report_evidence",
+                "canonical_url",
+                "mfn_detail_html",
+                "retained_source_observation_id",
+                "fiscal_period_source",
+                "fiscal_period_input",
+                "fiscal_period_input_key",
+                "fiscal_period_limitation",
             )
             if article.get(key) is not None
         }
@@ -218,7 +260,11 @@ class RevisionRecorder:
                 or article.get("lang"),
                 report_kind=article.get("report_kind"),
                 document_type=article.get("document_type"),
-                fiscal_period=article.get("fiscal_period") or article.get("report_period"),
+                fiscal_period=(
+                    article["fiscal_period"]
+                    if "fiscal_period" in article
+                    else article.get("report_period")
+                ),
                 period_start=article.get("period_start"),
                 period_end=article.get("period_end") or article.get("report_period_end"),
                 feed_report_identity=article.get("provider_event_id")
