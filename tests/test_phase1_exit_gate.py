@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -129,22 +130,20 @@ def test_is_placeholder_quarantine_visible(mem_conn):
         "period_type": "quarter",
         "period_end": "2025-03-31",
     }
-    upsert_financial_periods(mem_conn, int(cid), [stub])
-    cur = mem_conn.execute(
-        "SELECT is_placeholder, revenue, report_date FROM financial_periods WHERE company_id=?",
+    assert upsert_financial_periods(mem_conn, int(cid), [stub]) == 0
+    assert (
+        mem_conn.execute(
+            "SELECT count(*) FROM financial_periods WHERE company_id=?", (cid,)
+        ).fetchone()[0]
+        == 0
+    )
+    rejection = mem_conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections WHERE company_id=?",
         (cid,),
-    )
-    row = cur.fetchone()
-    assert row is not None
-    assert int(row[0]) == 1
-    # Ranking/valuation path must filter: WHERE is_placeholder=0 excludes this row
-    cur = mem_conn.execute(
-        "SELECT count(*) FROM financial_periods WHERE company_id=? AND is_placeholder=0", (cid,)
-    )
-    assert cur.fetchone()[0] == 0
-    # But quarantine is visible (unfiltered count 1)
-    cur = mem_conn.execute("SELECT count(*) FROM financial_periods WHERE company_id=?", (cid,))
-    assert cur.fetchone()[0] == 1
+    ).fetchone()
+    assert rejection is not None
+    assert rejection["reason"] == "placeholder"
+    assert json.loads(rejection["raw_payload"]) == stub
 
 
 def test_bilingual_dedupe_suppresses_one_per_pair():
@@ -353,6 +352,7 @@ def test_idempotent_sync_twice_identical_rowcounts(mem_conn):
             "period": 4,
             "period_type": "year",
             "period_end": "2024-12-31",
+            "currency": "SEK",
         },
     ]
     upsert_financial_periods(mem_conn, cid, periods)
