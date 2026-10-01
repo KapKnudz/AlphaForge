@@ -188,6 +188,43 @@ def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_pat
         assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
+@pytest.mark.parametrize("kpi_value,price_value", [(7, 11), (0, 0)])
+def test_rejected_market_alias_fallback_values_reach_exports(
+    kpi_value, price_value, monkeypatch, tmp_path
+):
+    conn, cid = setup()
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": None, "value": kpi_value}],
+    )
+    upsert_prices(conn, cid, [{"close": None, "c": price_value}], currency="SEK")
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    rejected_kpi = loaded["selection"]["rejected_kpis"][0]
+    rejected_price = loaded["selection"]["rejected_prices"][0]
+    assert rejected_kpi["value"] == kpi_value
+    assert rejected_kpi["raw_payload"] == {
+        "y": 2026,
+        "p": 5,
+        "v": None,
+        "value": kpi_value,
+    }
+    assert rejected_price["value"] == price_value
+    assert rejected_price["raw_payload"] == {"close": None, "c": price_value}
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert exported["rejected_kpis"][0]["value"] == kpi_value
+    assert exported["rejected_prices"][0]["value"] == price_value
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
 @pytest.mark.parametrize("report_period", [None, 5])
 def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     conn, cid = setup()
@@ -943,10 +980,11 @@ def test_report_aliases_must_parse_and_agree(field_names, aliases, admitted):
     stored = conn.execute(
         "SELECT raw_payload FROM financial_periods WHERE company_id=?", (cid,)
     ).fetchone()
-    assert json.loads(stored["raw_payload"]) == payload
     if admitted:
+        assert json.loads(stored["raw_payload"]) == payload
         assert not loaded["selection"]["rejected_reports"]
     else:
+        assert stored is None
         rejection = loaded["selection"]["rejected_reports"][0]
         assert rejection["raw_payload"] == payload
         assert rejection["current_refusal"]
@@ -1478,16 +1516,17 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch
         period_end="2026-04-30",
         report_Date=None,
     )
-    assert upsert_financial_periods(conn, cid, [transition]) == 1
+    assert upsert_financial_periods(conn, cid, [transition]) == 0
     packet(conn, cid)
 
     loaded = load_results_for_company(conn, cid, CUTOFF)
     transition_rejection = next(
         item
         for item in loaded["selection"]["rejected_reports"]
-        if item["source"] == "financial_periods" and item["period_end"] == "2026-04-30"
+        if item["source"] == "ingestion_rejection"
+        and item["raw_payload"]["period_end"] == "2026-04-30"
     )
-    assert transition_rejection["report_year"] == 2026
+    assert int(transition_rejection["report_year"]) == 2026
     assert transition_rejection["current_refusal"]
     assert loaded["selection"]["annual_history"]["period_ends"] == []
     assert loaded["financial"].revenue_growth is None
@@ -1517,7 +1556,7 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch
         ("placeholder", "placeholder"),
     ],
 )
-def test_keyable_rejection_survives_same_slot_correction_and_exports(
+def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
     defect, expected_reason, monkeypatch, tmp_path
 ):
     annuals = []
@@ -1560,9 +1599,16 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
         elif defect == "placeholder":
             rejected = annual(2026, 0, report_Date=None, ebit=0)
 
-    assert upsert_financial_periods(conn, cid, [rejected]) == 1
-    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
-    assert upsert_financial_periods(conn, cid, [corrected, corrected]) == 2
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    assert upsert_financial_periods(conn, cid, [rejected, rejected]) == 0
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 1
+    stored_after_rejection = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE period_type=? AND period_end=?",
+        (corrected["period_type"], corrected["period_end"]),
+    ).fetchone()
+    assert json.loads(stored_after_rejection["raw_payload"]) == corrected
+    valid_correction = {**corrected, "sourceRevision": 2}
+    assert upsert_financial_periods(conn, cid, [valid_correction]) == 1
 
     archived_rows = conn.execute(
         "SELECT reason, raw_payload FROM financial_period_rejections"
@@ -1575,7 +1621,7 @@ def test_keyable_rejection_survives_same_slot_correction_and_exports(
         "SELECT raw_payload FROM financial_periods WHERE period_type=? AND period_end=?",
         (corrected["period_type"], corrected["period_end"]),
     ).fetchone()
-    assert json.loads(stored["raw_payload"]) == corrected
+    assert json.loads(stored["raw_payload"]) == valid_correction
 
     loaded = load_results_for_company(conn, cid, CUTOFF)
     audit = next(
@@ -1614,8 +1660,9 @@ def test_conflicting_alias_original_is_retained_once_across_repeated_replacement
     )
     corrected = annual(2026, 110)
 
-    assert upsert_financial_periods(conn, cid, [rejected]) == 1
-    assert upsert_financial_periods(conn, cid, [corrected, corrected]) == 2
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
+    assert upsert_financial_periods(conn, cid, [rejected, rejected]) == 0
+    assert upsert_financial_periods(conn, cid, [corrected]) == 1
     archived = conn.execute(
         "SELECT reason, raw_payload FROM financial_period_rejections"
     ).fetchall()
@@ -1982,7 +2029,7 @@ def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(case, monk
             period_end="2026-05-31",
             report_Date=CUTOFF,
         )
-        assert upsert_financial_periods(conn, cid, [rejected]) == 1
+        assert upsert_financial_periods(conn, cid, [rejected]) == 0
     else:
         rejected = annual(2026, 140, period_type="r12", period=1)
         rejected.pop("period_end")

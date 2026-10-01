@@ -192,7 +192,10 @@ def _date_facts(payload: dict[str, Any], aliases: tuple[str, ...]) -> dict[str, 
 
 
 def _raw_value(payload: dict[str, Any], aliases: tuple[str, ...]) -> Any:
-    return next((payload[key] for key in aliases if key in payload), None)
+    return next(
+        (payload[key] for key in aliases if key in payload and payload[key] is not None),
+        None,
+    )
 
 
 def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:

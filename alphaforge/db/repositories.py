@@ -357,6 +357,28 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             )
             continue
         period_end = next(iter(period_ends)).isoformat()
+        incoming = {
+            "raw_payload": raw_payload,
+            "period_type": period_type,
+            "period_end": period_end,
+            "report_year": report_year,
+            "report_period": report_period,
+            "report_date": report_date,
+            "is_placeholder": is_placeholder,
+            "currency": currency,
+        }
+        reason = _intrinsic_period_rejection_reason(incoming)
+        if reason:
+            _record_financial_period_rejection(
+                conn,
+                company_id,
+                reason,
+                period_type,
+                report_year,
+                report_period,
+                raw_payload,
+            )
+            continue
         existing = conn.execute(
             """
             SELECT * FROM financial_periods

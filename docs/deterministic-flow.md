@@ -114,10 +114,11 @@ network fetch. Its effective date predicates are:
   value parses successfully.
   Fiscal ends must match an explicit fiscal-end field in the retained raw
   payload; legacy publication-as-end keys and rows without source metadata are
-  excluded. The writer skips rows
-  without a valid explicit fiscal end rather than inventing a key from a
-  publication date or year/quarter. Rows sort by fiscal end, publication date,
-  then quarter/annual/R12 (R12 wins exact ties).
+  excluded. The writer retains intrinsically invalid rows in rejection audit
+  before any same-slot upsert, so an invalid resync cannot replace a verified
+  report. It also skips rows without a valid explicit fiscal end rather than
+  inventing a key from a publication date or year/quarter. Rows sort by fiscal
+  end, publication date, then quarter/annual/R12 (R12 wins exact ties).
 - Prices: every populated date alias must parse completely and agree before
   normalization, and the verified `price_date` must be `<= as_of`; the latest
   eligible close must be **at most seven calendar days old**, inclusive.
