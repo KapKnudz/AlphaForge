@@ -1650,6 +1650,117 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
     assert dcf[str(cid)]["selection"] == exported
 
 
+@pytest.mark.parametrize(
+    "defect,expected_reason,expected_dcf_status",
+    [
+        ("currency", "annual currency comparability unverified", "unavailable"),
+        ("duplicate_year", "duplicate annual fiscal slot", "available"),
+    ],
+)
+def test_contextually_incompatible_same_slot_correction_remains_authoritative(
+    defect, expected_reason, expected_dcf_status, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+    correction = annual(2026, 200)
+    if defect == "currency":
+        correction["currency"] = "USD"
+    else:
+        correction["year"] = 2025
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    stored = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE period_type='year' AND period_end=?",
+        (correction["period_end"],),
+    ).fetchone()
+    assert json.loads(stored["raw_payload"]) == correction
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 200
+    assert loaded["financial"].revenue_growth is None
+    assert loaded["financial"].revenue_growth_years == 0
+    assert expected_reason in loaded["selection"]["annual_history"]["reasons"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert score["revenue_growth"] is None
+    assert score["revenue_growth_years"] == 0
+    assert expected_reason in exported["annual_history"]["reasons"]
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+    assert dcf[str(cid)]["current_revenue"] == 200
+    assert dcf[str(cid)]["status"] == expected_dcf_status
+    if expected_dcf_status == "available":
+        assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+
+
+@pytest.mark.parametrize("correction_last", [False, True])
+def test_same_slot_batch_order_retains_last_intrinsically_valid_report(correction_last):
+    conn, cid = setup(
+        periods=[annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2026)]
+    )
+    original = annual(2026, 133.1)
+    correction = annual(2026, 200, currency="USD")
+    batch = [original, correction] if correction_last else [correction, original]
+
+    assert upsert_financial_periods(conn, cid, batch) == 2
+    stored = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE period_type='year' AND period_end=?",
+        (original["period_end"],),
+    ).fetchone()
+    assert json.loads(stored["raw_payload"]) == batch[-1]
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    if correction_last:
+        assert loaded["financial"].revenue_growth is None
+        assert "annual currency comparability unverified" in loaded["selection"][
+            "annual_history"
+        ]["reasons"]
+    else:
+        assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+        rejection = next(
+            item
+            for item in loaded["selection"]["rejected_reports"]
+            if item["source"] == "ingestion_rejection"
+        )
+        assert rejection["raw_payload"] == correction
+        assert not rejection["current_refusal"]
+
+
+def test_intrinsically_valid_same_slot_correction_remains_cutoff_filtered(
+    monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+    correction = annual(2026, 200, report_Date="2026-06-02")
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    before = load_results_for_company(conn, cid, CUTOFF)
+    deferred = next(
+        item
+        for item in before["selection"]["rejected_reports"]
+        if item["source"] == "financial_periods"
+    )
+    assert deferred["reason"] == "after cutoff"
+    assert not deferred["current_refusal"]
+    assert before["reverse_dcf"]["current_revenue"] == pytest.approx(121)
+    assert before["financial"].revenue_growth == pytest.approx(0.1)
+    assert before["financial"].revenue_growth_years == 2
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_growth"] == pytest.approx(0.1)
+    assert score["revenue_growth_years"] == 2
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["current_revenue"] == pytest.approx(121)
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+
+    after = load_results_for_company(conn, cid, "2026-06-03")
+    assert after["reverse_dcf"]["current_revenue"] == 200
+    assert after["selection"]["annual_history"]["period_ends"][-1] == "2026-03-31"
+
+
 def test_conflicting_alias_original_is_retained_once_across_repeated_replacement():
     conn, cid = setup(periods=[annual(2025)])
     rejected = annual(
