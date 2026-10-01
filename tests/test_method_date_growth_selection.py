@@ -1053,7 +1053,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
         assert score[f"{metric}_years"] == 0
         assert row[metric] == ""
         assert row[f"{metric}_years"] == "0"
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-annual-rejection-span-v14"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-annual-rejection-span-v16"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
