@@ -670,7 +670,10 @@ def upsert_kpi_observations(
     count = 0
     for r in rows:
         raw_payload = json.dumps(r, ensure_ascii=False)
-        val = r.get("v") if "v" in r else r.get("value")
+        val = next(
+            (r.get(key) for key in ("v", "value") if r.get(key) is not None),
+            None,
+        )
         try:
             val_f = float(val) if val is not None else None
         except (TypeError, ValueError):
@@ -718,6 +721,8 @@ def upsert_kpi_observations(
                 period_type=period_type,
                 price_type=price_type,
             )
+            if val is not None:
+                count += 1
             continue
 
         observation_date = parsed_observation_date.isoformat()

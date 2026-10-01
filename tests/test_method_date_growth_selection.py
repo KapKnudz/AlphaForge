@@ -164,6 +164,11 @@ def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_pat
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert (loaded["valuation"].raw_market_cap is not None) == available
+    if not available:
+        price_selection = loaded["selection"]["price"]
+        assert price_selection["value"] == 10
+        assert price_selection["date_facts"] == {"d": price_date}
+        assert price_selection["raw_payload"] == {"d": price_date, "c": 10}
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     assert (
         score["readiness_status"]
@@ -175,6 +180,12 @@ def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_pat
         assert not score["rank_eligible"]
         assert "stock_price_stale" in row["readiness_blockers"]
         assert dcf[str(cid)]["current_price"] is None
+        assert score["input_selection"]["price"]["raw_payload"] == {
+            "d": price_date,
+            "c": 10,
+        }
+        assert json.loads(row["input_selection"]) == score["input_selection"]
+        assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
 @pytest.mark.parametrize("report_period", [None, 5])
@@ -212,9 +223,9 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     "period_type,observed,expected_count,stored_date",
     [
         ("year", "2026-06-01T12:00:00Z", 1, CUTOFF),
-        ("year", "2026-06-01garbage", 0, None),
+        ("year", "2026-06-01garbage", 1, None),
         ("last", "2026-06-01T12:00:00+02:00", 1, CUTOFF),
-        ("last", "2026-06-01garbage", 0, None),
+        ("last", "2026-06-01garbage", 1, None),
     ],
 )
 def test_kpi_ingestion_parses_complete_iso_dates(
@@ -262,7 +273,7 @@ def test_price_and_kpi_date_alias_conflicts_retain_original_evidence(
         kpi = dict(reversed(tuple(kpi.items())))
 
     assert upsert_prices(conn, cid, [price], currency="SEK") == 0
-    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 0
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 1
     assert upsert_prices(conn, cid, [price], currency="SEK") == 0
     assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 2
 
@@ -430,7 +441,7 @@ def test_rejected_market_inputs_survive_early_missing_financial_exports(monkeypa
     price = {"c": 10}
     kpi = {"y": 2026, "p": 5, "v": 30}
     assert upsert_prices(conn, cid, [price], currency="SEK") == 0
-    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 0
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [kpi]) == 1
     packet(conn, cid)
 
     loaded = load_results_for_company(conn, cid, CUTOFF)
@@ -463,6 +474,46 @@ def test_future_and_historical_price_rejections_remain_audit_only():
     assert not by_raw[json.dumps(older_invalid, sort_keys=True)]["current_refusal"]
     assert not by_raw[json.dumps(corrected_invalid, sort_keys=True)]["current_refusal"]
     assert not any("price" in reason for reason in loaded["selection"]["refusal_reasons"])
+
+
+@pytest.mark.parametrize("rejection_first", [False, True])
+def test_conflicting_older_price_dates_are_audit_only(
+    rejection_first, monkeypatch, tmp_path
+):
+    conn, cid = setup(price_date=None)
+    rejected = {
+        "price_Date": "2025-01-01",
+        "date": "2025-01-02",
+        "c": 9,
+    }
+    fresh = {"d": CUTOFF, "c": 10}
+    batches = ([rejected], [fresh]) if rejection_first else ([fresh], [rejected])
+    for rows in batches:
+        upsert_prices(conn, cid, rows, currency="SEK")
+    assert upsert_prices(conn, cid, [rejected], currency="SEK") == 0
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM market_input_rejections WHERE input_type='price'"
+        ).fetchone()[0]
+        == 1
+    )
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = loaded["selection"]["rejected_prices"][0]
+    assert retained["raw_payload"] == rejected
+    assert retained["date_facts"] == {
+        "price_Date": "2025-01-01",
+        "date": "2025-01-02",
+    }
+    assert not retained["current_refusal"]
+    assert loaded["reverse_dcf"]["current_price"] == 10
+    assert not any("aliases conflict" in item for item in loaded["selection"]["refusal_reasons"])
+
+    packet(conn, cid)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["input_selection"]["rejected_prices"][0] == retained
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
 
 
 def test_malformed_kpi_replacement_preserves_prior_date_authority():
@@ -698,18 +749,31 @@ def test_nonnumeric_older_fiscal_year_is_excluded_without_arithmetic():
 
 
 @pytest.mark.parametrize("age,count", [(0, 1), (7, 1), (8, 0)])
-def test_historical_price_pairing_boundary(age, count):
+def test_historical_price_pairing_boundary(age, count, monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2025), annual(2026)])
     end = date(2025, 3, 31)
-    upsert_prices(
-        conn, cid, [{"d": (end - timedelta(days=age)).isoformat(), "c": 10}], currency="SEK"
-    )
+    historical_date = (end - timedelta(days=age)).isoformat()
+    historical_raw = {"d": historical_date, "c": 10}
+    upsert_prices(conn, cid, [historical_raw], currency="SEK")
     # A price after period end is never paired, however close.
     upsert_prices(conn, cid, [{"d": "2025-04-01", "c": 999}], currency="SEK")
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert loaded["valuation"].ev_ebit_history_count == count
+    pairing = loaded["selection"]["historical_price_pairings"][0]
+    assert pairing["value"] == 10
+    assert pairing["date_facts"] == {"d": historical_date}
+    assert pairing["raw_payload"] == historical_raw
     if count:
         assert loaded["valuation"].ev_ebit_guardrail_low is None
+    else:
+        assert pairing["reason"] == "historical price missing or older than seven calendar days"
+    packet(conn, cid)
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert score["input_selection"]["historical_price_pairings"][0]["raw_payload"] == (
+        historical_raw
+    )
 
 
 def test_publication_is_not_a_fiscal_end():

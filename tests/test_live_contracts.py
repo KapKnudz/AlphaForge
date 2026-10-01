@@ -405,6 +405,134 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
         )
 
 
+def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
+    import argparse
+
+    from alphaforge.cli.main import cmd_sync
+
+    class RejectedKpiAdapter:
+        def get_instruments(self):
+            return [
+                {
+                    "insId": 909,
+                    "name": "Rejected KPI AB",
+                    "ticker": "RKPI",
+                    "instrument": 1,
+                    "branchId": 1,
+                }
+            ]
+
+        def get_branches(self):
+            return [{"id": 1, "name": "Branch 1", "nameEn": "Branch 1"}]
+
+        def get_sectors(self):
+            return []
+
+        def get_countries(self):
+            return []
+
+        def get_translation_metadata(self):
+            return []
+
+        def get_kpi_metadata(self):
+            return []
+
+        def get_report_metadata(self):
+            return []
+
+        def get_reports(self, ins_ids, *, original=0):
+            return []
+
+        def get_stock_prices(self, ins_id, *, max_count=None):
+            return []
+
+        def get_kpi_summary(self, ins_id, report_type):
+            if report_type in {"year", "r12"}:
+                return {
+                    "kpis": [
+                        {
+                            "kpiId": 99,
+                            "values": [
+                                {"y": 2026, "p": 5, "v": 0},
+                                {"y": 2026, "p": 4, "v": None},
+                                {"y": 2026, "p": 1, "v": None, "value": 7},
+                            ],
+                        }
+                    ]
+                }
+            return {"kpis": []}
+
+        def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            period = 3 if kpi_id == 99 else 2
+            return [{"y": 2026, "p": period, "v": 0}]
+
+        def get_dividends(self, ins_ids=None):
+            return []
+
+        def get_stock_splits(self):
+            return []
+
+        def get_report_calendar(self, ins_ids=None):
+            return []
+
+        def get_shorts(self):
+            return []
+
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:",
+        all=True,
+        company=None,
+        ticker=None,
+        allow_empty_companies=True,
+    )
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    common_patches = (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.db.migrations.migrate", return_value=None),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", RejectedKpiAdapter),
+    )
+    with common_patches[0], common_patches[1], common_patches[2]:
+        assert cmd_sync(args) == 0
+        assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 12
+        assert [
+            tuple(row)
+            for row in conn.execute(
+                """SELECT kpi_id, count(*) FROM market_input_rejections
+                   GROUP BY kpi_id ORDER BY kpi_id"""
+            ).fetchall()
+        ] == [(37, 2), (42, 2), (99, 8)]
+        assert cmd_sync(args) == 0
+        assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 12
+        assert {
+            row[0]
+            for row in conn.execute(
+                "SELECT status FROM jobs WHERE job_type LIKE 'sync_kpis%'"
+            ).fetchall()
+        } == {"success"}
+
+        with patch(
+            "alphaforge.db.repositories.upsert_kpi_observations",
+            side_effect=RuntimeError("synthetic KPI persistence failure"),
+        ):
+            assert cmd_sync(args) == 1
+        failed = conn.execute(
+            """SELECT status, error FROM jobs
+               WHERE job_type='sync_kpis_37_year'"""
+        ).fetchone()
+        assert failed["status"] == "failed"
+        failure = json.loads(failed["error"])
+        assert failure["code"] == "kpi_history_upsert_failed"
+        assert failure["retryable"] is True
+
+        assert cmd_sync(args) == 0
+        retried = conn.execute(
+            "SELECT status FROM jobs WHERE job_type='sync_kpis_37_year'"
+        ).fetchone()
+        assert retried["status"] == "success"
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not os.environ.get("BORSDATA_API_KEY"), reason="BORSDATA_API_KEY not set")
 def test_live_instruments_contract():

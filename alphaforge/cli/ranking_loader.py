@@ -442,19 +442,49 @@ def _rejection_is_current(
 
 def _price_rejection_is_current(item: dict[str, Any], cutoff: date, admitted_rows: list) -> bool:
     raw = item.get("raw_payload") or {}
-    rejected_date, date_issue = aliased_iso_date(raw, PRICE_DATE_ALIASES)
-    if not raw:
-        rejected_date = _date(item.get("price_date"))
-        date_issue = None if rejected_date is not None else "unavailable"
-    if date_issue is None and rejected_date is not None and rejected_date > cutoff:
+    if raw:
+        values = [
+            raw[key]
+            for key in PRICE_DATE_ALIASES
+            if key in raw and raw[key] is not None
+        ]
+        rejected_dates = [_date(value) for value in values]
+        if not values or any(value is None for value in rejected_dates):
+            return True
+    else:
+        rejected_dates = [_date(item.get("price_date"))]
+        if rejected_dates[0] is None:
+            return True
+
+    known_dates = [value for value in rejected_dates if value is not None]
+    if all(value > cutoff for value in known_dates):
         return False
-    if date_issue is not None or rejected_date is None:
+    if any(value > cutoff for value in known_dates):
         return True
     admitted_dates = {_date(row["price_date"]) for row in admitted_rows}
-    if rejected_date in admitted_dates:
-        return False
     latest_date = max((value for value in admitted_dates if value is not None), default=None)
-    return latest_date is None or rejected_date > latest_date
+    if latest_date is None:
+        return True
+    if all(value < latest_date for value in known_dates):
+        return False
+    return len(set(known_dates)) != 1 or known_dates[0] not in admitted_dates
+
+
+def _price_evidence(row) -> dict[str, Any]:
+    if row is None:
+        return {
+            "value": None,
+            "date_facts": {},
+            "raw_payload": None,
+            "provenance": None,
+        }
+    raw = _payload(row)
+    return {
+        "value": row["close"],
+        "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+        "raw_payload": raw,
+        "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
+    }
 
 
 def _number(value: Any) -> float | None:
@@ -749,6 +779,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "selected_date": latest_price.date.isoformat() if latest_price else None,
         "candidate_date": candidate_price.date.isoformat() if candidate_price else None,
         "age_calendar_days": (cutoff - candidate_price.date).days if candidate_price else None,
+        **_price_evidence(price_rows[-1] if price_rows else None),
         "reasons": price_missing,
     }
     if not period_rows:
@@ -868,6 +899,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 "period_end": row["period_end"],
                 "price_date": paired.date.isoformat() if paired else None,
                 "age_calendar_days": age,
+                **_price_evidence(candidates[-1] if candidates else None),
                 "reason": None
                 if usable
                 else "historical price missing or older than seven calendar days",

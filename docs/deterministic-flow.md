@@ -37,7 +37,10 @@ without trusting provider `maxCount` (optional slicing is local). Sync stores
 reports, prices, annual/R12 KPI history, dividends, splits, report calendar,
 reference/metadata caches and available Börsdata short snapshots. KPI 37/42
 history is requested directly even if summary discovery omits it. Unsupported
-KPI responses can remain missing. Integration retries belong to
+KPI responses can remain missing. KPI writer counts include non-null rows durably
+retained as explicit rejections, so intended date refusals do not become sync
+failures; a rejection-write exception still produces a retryable failed job and
+nonzero sync exit. Integration retries belong to
 [`providers/http.py`](../alphaforge/providers/http.py); sync records branch job
 outcomes and isolates many per-company failures, not one all-or-nothing fleet
 transaction. Each per-company dividend batch is savepoint-atomic: any date, type
@@ -120,7 +123,9 @@ network fetch. Its effective date predicates are:
   eligible close must be **at most seven calendar days old**, inclusive.
   Historical valuation pairs each report with the last close at/before its
   verified fiscal end, also with an inclusive seven-calendar-day maximum gap.
-  Older/missing pairs do not contribute to historical valuation anchors.
+  Older/missing pairs do not contribute to historical valuation anchors. Current
+  and historical pairing diagnostics retain the candidate close, raw payload and
+  every original date fact even when the seven-day guard refuses the price.
 - KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
   `observation_date <= as_of`. Every populated observation-date alias must
   parse completely and agree. Invalid input is retained in rejection audit
@@ -163,10 +168,13 @@ chronology provably older than the latest same-type row becomes audit-only.
 An unresolved annual slot within the entire selected annual growth span, not
 just at or after its latest anchor, makes annual comparisons unavailable.
 Rejected slots before the selected suffix, genuinely corrected slots and
-consistent future observations remain audit-only.
-Stale prices are
-retained only as diagnostic dates, not as available closes, raw multiples or DCF
-inputs; current financial margins/balance facts can still be available.
+consistent future observations remain audit-only. A conflicting rejected price
+is also audit-only when every populated date fact parses and strictly predates a
+newer verified admitted price; malformed, unknown or mixed current/future facts
+remain current refusals.
+Stale prices retain their raw evidence as diagnostics, not as available closes,
+raw multiples or DCF inputs; current financial margins/balance facts can still
+be available.
 
 The latest eligible report remains the current financial/heuristic basis.
 Growth, per-share growth, dilution and consistency instead use the latest
