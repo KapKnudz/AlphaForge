@@ -446,11 +446,7 @@ def _rejection_is_current(
 def _price_rejection_is_current(item: dict[str, Any], cutoff: date, admitted_rows: list) -> bool:
     raw = item.get("raw_payload") or {}
     if raw:
-        values = [
-            raw[key]
-            for key in PRICE_DATE_ALIASES
-            if key in raw and raw[key] is not None
-        ]
+        values = [raw[key] for key in PRICE_DATE_ALIASES if key in raw and raw[key] is not None]
         rejected_dates = [_date(value) for value in values]
         if not values or any(value is None for value in rejected_dates):
             return True

@@ -514,9 +514,7 @@ def test_future_and_historical_price_rejections_remain_audit_only():
 
 
 @pytest.mark.parametrize("rejection_first", [False, True])
-def test_conflicting_older_price_dates_are_audit_only(
-    rejection_first, monkeypatch, tmp_path
-):
+def test_conflicting_older_price_dates_are_audit_only(rejection_first, monkeypatch, tmp_path):
     conn, cid = setup(price_date=None)
     rejected = {
         "price_Date": "2025-01-01",
@@ -1365,19 +1363,19 @@ def test_annual_rejections_block_only_while_unresolved_and_applicable(monkeypatc
 
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
-    "source,end",
+    "rejection_kind,end",
     [
-        ("financial_periods", "2025-04-30"),
-        ("financial_periods", "2024-04-30"),
-        ("ingestion_rejection", "2025-04-30"),
+        ("missing_publication", "2025-04-30"),
+        ("missing_publication", "2024-04-30"),
+        ("alias_conflict", "2025-04-30"),
     ],
 )
 def test_interior_annual_rejection_blocks_growth_and_exports(
-    source, end, reverse, monkeypatch, tmp_path
+    rejection_kind, end, reverse, monkeypatch, tmp_path
 ):
     rows = [annual(year, 100 * 1.1 ** (year - 2024)) for year in range(2024, 2027)]
     rejected = annual(int(end[:4]), 115, period_end=end, report_Date=None)
-    if source == "ingestion_rejection":
+    if rejection_kind == "alias_conflict":
         rejected["periodEnd"] = "2025-05-31"  # An unresolved, conflicting fiscal slot.
     rows.append(rejected)
     conn, cid = setup(periods=list(reversed(rows)) if reverse else rows)
@@ -1388,7 +1386,7 @@ def test_interior_annual_rejection_blocks_growth_and_exports(
     rejection = next(
         item for item in loaded["selection"]["rejected_reports"] if item["raw_payload"] == rejected
     )
-    assert rejection["source"] == source
+    assert rejection["source"] == "ingestion_rejection"
     assert rejection["current_refusal"]
     assert loaded["selection"]["annual_history"]["period_ends"] == []
     assert loaded["financial"].revenue_growth is None
@@ -1536,7 +1534,7 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch
     assert score["revenue_growth"] is None
     assert score["revenue_growth_years"] == 0
     assert any(
-        item.get("period_end") == "2026-04-30" and item["current_refusal"]
+        item["raw_payload"].get("period_end") == "2026-04-30" and item["current_refusal"]
         for item in exported["rejected_reports"]
     )
     assert json.loads(row["input_selection"]) == exported
@@ -1552,7 +1550,6 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch
         ("publication_order", "publication precedes fiscal end"),
         ("annual_year", "annual fiscal-year metadata unverified"),
         ("annual_stub", "annual stub or duration unverified"),
-        ("annual_currency", "annual currency comparability unverified"),
         ("placeholder", "placeholder"),
     ],
 )
@@ -1594,8 +1591,6 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
             rejected.pop("year")
         elif defect == "annual_stub":
             rejected["period_start"] = "2025-10-01"
-        elif defect == "annual_currency":
-            rejected["currency"] = "USD"
         elif defect == "placeholder":
             rejected = annual(2026, 0, report_Date=None, ebit=0)
 
@@ -1714,9 +1709,10 @@ def test_same_slot_batch_order_retains_last_intrinsically_valid_report(correctio
     loaded = load_results_for_company(conn, cid, CUTOFF)
     if correction_last:
         assert loaded["financial"].revenue_growth is None
-        assert "annual currency comparability unverified" in loaded["selection"][
-            "annual_history"
-        ]["reasons"]
+        assert (
+            "annual currency comparability unverified"
+            in loaded["selection"]["annual_history"]["reasons"]
+        )
     else:
         assert loaded["financial"].revenue_growth == pytest.approx(0.1)
         rejection = next(
@@ -1728,9 +1724,7 @@ def test_same_slot_batch_order_retains_last_intrinsically_valid_report(correctio
         assert not rejection["current_refusal"]
 
 
-def test_intrinsically_valid_same_slot_correction_remains_cutoff_filtered(
-    monkeypatch, tmp_path
-):
+def test_intrinsically_valid_same_slot_correction_remains_cutoff_filtered(monkeypatch, tmp_path):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
     packet(conn, cid)

@@ -435,7 +435,16 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
             return []
 
         def get_kpi_metadata(self):
-            return []
+            return [
+                {
+                    "kpiId": kpi_id,
+                    "nameSv": f"KPI {kpi_id}",
+                    "nameEn": f"KPI {kpi_id}",
+                    "format": None,
+                    "isString": False,
+                }
+                for kpi_id in (37, 42, 99)
+            ]
 
         def get_report_metadata(self):
             return []
