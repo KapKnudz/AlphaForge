@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
+from alphaforge.core.valuation.dividend_yield import is_known_currency
 
 
 def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
@@ -312,34 +314,99 @@ def upsert_prices(
 
 def upsert_dividends(conn: Any, company_id: int, rows: list[dict[str, Any]]) -> int:
     count = 0
-    for r in rows:
-        ex_date = r.get("exDate") or r.get("ex_date") or r.get("date")
-        amount = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
-        if ex_date is None or amount is None:
-            continue
-        try:
-            if float(amount) == 0.0:
+    conn.execute("SAVEPOINT dividend_batch")
+    try:
+        for r in rows:
+            ex_date = r.get("exDate") or r.get("ex_date") or r.get("date")
+            amount = r.get("amountPaid") if "amountPaid" in r else r.get("amount")
+            if ex_date is None or amount is None:
                 continue
-        except (TypeError, ValueError):
-            pass
-        if isinstance(ex_date, str) and len(ex_date) > 10:
-            ex_date = ex_date[:10]
-        currency = r.get("currency") or r.get("currencyShortName") or "SEK"
-        dividend_type = int(
-            r.get("dividendType") if "dividendType" in r else r.get("dividend_type", 0)
-        )
-        distribution_frequency = r.get("distributionFrequency")
-        conn.execute(
-            """
-            INSERT INTO dividends (company_id, ex_date, amount, currency, dividend_type, distribution_frequency)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(company_id, ex_date, dividend_type, amount) DO NOTHING
-            """,
-            (company_id, ex_date, float(amount), currency, dividend_type, distribution_frequency),
-        )
-        count += 1
+            ex_date = date.fromisoformat(str(ex_date)[:10]).isoformat()
+            # Empty is an explicit unknown sentinel for the legacy NOT NULL column.
+            # Never invent SEK; the verification bit distinguishes legacy defaults.
+            currency = str(r.get("currency") or r.get("currencyShortName") or "").strip()
+            dividend_type = int(
+                r.get("dividendType") if "dividendType" in r else r.get("dividend_type", 0)
+            )
+            distribution_frequency = r.get("distributionFrequency")
+            conn.execute(
+                """
+                INSERT INTO dividends
+                    (company_id, ex_date, amount, currency, dividend_type,
+                     distribution_frequency, currency_verified, currency_conflicted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(company_id, ex_date, dividend_type, amount) DO UPDATE SET
+                    currency=CASE
+                        WHEN dividends.currency_conflicted=0
+                             AND dividends.currency_verified=0
+                             AND excluded.currency_verified=1 THEN excluded.currency
+                        ELSE dividends.currency END,
+                    currency_verified=CASE
+                        WHEN dividends.currency_conflicted=1 THEN 0
+                        WHEN excluded.currency_verified=0 THEN dividends.currency_verified
+                        WHEN dividends.currency_verified=0
+                             OR dividends.currency=excluded.currency THEN 1
+                        ELSE 0 END,
+                    currency_conflicted=CASE
+                        WHEN dividends.currency_conflicted=1 THEN 1
+                        WHEN dividends.currency_verified=1
+                             AND excluded.currency_verified=1
+                             AND dividends.currency<>excluded.currency THEN 1
+                        ELSE 0 END,
+                    distribution_frequency=excluded.distribution_frequency
+                """,
+                (
+                    company_id,
+                    ex_date,
+                    float(amount),
+                    currency,
+                    dividend_type,
+                    distribution_frequency,
+                    int(is_known_currency(currency)),
+                ),
+            )
+            count += 1
+        conn.execute("RELEASE SAVEPOINT dividend_batch")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT dividend_batch")
+        conn.execute("RELEASE SAVEPOINT dividend_batch")
+        raise
     conn.commit()
     return count
+
+
+def upsert_dividend_window_coverage(
+    conn: Any,
+    company_id: int,
+    window_start: str,
+    window_end: str,
+    *,
+    status: str,
+    source: str,
+    assurance: str | None = None,
+    verified_at: str | None = None,
+) -> None:
+    """Store independent exact-window assurance, including revocation/partiality.
+
+    A complete assertion requires external source evidence, not row extrema,
+    HTTP success, or absence of rows. Börsdata acquisition cannot assert it.
+    """
+    start, end = date.fromisoformat(window_start), date.fromisoformat(window_end)
+    if end <= start:
+        raise ValueError("dividend coverage requires start < end")
+    conn.execute(
+        """
+        INSERT INTO dividend_window_coverage
+            (company_id, window_start, window_end, status, source, assurance, verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, window_start, window_end) DO UPDATE SET
+            status=excluded.status, source=excluded.source,
+            assurance=excluded.assurance, verified_at=excluded.verified_at,
+            updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (company_id, window_start, window_end, status, source, assurance, verified_at),
+    )
+    conn.commit()
 
 
 def upsert_kpi_observations(

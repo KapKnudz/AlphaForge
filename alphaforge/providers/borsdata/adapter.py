@@ -360,7 +360,7 @@ class BorsdataAdapter:
             rows = rows[-max_count:]
         return rows
 
-    # ---- dividends (zero-row dropped at adapter) ----
+    # ---- dividends ----
 
     @staticmethod
     def _is_zero_dividend(row: dict[str, Any]) -> bool:
@@ -392,6 +392,7 @@ class BorsdataAdapter:
         return item
 
     def get_dividends(self, ins_ids: list[int] | None = None) -> list[dict[str, Any]]:
+        """Calendar observations only; the endpoint provides no window completeness assurance."""
         params = {"instList": ",".join(str(item) for item in ins_ids)} if ins_ids else None
         data = self._get_json("/v1/instruments/dividend/calendar", params=params)
         rows = self._unwrap_list(data, endpoint="/v1/instruments/dividend/calendar")
@@ -414,7 +415,12 @@ class BorsdataAdapter:
                             "/v1/instruments/dividend/calendar: "
                             f"{nested_key} contains non-object rows"
                         )
-                    if self._is_zero_dividend(dividend):
+                    # Undated zero markers have no window identity; dated zeros
+                    # are real observations, not a completeness assertion.
+                    if (
+                        self._is_zero_dividend(dividend)
+                        and self._dividend_ex_date(dividend) is None
+                    ):
                         continue
                     if self._dividend_ex_date(dividend) is None:
                         raise BorsdataContractError(
@@ -425,7 +431,7 @@ class BorsdataAdapter:
                         item.setdefault("insId", instrument)
                     flattened.append(item)
             else:
-                if self._is_zero_dividend(row):
+                if self._is_zero_dividend(row) and self._dividend_ex_date(row) is None:
                     continue
                 if self._dividend_ex_date(row) is None:
                     raise BorsdataContractError(

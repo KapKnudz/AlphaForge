@@ -40,7 +40,10 @@ history is requested directly even if summary discovery omits it. Unsupported
 KPI responses can remain missing. Integration retries belong to
 [`providers/http.py`](../alphaforge/providers/http.py); sync records branch job
 outcomes and isolates many per-company failures, not one all-or-nothing fleet
-transaction. `sync --as-of` does **not** trim acquisition to that date.
+transaction. Each per-company dividend batch is savepoint-atomic: any date, type
+or amount conversion or database-constraint failure rolls back that batch without
+discarding unrelated pending caller work. `sync --as-of` does **not** trim
+acquisition to that date.
 
 ### Authoritative stored input identities
 
@@ -54,7 +57,8 @@ transaction. `sync --as-of` does **not** trim acquisition to that date.
 | Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. If period end is absent, the writer can fall back to publication date; it is not always a verified fiscal-period end. |
 | KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. The writer handles missing report-period keys explicitly for idempotence. |
 | Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency; no OHLC history. |
-| Dividend | `(company_id, ex_date, dividend_type, amount)`; currency and distribution frequency retained. Types `0/1/2/4` accepted; explicit zero-distribution markers are dropped, not proof of historical coverage. |
+| Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
+| Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
 
 Market-data upserts replace values at these keys; they are not append-only
@@ -87,7 +91,10 @@ unpublished reports also fail loader filtering. Absent live EBITDA and gross
 debt are not invented from net debt. Missing score inputs produce diagnostics
 (`missing_data`, `data_quality`, availability and eligibility), not zero-valued
 fundamentals. A numeric diagnostic score can still be emitted for an ineligible
-company. DCF unavailability and provisional inputs have their own structured
+company. Yield availability/window/currency/coverage facts are returned by the
+loader as `dividend_yield` and retained in every model's `scoring_audit`, including
+ranking JSON and persisted scores; CSV carries the resulting score consequences,
+not a standalone yield column. DCF unavailability and provisional inputs have their own structured
 `missing_information`/warnings contract in [valuation.md](valuation.md).
 
 ## 3. Cutoff selection and calculation wiring
@@ -103,8 +110,18 @@ network fetch. Its effective date predicates are:
 - KPIs: non-null value, `year <= cutoff.year`, and observation date absent **or**
   `<= as_of`. Latest eligible values are collected per KPI; R12 overrides
   non-R12 history. Yearless `last` snapshots do not pass that year predicate.
-- Dividend yield: ex-dates in the preceding calendar-year interval ending at
-  `as_of`; this loader query does not consult currency or coverage.
+- Dividend inputs: trailing calendar twelve months ending at `as_of`, with
+  `(start,end]` ex-date bounds. The previous-year anniversary clamps February 29
+  to February 28; e.g. `2028-02-29` uses `(2027-02-28,2028-02-29]`, and
+  `2025-02-28` uses `(2024-02-28,2025-02-28]` (includes February 29).
+  Out-of-window/future distributions do not participate. The loader also selects
+  the exact company/window coverage assertion and latest eligible close; no
+  company-currency fallback is applied. [Valuation](valuation.md) owns the
+  calculation and availability policy. Börsdata currently supplies no
+  trustworthy window assurance, so sync writes observations without changing
+  independently owned coverage assertions. An absent assertion, HTTP success,
+  and min/max dates never prove coverage. Fixture-backed independent complete
+  windows are supported, not a claim of live completeness.
 - Textual evidence: [`load_evidence_view`](../alphaforge/evidence/manifest_store.py)
   supplies the shared manifest/packet view. Do not replace it with raw document
   counts; [evidence-flow.md](evidence-flow.md) owns its cutoff, usability,
@@ -196,10 +213,11 @@ Confirmed current gaps against the target design, not policy changes in this doc
   constructs `candidate.ranking_model="general"` and `cmd_rank` does not replace
   it with the score's sector model. Direct gate tests rejecting bank/property
   do not prove sector rejection through the CLI.
-- Plan's coverage-validated return path is not wired: sync coverage uses minimum
-  and maximum stored ex-dates, not a verified complete requested window; the
-  yield loader and return helper do not enforce that coverage. Liquidity's
-  missing-volume-as-zero proxy also falls short of the missing≠zero goal.
+- Current yield enforces verified complete currency-compatible windows, but live
+  provider assurance is absent, so acquisition honestly remains unknown. The
+  separate realized-return helper still accepts no coverage and uses an end-price
+  proxy; this yield repair does not implement returns/reinvestment. Liquidity's
+  missing-volume-as-zero supporting API is unchanged and excluded from analysis.
 
 Report-calendar acquisition is implemented; its planned imminent-report
 `pending` ranking gate is not. Broader ownership integration, thesis analysis,
@@ -214,7 +232,10 @@ Executable cross-boundary coverage lives in
 [`test_missing_valuation_regression.py`](../tests/test_missing_valuation_regression.py)
 (live field mapping, KPI dates and DCF wiring),
 [`test_phase1_exit_gate.py`](../tests/test_phase1_exit_gate.py)
-(idempotence, placeholder and currency provenance), and
+(idempotence, placeholder and currency provenance),
+[`test_current_dividend_yield.py`](../tests/test_current_dividend_yield.py)
+(verified/unknown/partial windows, foreign-yield refusal, zero versus missing,
+calendar/leap ex-date boundaries and actual ranking/export provenance), and
 [`test_phase2_exit_gate.py`](../tests/test_phase2_exit_gate.py)
 (packet provenance/export, sorting, ADTV and direct readiness).
 These cover particular behaviors, not a complete semantic or live-model audit.
