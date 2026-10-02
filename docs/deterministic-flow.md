@@ -310,7 +310,8 @@ versions by [valuation policy modules](valuation.md), schema version by
 fingerprints by [evidence-flow.md](evidence-flow.md).
 
 Every new `rank` freezes and retains its numerical input body before evaluation,
-then retains original canonical outputs before publication. Schema v17 adds
+then atomically commits its consumable ranking row and original canonical output
+link before filesystem publication. Schema v17 adds
 immutable content-addressed bodies and run/output links without inventing legacy
 snapshots. `financial_inputs_hash` identifies numerical inputs separately from
 `numerical_identity`, which also binds exact executing code/rules/runtime.

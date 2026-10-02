@@ -56,10 +56,10 @@ new `rank` always selects text through `load_evidence_view`.
 
 ## Retention, publication and refusal
 
-Input retention commits before calculation. Output retention commits before any
-consumable export. Any retention/serialization error aborts rather than publishing
-an unrepeatable run. An interrupted run can leave an unused retained input body
-or an incomplete run record, but neither is substituted with live numerical rows.
+Input retention commits before calculation. The consumable `ranking_runs` row and
+its retained executed-output link commit atomically before any filesystem export.
+Any output-retention error rolls both records back rather than publishing an
+unrepeatable run; an interrupted run can leave only an unused retained input body.
 Identical retries verify retained content; contradictory insertions refuse.
 SQLite triggers prohibit update, delete and replacement of immutable records.
 
@@ -106,5 +106,5 @@ and multi-company insertion permutations, same-key report/price/KPI corrections,
 removal of live rows, retained-only reconstructed memory databases and forbidden
 live-table reads. It covers missing/zero, non-calendar fiscal histories, splits,
 sector branches, dividends, denominations, rule/code changes, tamper/conflicts,
-legacy refusal and persistence failure before consumption. Fixtures require no
+legacy refusal, atomic second-reader visibility and persistence failure before consumption. Fixtures require no
 live provider acquisition or model call.

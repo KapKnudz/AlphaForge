@@ -1230,29 +1230,33 @@ def cmd_rank(args: argparse.Namespace) -> int:
     universe_hash = hashlib.sha256(universe_bytes).hexdigest()
 
     eligible_count = sum(1 for s in ranking.scores if s.rank_eligible)
-    run_id = save_ranking_run(
-        conn,
-        as_of=as_of,
-        model_version=engine.RANKING_MODEL_VERSION,
-        packet_hash=evidence_packet_hash,
-        universe_hash=universe_hash,
-        company_count=len(ranking.scores),
-        eligible_count=eligible_count,
-        scores=[asdict(s) for s in ranking.scores],
-        inputs_summary={
-            "ranking_type": "deterministic_watchlist",
-            "total_companies": len(companies),
-            "eligible_count": eligible_count,
-            "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
-            "evidence_packet_hashes": evidence_packet_hashes,
-            "financial_inputs_hash": financial_inputs_hash,
-            "numerical_identity": numerical_identity,
-        },
-    )
-    # Persistence failure here aborts before any consumable file is published.
-    artifact_id = retain_outputs(
-        conn, run_id, numerical_identity, textual_context, original_outputs
-    )
+    try:
+        run_id = save_ranking_run(
+            conn,
+            as_of=as_of,
+            model_version=engine.RANKING_MODEL_VERSION,
+            packet_hash=evidence_packet_hash,
+            universe_hash=universe_hash,
+            company_count=len(ranking.scores),
+            eligible_count=eligible_count,
+            scores=[asdict(s) for s in ranking.scores],
+            inputs_summary={
+                "ranking_type": "deterministic_watchlist",
+                "total_companies": len(companies),
+                "eligible_count": eligible_count,
+                "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
+                "evidence_packet_hashes": evidence_packet_hashes,
+                "financial_inputs_hash": financial_inputs_hash,
+                "numerical_identity": numerical_identity,
+            },
+            commit=False,
+        )
+        artifact_id = retain_outputs(
+            conn, run_id, numerical_identity, textual_context, original_outputs
+        )
+    except Exception:
+        conn.rollback()
+        raise
     run_metadata = {
         "run_id": run_id,
         "artifact_id": artifact_id,

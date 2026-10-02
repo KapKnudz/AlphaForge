@@ -18,6 +18,7 @@ from test_method_date_growth_selection import (
 )
 
 from alphaforge.cli.main import cmd_rank, cmd_replay
+from alphaforge.db.connection import get_connection
 from alphaforge.db.numerical_runs import (
     TABLES,
     ReplayRefusal,
@@ -83,6 +84,24 @@ def seeded(reverse=False, branch=None, multiple=False):
         )
         conn.commit()
     return conn, cid
+
+
+def file_backed_seeded(tmp_path):
+    source, cid = seeded()
+    database = tmp_path / "executed-runs.db"
+    writer = get_connection(path=database)
+    source.backup(writer)
+    source.close()
+    writer.commit()
+    reader = get_connection(path=database)
+    return writer, reader, cid
+
+
+def run_counts(conn):
+    return tuple(
+        conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("ranking_runs", "executed_numerical_runs")
+    )
 
 
 def latest(conn):
@@ -223,6 +242,7 @@ def test_two_databases_share_export_root_without_run_id_collisions(
     monkeypatch.setattr(
         "alphaforge.db.connection.get_connection", lambda settings: databases[settings.dsn]
     )
+
     def rank_args(dsn):
         return argparse.Namespace(dsn=dsn, as_of=CUTOFF, watchlist=None)
 
@@ -475,10 +495,56 @@ def test_retention_failure_prevents_export_consumption(monkeypatch, tmp_path, st
     with pytest.raises(sqlite3.OperationalError, match="retention disk full"):
         cmd_rank(argparse.Namespace(dsn="sqlite:///:memory:", as_of=CUTOFF, watchlist=None))
     assert not (tmp_path / "exports").exists()
+    assert run_counts(conn) == (0, 0)
     if stage == "outputs":
-        run = conn.execute("SELECT id FROM ranking_runs ORDER BY id DESC LIMIT 1").fetchone()[0]
-        with pytest.raises(ReplayRefusal, match="missing_snapshot"):
-            replay_run(conn, run)
+        assert conn.execute("SELECT COUNT(*) FROM numerical_input_bodies").fetchone()[0] == 1
+        with pytest.raises(ReplayRefusal, match="missing_run"):
+            replay_run(conn, 1)
+
+
+def test_ranking_and_output_link_become_visible_atomically(monkeypatch, tmp_path):
+    writer, reader, _ = file_backed_seeded(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: writer)
+    visibility = {}
+
+    def observe_retention(*args, **kwargs):
+        visibility["before"] = run_counts(reader)
+        artifact_id = retain_outputs(*args, **kwargs)
+        visibility["after"] = run_counts(reader)
+        return artifact_id
+
+    monkeypatch.setattr("alphaforge.db.numerical_runs.retain_outputs", observe_retention)
+    assert (
+        cmd_rank(argparse.Namespace(dsn="sqlite:///executed-runs.db", as_of=CUTOFF, watchlist=None))
+        == 0
+    )
+    assert visibility == {"before": (0, 0), "after": (1, 1)}
+    writer.close()
+    reader.close()
+
+
+def test_repository_output_failure_rolls_back_ranking_visibility(monkeypatch, tmp_path):
+    writer, reader, _ = file_backed_seeded(tmp_path)
+    writer.execute(
+        """
+        CREATE TRIGGER fail_executed_run_retention
+        BEFORE INSERT ON executed_numerical_runs
+        BEGIN SELECT RAISE(ABORT, 'retention storage fault'); END
+        """
+    )
+    writer.commit()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: writer)
+
+    with pytest.raises(sqlite3.IntegrityError, match="retention storage fault"):
+        cmd_rank(argparse.Namespace(dsn="sqlite:///executed-runs.db", as_of=CUTOFF, watchlist=None))
+    assert run_counts(writer) == run_counts(reader) == (0, 0)
+    assert writer.execute("SELECT COUNT(*) FROM numerical_input_bodies").fetchone()[0] == 1
+    assert reader.execute("SELECT COUNT(*) FROM numerical_input_bodies").fetchone()[0] == 1
+    assert not (tmp_path / "exports").exists()
+    writer.close()
+    reader.close()
 
 
 def test_text_correction_does_not_replace_numerical_identity():

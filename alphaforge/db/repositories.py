@@ -1178,6 +1178,7 @@ def save_ranking_run(
     eligible_count: int,
     scores: list[dict[str, Any]],
     inputs_summary: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> int:
     import json as _json
 
@@ -1200,7 +1201,8 @@ def save_ranking_run(
             inputs_json,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     cur = conn.execute("SELECT last_insert_rowid()")
     row = cur.fetchone()
     return int(row[0]) if row else 0
