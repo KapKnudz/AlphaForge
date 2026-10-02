@@ -116,7 +116,10 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     assert original["metrics"][str(cid)]["dividend_yield"]["value"] == 10
     assert original["dcf"][str(cid)]["dcf"]["available"] is True
     assert original["scores"][0] == score
-    artefact = tmp_path / "exports" / "runs" / str(run)
+    artifact_id = json.loads(
+        (tmp_path / "exports" / CUTOFF / "run.json").read_text()
+    )["artifact_id"]
+    artefact = tmp_path / "exports" / "runs" / artifact_id
     assert json.loads((artefact / "outputs.json").read_text()) == original
     text_hashes = []
     identities = [identity]
@@ -172,6 +175,85 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
             )
     fresh.commit()
     assert canonical(replay_run(fresh, run)["outputs"]) == canonical(original)
+
+
+def test_duplicate_csv_companies_are_normalized_before_capture(monkeypatch, tmp_path):
+    conn, cid = seeded()
+    watchlist = tmp_path / "watchlist.csv"
+    watchlist.write_text("ticker\nFIX\nfix\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
+
+    assert (
+        cmd_rank(
+            argparse.Namespace(
+                dsn="sqlite:///duplicate-watchlist.db",
+                as_of=CUTOFF,
+                watchlist=str(watchlist),
+            )
+        )
+        == 0
+    )
+    run, identity, original = latest(conn)
+    body = json.loads(
+        conn.execute(
+            "SELECT body FROM numerical_input_bodies WHERE numerical_identity=?", (identity,)
+        ).fetchone()[0]
+    )
+    assert [company["id"] for company in body["universe"]] == [cid]
+    assert [company["id"] for company in body["tables"]["companies"]] == [cid]
+    assert len(original["scores"]) == 1
+    assert replay_run(conn, run)["outputs"] == original
+
+
+@pytest.mark.parametrize("identical_inputs", [False, True])
+def test_two_databases_share_export_root_without_run_id_collisions(
+    monkeypatch, tmp_path, capsys, identical_inputs
+):
+    first, _ = seeded()
+    second, second_company = seeded()
+    if not identical_inputs:
+        upsert_prices(second, second_company, [{"d": CUTOFF, "c": 20}], currency="SEK")
+
+    databases = {
+        "sqlite:///first.db": first,
+        "sqlite:///second.db": second,
+    }
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "alphaforge.db.connection.get_connection", lambda settings: databases[settings.dsn]
+    )
+    def rank_args(dsn):
+        return argparse.Namespace(dsn=dsn, as_of=CUTOFF, watchlist=None)
+
+    assert cmd_rank(rank_args("sqlite:///first.db")) == 0
+    first_replay = replay_run(first, 1)
+    first_dir = tmp_path / "exports" / "runs" / first_replay["artifact_id"]
+    first_files = {path.name: path.read_bytes() for path in first_dir.iterdir()}
+
+    assert cmd_rank(rank_args("sqlite:///second.db")) == 0
+    second_replay = replay_run(second, 1)
+    second_dir = tmp_path / "exports" / "runs" / second_replay["artifact_id"]
+
+    assert (first_replay["artifact_id"] == second_replay["artifact_id"]) is identical_inputs
+    assert {path.name: path.read_bytes() for path in first_dir.iterdir()} == first_files
+    for replayed, directory in ((first_replay, first_dir), (second_replay, second_dir)):
+        assert len(replayed["artifact_id"]) == 64
+        assert json.loads((directory / "outputs.json").read_text()) == replayed["outputs"]
+        assert "dsn" not in json.loads((directory / "run.json").read_text())
+
+    latest_alias = json.loads((tmp_path / "exports" / CUTOFF / "latest.json").read_text())
+    assert latest_alias == {
+        "mutable_latest_alias": True,
+        "run_id": 1,
+        "artifact_id": second_replay["artifact_id"],
+    }
+    capsys.readouterr()
+    for dsn, expected in databases.items():
+        assert cmd_replay(argparse.Namespace(dsn=dsn, run_id=1)) == 0
+        replayed = json.loads(capsys.readouterr().out)
+        assert replayed["artifact_id"] == replay_run(expected, 1)["artifact_id"]
+        assert replayed["outputs"] == replay_run(expected, 1)["outputs"]
 
 
 @pytest.mark.parametrize("multiple", [False, True])

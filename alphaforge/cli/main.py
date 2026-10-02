@@ -1189,6 +1189,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
                 )
             )
 
+    companies = list({company.id: company for company in companies}.values())
     if not companies:
         print("no companies to rank", file=sys.stderr)
         return 1
@@ -1249,44 +1250,71 @@ def cmd_rank(args: argparse.Namespace) -> int:
         },
     )
     # Persistence failure here aborts before any consumable file is published.
-    retain_outputs(conn, run_id, numerical_identity, textual_context, original_outputs)
-    exports_dir = Path("exports") / "runs" / str(run_id)
-    exports_dir.mkdir(parents=True, exist_ok=False)
-    export_ranking_files(
-        ranking,
-        as_of,
-        engine.RANKING_MODEL_VERSION,
-        exports_dir,
-        evidence_packet_hash=evidence_packet_hash,
-        evidence_packet_hashes=evidence_packet_hashes,
-        numerical_provenance={
-            "run_id": run_id,
-            "financial_inputs_hash": financial_inputs_hash,
-            "numerical_identity": numerical_identity,
-        },
+    artifact_id = retain_outputs(
+        conn, run_id, numerical_identity, textual_context, original_outputs
     )
-    (exports_dir / "dcf.json").write_text(canonical(original_outputs["dcf"]), encoding="utf-8")
-    (exports_dir / "outputs.json").write_text(canonical(original_outputs), encoding="utf-8")
-    (exports_dir / "run.json").write_text(
-        canonical(
-            {
-                "run_id": run_id,
-                "financial_inputs_hash": financial_inputs_hash,
-                "numerical_identity": numerical_identity,
-                "as_of": as_of,
-            }
-        ),
-        encoding="utf-8",
-    )
-    # Date directory is explicitly a mutable convenience, never replay authority.
-    import shutil
+    run_metadata = {
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "financial_inputs_hash": financial_inputs_hash,
+        "numerical_identity": numerical_identity,
+        "as_of": as_of,
+    }
+    provenance = {
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "financial_inputs_hash": financial_inputs_hash,
+        "numerical_identity": numerical_identity,
+    }
+    runs_dir = Path("exports") / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir = runs_dir / artifact_id
 
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix=".publishing-", dir=runs_dir) as staging:
+        staging_dir = Path(staging)
+        export_ranking_files(
+            ranking,
+            as_of,
+            engine.RANKING_MODEL_VERSION,
+            staging_dir,
+            evidence_packet_hash=evidence_packet_hash,
+            evidence_packet_hashes=evidence_packet_hashes,
+            numerical_provenance=provenance,
+        )
+        (staging_dir / "dcf.json").write_text(
+            canonical(original_outputs["dcf"]), encoding="utf-8"
+        )
+        (staging_dir / "outputs.json").write_text(
+            canonical(original_outputs), encoding="utf-8"
+        )
+        (staging_dir / "run.json").write_text(canonical(run_metadata), encoding="utf-8")
+        names = {path.name for path in staging_dir.iterdir()}
+        if exports_dir.exists():
+            if (
+                not exports_dir.is_dir()
+                or {path.name for path in exports_dir.iterdir()} != names
+                or any(
+                    (exports_dir / name).read_bytes() != (staging_dir / name).read_bytes()
+                    for name in names
+                )
+            ):
+                raise FileExistsError(f"conflicting immutable run artifact: {artifact_id}")
+        else:
+            staging_dir.replace(exports_dir)
+
+    # Date directory is explicitly a mutable convenience, never replay authority.
     latest_dir = Path("exports") / as_of
     latest_dir.mkdir(parents=True, exist_ok=True)
     for name in ("ranking.json", "ranking.csv", "dcf.json", "run.json"):
         shutil.copyfile(exports_dir / name, latest_dir / name)
     (latest_dir / "latest.json").write_text(
-        canonical({"mutable_latest_alias": True, "run_id": run_id}), encoding="utf-8"
+        canonical(
+            {"mutable_latest_alias": True, "run_id": run_id, "artifact_id": artifact_id}
+        ),
+        encoding="utf-8",
     )
 
     print(
@@ -1296,6 +1324,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"ranking_run_id={run_id}")
+    print(f"run_artifact_id={artifact_id}")
     print(f"financial_inputs_hash={financial_inputs_hash}")
     print(f"numerical_identity={numerical_identity}")
     print(f"evidence_packet_hashes={json.dumps(evidence_packet_hashes, sort_keys=True)}")

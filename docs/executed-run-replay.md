@@ -63,13 +63,17 @@ or an incomplete run record, but neither is substituted with live numerical rows
 Identical retries verify retained content; contradictory insertions refuse.
 SQLite triggers prohibit update, delete and replacement of immutable records.
 
-`exports/runs/<run_id>/` contains the write-once ranking JSON/CSV, DCF JSON,
-`outputs.json` and `run.json` identities. The SQLite retained body/output is replay
-authority, not an editable filesystem copy. `exports/<as_of>/` remains a clearly
-mutable latest convenience alias with `run.json` identifying its run and
-`latest.json` explicitly marking it mutable. Ranking JSON carries run ID and
-both numerical identities beside, not instead of, textual evidence hashes. A subsequent
-same-cutoff rank never rewrites the older run directory.
+`exports/runs/<artifact_id>/` contains the write-once ranking JSON/CSV, DCF JSON,
+`outputs.json` and `run.json` identities. The artifact ID is a DSN-free SHA-256 over
+the database-local run ID, numerical identity, textual-context hash and output hash,
+so same-local-ID runs from different databases do not collide unless their retained
+artifacts are identical. Identical artifacts are verified byte-for-byte and reused;
+conflicts never overwrite the original directory. The SQLite retained body/output is
+replay authority, not an editable filesystem copy. `exports/<as_of>/` remains a clearly
+mutable latest convenience alias with `run.json` identifying its run and artifact and
+`latest.json` explicitly marking it mutable. Ranking JSON carries run and artifact IDs
+and both numerical identities beside, not instead of, textual evidence hashes. A
+subsequent same-cutoff rank never rewrites a different older run artifact.
 
 Replay reads only retained run/body records, constructs a disposable memory DB,
 and runs the existing selection/calculation path without mutable numerical

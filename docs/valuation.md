@@ -88,7 +88,7 @@ ranking never masquerades as a discounted-cash-flow.
   `revenue_growth / ebit_margin / terminal_growth` within
   `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`.
 * **Export:** `alphaforge rank` retains original outputs, then writes
-  `exports/runs/<run_id>/dcf.json` alongside `ranking.json/csv`; the date directory
+  `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)
   binds inputs and exact code/rule assumptions before consumption; `ranking_loader` also returns top-level
   `dcf` / `reverse_dcf` so callers do not need to reach into

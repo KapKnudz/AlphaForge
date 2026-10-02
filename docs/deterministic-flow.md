@@ -320,12 +320,14 @@ numerical lookups; unsupported code/rules and legacy runs refuse honestly.
 See [executed-run replay](executed-run-replay.md) for retention boundaries,
 serialization and typed refusal semantics.
 
-Run-addressed `exports/runs/<run_id>/` contains original ranking/DCF files and
-canonical `outputs.json` plus identity metadata `run.json`. The date paths in the
-table above are mutable latest aliases, never replay authority; corrections can
-change a new same-cutoff run but cannot change an original retained run. This
-is Option B, not full historical vintages, immutable thesis revisions or the
-planned standalone `export` command.
+Run-addressed `exports/runs/<artifact_id>/` contains original ranking/DCF files and
+canonical `outputs.json` plus identity metadata `run.json`. The DSN-free artifact ID
+binds the local run ID to the retained numerical, textual and output hashes, preventing
+same-local-ID collisions across databases without exposing connection details. The date
+paths in the table above are mutable latest aliases, never replay authority; corrections
+can change a new same-cutoff run but cannot change an original retained run. This is
+Option B, not full historical vintages, immutable thesis revisions or the planned
+standalone `export` command.
 
 ## Alignment notes
 

@@ -73,6 +73,19 @@ def digest(value) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def run_artifact_id(
+    run_id: int, numerical_identity: str, textual_context_hash: str, outputs_hash: str
+) -> str:
+    return digest(
+        {
+            "run_id": run_id,
+            "numerical_identity": numerical_identity,
+            "textual_context_hash": textual_context_hash,
+            "outputs_hash": outputs_hash,
+        }
+    )
+
+
 def rules_bundle() -> dict:
     # The digest pins actual executing sources, including uncommitted fixture development.
     # Revision is separately retained and must still exist locally for audit replay.
@@ -310,8 +323,10 @@ def evaluate(body: dict, text: dict):
         memory.close()
 
 
-def retain_outputs(conn, run_id: int, identity: str, text: dict, outputs: dict) -> None:
-    expected = (identity, canonical(text), digest(text), canonical(outputs), digest(outputs))
+def retain_outputs(conn, run_id: int, identity: str, text: dict, outputs: dict) -> str:
+    text_hash = digest(text)
+    outputs_hash = digest(outputs)
+    expected = (identity, canonical(text), text_hash, canonical(outputs), outputs_hash)
     existing = conn.execute(
         "SELECT numerical_identity,textual_context,textual_context_hash,outputs,outputs_hash FROM executed_numerical_runs WHERE run_id=?",
         (run_id,),
@@ -323,6 +338,7 @@ def retain_outputs(conn, run_id: int, identity: str, text: dict, outputs: dict) 
             "INSERT INTO executed_numerical_runs VALUES (?,?,?,?,?,?)", (run_id, *expected)
         )
     conn.commit()
+    return run_artifact_id(run_id, identity, text_hash, outputs_hash)
 
 
 def replay_run(conn, run_id: int) -> dict:
@@ -396,6 +412,12 @@ def replay_run(conn, run_id: int) -> dict:
             raise ReplayRefusal("output_mismatch")
         return {
             "run_id": run_id,
+            "artifact_id": run_artifact_id(
+                run_id,
+                row["numerical_identity"],
+                row["textual_context_hash"],
+                row["outputs_hash"],
+            ),
             "audit_only": True,
             "numerical_identity": row["numerical_identity"],
             "outputs": outputs,
