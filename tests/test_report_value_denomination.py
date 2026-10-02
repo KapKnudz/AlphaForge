@@ -2,11 +2,11 @@
 
 import argparse
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-from alphaforge.cli.main import cmd_rank
+from alphaforge.cli.main import cmd_rank, cmd_sync
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
@@ -146,6 +146,30 @@ def test_converted_and_same_currency_reports_round_trip_without_double_conversio
     assert dcf["market_cap"] == expected_market_cap
 
 
+def test_same_currency_nonunit_ratio_refuses_without_sek_fx_provenance():
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("SEK", 2.0),
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source "
+        "FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (2.0, None, None)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    reason = "report currency ratio conflicts with same-currency acquisition"
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
 def test_verified_eur_values_allow_raw_multiples_but_not_sek_hurdle(monkeypatch, tmp_path):
     conn, cid = setup_company("EUR")
     acquire(conn, cid, target="EUR", report=make_report("USD", 0.9))
@@ -192,7 +216,9 @@ def test_original_mode_ratio_is_provenance_not_a_value_conversion():
         for reason in loaded["selection"]["refusal_reasons"]
     )
     assert loaded["reverse_dcf"]["status"] == "unavailable"
-    assert "received USD" in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
+    assert "values currency USD conflicts with stock price currency SEK" in " ".join(
+        loaded["reverse_dcf"]["dcf"]["missing_information"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -299,6 +325,65 @@ def test_unverified_or_conflicting_price_currency_blocks_current_valuation_and_d
         assert loaded["reverse_dcf"]["status"] == "unavailable"
         assert refusal in " ".join(loaded["selection"]["valuation_refusals"])
         assert refusal in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
+
+
+@pytest.mark.parametrize("instrument_case", ["fetch_failure", "conflicting_targets"])
+def test_price_sync_never_uses_stored_company_currency(instrument_case):
+    conn, cid = setup_company("SEK")
+    conn.execute("DELETE FROM prices WHERE company_id=?", (cid,))
+    conn.commit()
+    adapter = Mock(spec=BorsdataAdapter)
+    if instrument_case == "fetch_failure":
+        adapter.get_instruments.side_effect = RuntimeError("synthetic instrument failure")
+        stored_company_currency = "SEK"
+    else:
+        adapter.get_instruments.return_value = [
+            {
+                "insId": 101,
+                "name": "Denomination Fixture AB",
+                "ticker": "DEN",
+                "stockPriceCurrency": currency,
+            }
+            for currency in ("SEK", "USD")
+        ]
+        stored_company_currency = "USD"
+    for name in (
+        "get_sectors",
+        "get_branches",
+        "get_countries",
+        "get_translation_metadata",
+        "get_kpi_metadata",
+        "get_report_metadata",
+        "get_reports",
+        "get_dividends",
+        "get_stock_splits",
+        "get_report_calendar",
+        "get_shorts",
+    ):
+        getattr(adapter, name).return_value = []
+    adapter.get_stock_prices.return_value = [{"d": AS_OF, "c": 10, "v": 100}]
+    adapter.get_kpi_summary.return_value = {"kpis": []}
+    adapter.get_kpi_history.return_value = []
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:",
+        all=False,
+        company=None,
+        ticker="DEN",
+        allow_empty_companies=False,
+    )
+
+    with (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", return_value=adapter),
+    ):
+        assert cmd_sync(args) == 1
+
+    assert conn.execute(
+        "SELECT stock_price_currency FROM companies WHERE id=?", (cid,)
+    ).fetchone()[0] == stored_company_currency
+    assert conn.execute(
+        "SELECT currency FROM prices WHERE company_id=?", (cid,)
+    ).fetchone()[0] is None
 
 
 def test_unverified_historical_price_currency_blocks_historical_multiples():

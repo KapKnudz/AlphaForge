@@ -168,10 +168,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     adapter = BorsdataAdapter()
 
     # Keep this invocation's provider currency target separate from the mutable
-    # company row; report denomination must describe the acquisition, not later
+    # company row; acquired denominations must describe this sync, not later
     # instrument metadata.
-    report_target_currencies: dict[int, str | None] = {}
-    report_target_conflicts: set[int] = set()
+    acquisition_target_currencies: dict[int, str | None] = {}
+    acquisition_target_conflicts: set[int] = set()
     # Always sync instruments first (seed companies) — idempotent ON CONFLICT
     # This also logs currency exposure per plan 1.3
     try:
@@ -194,12 +194,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     candidate_target = (
                         stock_values[0] if stock_values and len(set(stock_values)) == 1 else None
                     )
-                    if ins_id in report_target_currencies and (
-                        report_target_currencies[ins_id] != candidate_target
+                    if ins_id in acquisition_target_currencies and (
+                        acquisition_target_currencies[ins_id] != candidate_target
                     ):
-                        report_target_conflicts.add(ins_id)
-                    report_target_currencies[ins_id] = (
-                        None if ins_id in report_target_conflicts else candidate_target
+                        acquisition_target_conflicts.add(ins_id)
+                    acquisition_target_currencies[ins_id] = (
+                        None if ins_id in acquisition_target_conflicts else candidate_target
                     )
                 except (TypeError, ValueError):
                     pass
@@ -424,7 +424,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 reports = adapter.get_reports(
                     ins_ids,
                     original=0,
-                    target_currencies=report_target_currencies,
+                    target_currencies=acquisition_target_currencies,
                 )
                 # Group by insId
                 from collections import defaultdict
@@ -501,13 +501,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
             try:
                 price_rows = adapter.get_stock_prices(bid)
                 if price_rows:
-                    # Need currency for prices — lookup from companies
-                    cur = conn.execute(
-                        "SELECT stock_price_currency FROM companies WHERE id=?", (cid,)
+                    upsert_prices(
+                        conn,
+                        cid,
+                        price_rows,
+                        currency=acquisition_target_currencies.get(bid),
                     )
-                    r = cur.fetchone()
-                    cur_ccy = r[0] if r and r[0] else None
-                    upsert_prices(conn, cid, price_rows, currency=cur_ccy)
                 record_job(conn, "sync_prices", company_id=cid, borsdata_id=bid, status="success")
             except Exception as e:
                 sync_failed = True

@@ -380,9 +380,16 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             if conversion_mode == "original"
             else False
         )
+        same_currency_ratio_consistent = not (
+            original_code is not None
+            and original_code == target_code
+            and currency_ratio is not None
+            and currency_ratio != 1.0
+        )
         fx_rate_to_sek = (
             currency_ratio
             if denomination_consistent
+            and same_currency_ratio_consistent
             and target_code == "SEK"
             and original_code is not None
             and original_code.isascii()

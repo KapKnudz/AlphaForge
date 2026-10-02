@@ -106,6 +106,8 @@ def _report_denomination(row) -> tuple[dict[str, Any], str | None]:
             valid_ratio = False
         if not valid_ratio:
             return result, "report currency ratio is invalid"
+        if original == target and float(ratio) != 1.0:
+            return result, "report currency ratio conflicts with same-currency acquisition"
     raw_ratio = next(
         (raw[key] for key in ("currency_Ratio", "currency_ratio", "currencyRatio") if key in raw),
         None,
