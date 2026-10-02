@@ -767,9 +767,7 @@ def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
     assert different_as_of.manifest_id != current.manifest_id
 
 
-def test_v2_incomplete_acquisition_persists_current_feed_identity(
-    lane, monkeypatch, tmp_path
-):
+def test_v2_incomplete_acquisition_persists_current_feed_identity(lane, monkeypatch, tmp_path):
     conn, company_id, store = lane
     good = item()
     first, _ = run(lane, [good])
