@@ -9,6 +9,7 @@ Behavior rules (plan §1.2):
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import requests
@@ -266,8 +267,14 @@ class BorsdataAdapter:
 
     # ---- reports (batch ≤50, original=0) ----
 
-    def get_reports(self, ins_ids: list[int], *, original: int = 0) -> list[dict[str, Any]]:
-        """Fetch reports for up to N instruments, batch 50, original=0."""
+    def get_reports(
+        self,
+        ins_ids: list[int],
+        *,
+        original: int = 0,
+        target_currencies: Mapping[int, str | None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch reports and bind their requested mode/target acquisition metadata."""
         out: list[dict[str, Any]] = []
         for i in range(0, len(ins_ids), BATCH_SIZE):
             chunk = ins_ids[i : i + BATCH_SIZE]
@@ -276,7 +283,20 @@ class BorsdataAdapter:
                 "original": original,
             }
             data = self._get_json("/v1/instruments/reports", params=params)
-            out.extend(self._flatten_report_envelope(data, endpoint="/v1/instruments/reports"))
+            rows = self._flatten_report_envelope(data, endpoint="/v1/instruments/reports")
+            mode = "converted" if original == 0 else "original" if original == 1 else "unknown"
+            for row in rows:
+                ins_id = row.get("insId") or row.get("instrumentId") or row.get("instrument")
+                try:
+                    target = target_currencies.get(int(ins_id)) if target_currencies else None
+                except (TypeError, ValueError):
+                    target = None
+                original_currency = row.get("currency")
+                values_currency = target if mode == "converted" else original_currency
+                row["conversion_mode"] = mode
+                row["conversion_target_currency"] = target
+                row["values_currency"] = values_currency
+            out.extend(rows)
             if i + BATCH_SIZE < len(ins_ids):
                 sleep_between_batches()
         return out

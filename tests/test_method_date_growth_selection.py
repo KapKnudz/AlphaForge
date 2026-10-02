@@ -26,14 +26,25 @@ from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     persist_evidence_packet,
     upsert_company,
-    upsert_financial_periods,
     upsert_kpi_observations,
     upsert_prices,
     upsert_stock_splits,
 )
+from alphaforge.db.repositories import (
+    upsert_financial_periods as _upsert_financial_periods,
+)
 from alphaforge.evidence.report_rules import report_rules_metadata
 
 CUTOFF = "2026-06-01"
+
+
+def upsert_financial_periods(conn, company_id, periods):
+    """Mark test-acquired rows with an explicit original-mode fixture contract."""
+    for report in periods:
+        report.setdefault("conversion_mode", "original")
+        report.setdefault("conversion_target_currency", "SEK")
+        report.setdefault("values_currency", report.get("currency"))
+    return _upsert_financial_periods(conn, company_id, periods)
 
 
 def annual(year, revenue=100, **overrides):
@@ -1325,7 +1336,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
         assert score[f"{metric}_years"] == 0
         assert row[metric] == ""
         assert row[f"{metric}_years"] == "0"
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-annual-rejection-span-v16"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-report-denomination-v17"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
@@ -1638,9 +1649,16 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     assert row["revenue_growth_years"] == "1"
     assert dcf[str(cid)]["dcf"]["policy_version"] == expected
     assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.1)
-    assert score["input_selection"]["version"] == "verified-dates-consecutive-annual-v2"
-    assert json.loads(row["input_selection"])["version"] == "verified-dates-consecutive-annual-v2"
-    assert dcf[str(cid)]["selection"]["version"] == "verified-dates-consecutive-annual-v2"
+    assert (
+        score["input_selection"]["version"] == "verified-dates-consecutive-annual-denomination-v1"
+    )
+    assert (
+        json.loads(row["input_selection"])["version"]
+        == "verified-dates-consecutive-annual-denomination-v1"
+    )
+    assert (
+        dcf[str(cid)]["selection"]["version"] == "verified-dates-consecutive-annual-denomination-v1"
+    )
 
 
 @pytest.mark.parametrize(

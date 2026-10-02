@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 15 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 16 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -333,6 +333,23 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 15)
         conn.commit()
         current = 15
+    if current < 16:
+        migration_path = (
+            Path(__file__).resolve().parents[2] / "db/migrations/016_report_value_denomination.sql"
+        )
+        if not migration_path.exists():
+            raise FileNotFoundError(f"report denomination migration not found: {migration_path}")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(financial_periods);")}
+        additions = ("values_currency", "conversion_mode", "conversion_target_currency")
+        if not any(name in columns for name in additions):
+            conn.executescript(migration_path.read_text(encoding="utf-8"))
+        else:
+            for name in additions:
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE financial_periods ADD COLUMN {name} TEXT")
+        set_user_version(conn, 16)
+        conn.commit()
+        current = 16
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -495,6 +512,13 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
         """
     )
+    financial_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(financial_periods);").fetchall()
+    }
+    for name in ("values_currency", "conversion_mode", "conversion_target_currency"):
+        if name not in financial_columns:
+            conn.execute(f"ALTER TABLE financial_periods ADD COLUMN {name} TEXT")
+
     price_columns = {row[1] for row in conn.execute("PRAGMA table_info(prices);").fetchall()}
     if "raw_payload" not in price_columns:
         conn.execute(

@@ -26,13 +26,24 @@ from alphaforge.db.repositories import (
     upsert_company,
     upsert_dividend_window_coverage,
     upsert_dividends,
-    upsert_financial_periods,
     upsert_prices,
+)
+from alphaforge.db.repositories import (
+    upsert_financial_periods as _upsert_financial_periods,
 )
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter
 
 AS_OF = "2026-01-01"
 START = "2025-01-01"
+
+
+def upsert_financial_periods(conn, company_id, periods):
+    """Fixture reports carry explicit same-currency acquisition provenance."""
+    for report in periods:
+        report.setdefault("conversion_mode", "original")
+        report.setdefault("conversion_target_currency", "SEK")
+        report.setdefault("values_currency", report.get("currency"))
+    return _upsert_financial_periods(conn, company_id, periods)
 
 
 def seeded(as_of=AS_OF):

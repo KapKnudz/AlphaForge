@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from math import isfinite
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,7 +33,7 @@ from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_va
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
 
-SELECTION_VERSION = "verified-dates-consecutive-annual-v2"
+SELECTION_VERSION = "verified-dates-consecutive-annual-denomination-v1"
 MAX_PRICE_AGE_DAYS = 7
 
 
@@ -55,6 +56,71 @@ def _verified_fiscal_end(row) -> date | None:
     ends, malformed = report_date_aliases(_payload(row), "period_end")
     stored = _date(row["period_end"])
     return stored if not malformed and stored is not None and ends == {stored} else None
+
+
+def _currency_code(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    code = value.strip().upper()
+    return code if len(code) == 3 and code.isascii() and code.isalpha() else None
+
+
+def _report_denomination(row) -> tuple[dict[str, Any], str | None]:
+    original = _currency_code(row["currency"])
+    values = _currency_code(row["values_currency"])
+    target = _currency_code(row["conversion_target_currency"])
+    mode = row["conversion_mode"]
+    result = {
+        "original_currency": original,
+        "values_currency": values,
+        "conversion_mode": mode,
+        "conversion_target_currency": target,
+        "currency_ratio": row["currency_ratio"],
+        "fx_rate_to_sek": None,
+    }
+    if mode not in {"converted", "original"}:
+        return result, "report conversion mode unavailable or unsupported"
+    if target is None:
+        return result, "report conversion target currency unavailable or invalid"
+    if original is None:
+        return result, "original report currency unavailable or invalid"
+    if values is None:
+        return result, "report values currency unavailable or invalid"
+    expected = target if mode == "converted" else original
+    if values != expected:
+        return result, "report values currency conflicts with acquisition mode and target"
+    raw = _payload(row)
+    raw_values = _currency_code(raw.get("values_currency"))
+    raw_target = _currency_code(raw.get("conversion_target_currency"))
+    if raw.get("values_currency") is not None and raw_values != values:
+        return result, "report values currency conflicts with acquired payload"
+    if raw.get("conversion_mode") is not None and raw.get("conversion_mode") != mode:
+        return result, "report conversion mode conflicts with acquired payload"
+    if raw.get("conversion_target_currency") is not None and raw_target != target:
+        return result, "report conversion target conflicts with acquired payload"
+    ratio = row["currency_ratio"]
+    if ratio is not None:
+        try:
+            valid_ratio = isfinite(float(ratio)) and float(ratio) > 0
+        except (TypeError, ValueError):
+            valid_ratio = False
+        if not valid_ratio:
+            return result, "report currency ratio is invalid"
+    raw_ratio = next(
+        (raw[key] for key in ("currency_Ratio", "currency_ratio", "currencyRatio") if key in raw),
+        None,
+    )
+    if raw_ratio is not None:
+        try:
+            if not isfinite(float(raw_ratio)) or float(raw_ratio) <= 0:
+                return result, "report currency ratio is invalid"
+            if ratio is None or float(ratio) != float(raw_ratio):
+                return result, "report currency ratio conflicts with stored provenance"
+            if target == "SEK" and row["fx_rate_to_sek"] == ratio:
+                result["fx_rate_to_sek"] = ratio
+        except (TypeError, ValueError):
+            return result, "report currency ratio is invalid"
+    return result, None
 
 
 def _fiscal_year(value: Any) -> int | None:
@@ -100,7 +166,7 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     for row in annuals:
         year = _verified_fiscal_year(row)
         end = _verified_fiscal_end(row)
-        currency = str(row["currency"]).upper() if row["currency"] else None
+        currency = _currency_code(row["values_currency"])
         issues = []
         if year is None:
             issues.append("annual fiscal-year metadata unverified")
@@ -365,6 +431,7 @@ def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
     annual_history = selection.get("annual_history", {})
     reasons = list(annual_history.get("reasons", []))
     reasons.extend(selection.get("price", {}).get("reasons", []))
+    reasons.extend(selection.get("valuation_refusals", []))
     reasons.extend(
         f"price {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
         for item in selection.get("rejected_prices", [])
@@ -567,7 +634,11 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         period_end=_verified_fiscal_end(row),
         report_date=_verified_publication(row),
         broken_fiscal_year=row["broken_fiscal_year"],
-        currency=row["currency"],
+        currency=_currency_code(row["values_currency"]),
+        original_currency=_currency_code(row["currency"]),
+        conversion_mode=row["conversion_mode"],
+        conversion_target_currency=_currency_code(row["conversion_target_currency"]),
+        currency_ratio=_number(row["currency_ratio"]),
     )
 
 
@@ -639,6 +710,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "version": SELECTION_VERSION,
         "max_price_age_calendar_days": MAX_PRICE_AGE_DAYS,
         "rejected_reports": rejected_reports,
+        "report_denominations": [],
+        "valuation_refusals": [],
         "historical_price_pairings": [],
         "rejected_kpis": rejected_kpis,
         "rejected_prices": [],
@@ -663,6 +736,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         starts, malformed_start = report_date_aliases(raw, "period_start")
         fiscal_year = _verified_fiscal_year(row)
         report_period = _verified_report_period(row)
+        denomination, denomination_reason = _report_denomination(row)
         reason = None
         if row["is_placeholder"]:
             reason = "placeholder"
@@ -682,6 +756,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reason = "after cutoff"
         elif publication < end:
             reason = "publication precedes fiscal end"
+        elif denomination_reason is not None:
+            reason = denomination_reason
         if reason:
             selection["rejected_reports"].append(
                 {
@@ -693,11 +769,19 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                     "report_period": row["report_period"],
                     "report_date": row["report_date"],
                     "raw_payload": _payload(row),
+                    "denomination": denomination,
                     "reason": reason,
                 }
             )
         else:
             period_rows.append(row)
+            selection["report_denominations"].append(
+                {
+                    "period_type": row["period_type"],
+                    "period_end": row["period_end"],
+                    **denomination,
+                }
+            )
     annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
     admitted_annuals = [row for row in period_rows if row["period_type"] == "year"]
     annual_history_start = (
@@ -815,7 +899,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     }
     if not period_rows:
         selection["refusal_reasons"] = _selection_refusal_reasons(selection)
-        _missing = ["financial_period", *price_missing]
+        _missing = ["financial_period", *price_missing, *selection["refusal_reasons"]]
         if selection["rejected_reports"]:
             _missing.append(
                 "financial fiscal end/publication unavailable under verified-date selection"
@@ -916,6 +1000,19 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     )
     current_raw = compute_raw_valuation(latest_price, current_report)
     dcf_raw = compute_raw_valuation(latest_price, dcf_current_report)
+    for label, report in (("current report", current_report), ("DCF report", dcf_current_report)):
+        if report is None:
+            continue
+        report_currency = _currency_code(report.currency)
+        price_currency = _currency_code(latest_price.currency) if latest_price else None
+        if report_currency is None or price_currency is None:
+            selection["valuation_refusals"].append(
+                f"{label} and stock price currencies are not both verified"
+            )
+        elif report_currency != price_currency:
+            selection["valuation_refusals"].append(
+                f"{label} values currency {report_currency} conflicts with stock price currency {price_currency}"
+            )
 
     historical_raw: list[RawValuation] = []
     for row, report in zip(period_rows[:-1], historical_reports, strict=False):
@@ -1017,10 +1114,20 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "net_debt_source": net_debt_source,
         "price_currency": latest_price.currency if latest_price else stock_currency,
         "selection": selection,
-        "financial_currency": (
-            dcf_current_report.currency if dcf_current_report is not None else None
-        )
-        or stock_currency,
+        "financial_currency": dcf_current_report.currency
+        if dcf_current_report is not None
+        else None,
+        "report_denomination": (
+            {
+                "original_currency": dcf_current_report.original_currency,
+                "values_currency": dcf_current_report.currency,
+                "conversion_mode": dcf_current_report.conversion_mode,
+                "conversion_target_currency": dcf_current_report.conversion_target_currency,
+                "currency_ratio": dcf_current_report.currency_ratio,
+            }
+            if dcf_current_report is not None
+            else None
+        ),
         "market_cap": dcf_raw.market_cap,
         "enterprise_value": dcf_raw.enterprise_value,
     }
@@ -1040,7 +1147,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         roic_for_dcf = kpis.get(37)  # KPI 37 = ROIC (now reliably persisted)
         # Börsdata ROIC is percent (e.g. 22.9 means 22.9%); DcfAssumptionPolicy
         # expects percent and divides by 100 internally, so pass raw percent.
-        from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
+        from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy, DcfPolicyDecision
         from alphaforge.core.valuation.reverse_dcf import ReverseDcfEngine, ReverseDcfInputs
 
         policy = DcfAssumptionPolicy()
@@ -1052,17 +1159,33 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             # Heuristic: shares are in millions (63.45 = 63M), so market cap in MSEK.
             # Convert to SEK for bucket selection.
             market_cap_for_hurdle = float(dcf_raw.market_cap) * 1_000_000
-        dcf_policy_decision = policy.build(
-            dcf_current_report,
-            latest_annual,
-            historical_annuals,
-            as_of=cutoff,
-            currency=(dcf_current_report.currency if dcf_current_report is not None else None)
-            or stock_currency
-            or "SEK",
-            market_cap=market_cap_for_hurdle,
-            roic=roic_for_dcf,
-        )
+        if (
+            dcf_current_report is not None
+            and latest_annual is not None
+            and dcf_current_report.currency != latest_annual.currency
+        ):
+            mismatch = "report denomination mismatch across DCF inputs"
+            selection["valuation_refusals"].append(mismatch)
+            dcf_policy_decision = DcfPolicyDecision(
+                available=False,
+                policy_version=policy.VERSION,
+                assumptions=None,
+                solve_bounds=dict(policy.SOLVE_BOUNDS),
+                assumption_sources={},
+                missing_information=(mismatch,),
+            )
+        else:
+            dcf_policy_decision = policy.build(
+                dcf_current_report,
+                latest_annual,
+                historical_annuals,
+                as_of=cutoff,
+                currency=(dcf_current_report.currency if dcf_current_report is not None else None)
+                or stock_currency
+                or "SEK",
+                market_cap=market_cap_for_hurdle,
+                roic=roic_for_dcf,
+            )
         if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
             if price_missing:
                 reverse_dcf["status"] = "unavailable"

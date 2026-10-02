@@ -151,7 +151,7 @@ def _compute_candidate_reason(quality: dict, growth: dict, val: dict, balance: d
 
 
 class RankingEngine:
-    RANKING_MODEL_VERSION = "2026-09-30-annual-rejection-span-v16"
+    RANKING_MODEL_VERSION = "2026-09-30-report-denomination-v17"
 
     def __init__(self, ranking_repository=None):
         self.ranking_repository = ranking_repository

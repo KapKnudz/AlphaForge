@@ -14,9 +14,11 @@ from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     upsert_company,
-    upsert_financial_periods,
     upsert_prices,
     upsert_stock_splits,
+)
+from alphaforge.db.repositories import (
+    upsert_financial_periods as _upsert_financial_periods,
 )
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter
 
@@ -56,6 +58,15 @@ def test_split_adjustment_prevents_false_dilution():
         adjust_historical_shares(100, "2024-12-31", "2025-12-31", [("RS", "1:100", "2025-04-09")])
         == 1
     )
+
+
+def upsert_financial_periods(conn, company_id, periods):
+    """Fixture rows carry explicit provider conversion provenance."""
+    for report in periods:
+        report.setdefault("conversion_mode", "original")
+        report.setdefault("conversion_target_currency", "SEK")
+        report.setdefault("values_currency", report.get("currency"))
+    return _upsert_financial_periods(conn, company_id, periods)
 
 
 def test_loader_uses_only_data_visible_at_as_of_and_split_adjusts_history():

@@ -231,6 +231,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
                     "ticker": ticker,
                     "instrument": 1,
                     "branchId": 1,
+                    "stockPriceCurrency": "SEK",
                 }
                 for ins_id, ticker in ((29, "BEIA B"), (221, "SYSR"), (424, "INWI"))
             ]
@@ -261,7 +262,7 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
         def get_report_metadata(self):
             return []
 
-        def get_reports(self, ins_ids, *, original=0):
+        def get_reports(self, ins_ids, *, original=0, target_currencies=None):
             return []
 
         def get_stock_prices(self, ins_id, *, max_count=None):
@@ -442,6 +443,7 @@ def test_sync_retries_then_corrects_legacy_nonobject_financial_slot(legacy_paylo
                     "ticker": "RAW",
                     "instrument": 1,
                     "branchId": 1,
+                    "stockPriceCurrency": "SEK",
                 }
             ]
 
@@ -463,8 +465,16 @@ def test_sync_retries_then_corrects_legacy_nonobject_financial_slot(legacy_paylo
         def get_report_metadata(self):
             return []
 
-        def get_reports(self, ins_ids, *, original=0):
-            return [correction]
+        def get_reports(self, ins_ids, *, original=0, target_currencies=None):
+            target = (target_currencies or {}).get(909)
+            return [
+                {
+                    **correction,
+                    "conversion_mode": "converted",
+                    "conversion_target_currency": target,
+                    "values_currency": target,
+                }
+            ]
 
         def get_stock_prices(self, ins_id, *, max_count=None):
             return []
@@ -550,7 +560,12 @@ def test_sync_retries_then_corrects_legacy_nonobject_financial_slot(legacy_paylo
             (company_id,),
         ).fetchone()
         assert stored["revenue"] == 200
-        assert json.loads(stored["raw_payload"]) == correction
+        assert json.loads(stored["raw_payload"]) == {
+            **correction,
+            "conversion_mode": "converted",
+            "conversion_target_currency": "SEK",
+            "values_currency": "SEK",
+        }
         assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
         assert cmd_sync(args) == 0
         retried = conn.execute(
@@ -574,6 +589,7 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
                     "ticker": "RKPI",
                     "instrument": 1,
                     "branchId": 1,
+                    "stockPriceCurrency": "SEK",
                 }
             ]
 
@@ -604,7 +620,7 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
         def get_report_metadata(self):
             return []
 
-        def get_reports(self, ins_ids, *, original=0):
+        def get_reports(self, ins_ids, *, original=0, target_currencies=None):
             return []
 
         def get_stock_prices(self, ins_id, *, max_count=None):
