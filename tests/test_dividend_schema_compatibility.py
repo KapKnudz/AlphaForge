@@ -6,6 +6,7 @@ import pytest
 from test_method_date_growth_selection import annual, packet, rank_exports, setup
 
 from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.config import SCHEMA_VERSION
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     upsert_dividend_window_coverage,
@@ -75,7 +76,7 @@ def test_upgrade_preserves_every_existing_column_and_row(shape):
     conn, cid = old_database(shape)
     before = contents(conn)
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     for table, (columns, rows) in before.items():
         projection = ",".join(f'"{column}"' for column in columns)
         assert (
@@ -143,7 +144,7 @@ def test_upgrade_executes_loader_and_real_rank_exports(shape, monkeypatch, tmp_p
 
 def test_fresh_schema_and_repeated_migration():
     conn, cid = setup()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     before = contents(conn)
     migrate(conn)
     assert contents(conn) == before

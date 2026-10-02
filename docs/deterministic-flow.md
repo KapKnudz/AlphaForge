@@ -14,6 +14,7 @@ remains the target design. Alignment notes below distinguish gaps from guarantee
 alphaforge import-watchlist --file imports/watchlist.csv
 alphaforge sync --all
 alphaforge rank --as-of YYYY-MM-DD
+alphaforge replay --run-id ID  # historical numerical audit only
 ```
 
 The CSV path is an operator-supplied file, not a shipped fixture. `--dsn` is a
@@ -308,21 +309,32 @@ versions by [valuation policy modules](valuation.md), schema version by
 [`config.py`](../alphaforge/config.py) and migrations, evidence versions and
 fingerprints by [evidence-flow.md](evidence-flow.md).
 
-Identical selected inputs under identical rules reproduce calculation values
-and score order without a model. Full input snapshot/hash and byte-identical
-combined financial/textual golden export remain planned (plan §7.1); changed
-market-data upserts can change a historical rerun. Retain the DB/input snapshot
-and versions for numerical replay. Date-directory exports are overwritten by a
-new `rank`; they are not immutable thesis revisions or the planned standalone
-`export` command.
+Every new `rank` freezes and retains its numerical input body before evaluation,
+then retains original canonical outputs before publication. Schema v17 adds
+immutable content-addressed bodies and run/output links without inventing legacy
+snapshots. `financial_inputs_hash` identifies numerical inputs separately from
+`numerical_identity`, which also binds exact executing code/rules/runtime.
+Textual packet/manifest identity remains separate. Full scores, metrics, DCF
+projections/solves and refusal facts replay from retained inputs without mutable
+numerical lookups; unsupported code/rules and legacy runs refuse honestly.
+See [executed-run replay](executed-run-replay.md) for retention boundaries,
+serialization and typed refusal semantics.
+
+Run-addressed `exports/runs/<run_id>/` contains original ranking/DCF files and
+canonical `outputs.json` plus identity metadata `run.json`. The date paths in the
+table above are mutable latest aliases, never replay authority; corrections can
+change a new same-cutoff run but cannot change an original retained run. This
+is Option B, not full historical vintages, immutable thesis revisions or the
+planned standalone `export` command.
 
 ## Alignment notes
 
 Confirmed current gaps against the target design, not policy changes in this document:
 
 - Verified dates/freshness do not establish historical publication knowledge
-  or preserve overwritten financial vintages. Executed-run numerical replay
-  snapshots remain a separate launch dependency, not supplied by these guards.
+  or preserve overwritten financial vintages. Executed-run numerical retention
+  implements Option B only; dates never executed and legacy runs without retained
+  bodies cannot be reconstructed.
 - Legacy financial rows without acquired values-currency/mode/target provenance
   remain unverifiable and are refused; migration does not infer their units from
   current company metadata. Verified converted reports use values currency for

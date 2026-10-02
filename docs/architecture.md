@@ -9,7 +9,10 @@ MFN issuer mapping → retained PDF history → selection manifest → frozen ev
                                                       └────→ ranking / readiness provenance
 ```
 
-`rank` reads stored inputs without fetching live market data. `evidence` acquires
+`rank` freezes and retains selected stored numerical inputs before calculation,
+then retains original outputs before publication; it fetches no live market data.
+[Executed-run audit replay](executed-run-replay.md) reconstructs from retained
+bodies without mutable numerical lookup. `evidence` acquires
 and freezes textual inputs for one company; rerun `rank` to consume the resulting
 packet. Neither command currently generates a thesis.
 
@@ -49,7 +52,8 @@ packet. Neither command currently generates a thesis.
 ## Implemented versus planned
 
 **Implemented:** watchlist import, Börsdata sync, stored-input ranking and DCF
-exports, readiness assessment, and the one-company MFN/PDF evidence lane.
+exports, immutable executed-run numerical retention/audit replay, readiness
+assessment, and the one-company MFN/PDF evidence lane.
 Optional [Jev shadow signals](jev-shadow.md) are observational: they do not
 change selection, readiness or packet contents.
 
