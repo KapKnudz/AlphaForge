@@ -16,6 +16,7 @@ from alphaforge.db.repositories import (
     relink_watchlist,
     upsert_company,
     upsert_financial_periods,
+    upsert_kpi_observations,
 )
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter, BorsdataContractError
 
@@ -623,6 +624,17 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
             return {"kpis": []}
 
         def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            if kpi_id == 37:
+                return [
+                    {
+                        "year": 2026,
+                        "y": 2027,
+                        "reportPeriod": 1.5,
+                        "p": 1,
+                        "v": 40,
+                        "observationDate": "2026-06-01",
+                    }
+                ]
             period = 3 if kpi_id == 99 else 2
             return [{"y": 2026, "p": period, "v": 0}]
 
@@ -647,6 +659,27 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
     )
     conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
     migrate(conn)
+    company_id = upsert_company(
+        conn,
+        {
+            "insId": 909,
+            "name": "Rejected KPI AB",
+            "ticker": "RKPI",
+            "instrument": 1,
+            "branchId": 1,
+        },
+    )
+    assert (
+        upsert_kpi_observations(
+            conn,
+            company_id,
+            37,
+            "year",
+            "mean",
+            [{"y": 2026, "p": 1, "v": 30, "observationDate": "2026-06-01"}],
+        )
+        == 1
+    )
     common_patches = (
         patch("alphaforge.db.connection.get_connection", return_value=conn),
         patch("alphaforge.db.migrations.migrate", return_value=None),
@@ -654,7 +687,17 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
     )
     with common_patches[0], common_patches[1], common_patches[2]:
         assert cmd_sync(args) == 0
-        assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 1
+        stored = conn.execute(
+            "SELECT value, raw_payload FROM kpi_observations WHERE kpi_id=37"
+        ).fetchone()
+        assert stored["value"] == 30
+        assert json.loads(stored["raw_payload"]) == {
+            "y": 2026,
+            "p": 1,
+            "v": 30,
+            "observationDate": "2026-06-01",
+        }
         assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 12
         assert [
             tuple(row)

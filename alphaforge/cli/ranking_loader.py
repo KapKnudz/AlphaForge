@@ -12,8 +12,11 @@ from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
 from alphaforge.core.kpi_taxonomy import (
     KPI_DATE_ALIASES,
+    KPI_REPORT_PERIOD_ALIASES,
+    KPI_YEAR_ALIASES,
     PRICE_DATE_ALIASES,
     aliased_iso_date,
+    integer_aliases,
     parse_iso_date,
     report_date_aliases,
     report_integer_aliases,
@@ -177,16 +180,6 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     return [item[0] for item in selected], reasons, omitted
 
 
-def _integer_alias(payload: dict[str, Any], aliases: tuple[str, ...]) -> tuple[int | None, bool]:
-    values = [payload[key] for key in aliases if key in payload and payload[key] is not None]
-    if not values:
-        return None, False
-    parsed = {_fiscal_year(value) for value in values}
-    if None in parsed or len(parsed) != 1:
-        return None, True
-    return next(iter(parsed)), False
-
-
 def _date_facts(payload: dict[str, Any], aliases: tuple[str, ...]) -> dict[str, Any]:
     return {key: payload[key] for key in aliases if key in payload and payload[key] is not None}
 
@@ -222,10 +215,37 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         else:
             observed = None
         fiscal_year = _fiscal_year(row["year"])
+        invalid_slot = False
+        slot_reason = None
+        if row["period_type"] != "last" and raw:
+            raw_years, malformed_year = integer_aliases(raw, KPI_YEAR_ALIASES)
+            stored_years, malformed_stored_year = integer_aliases(
+                {"year": row["year"]}, KPI_YEAR_ALIASES
+            )
+            raw_periods, malformed_period = integer_aliases(
+                raw, KPI_REPORT_PERIOD_ALIASES
+            )
+            stored_periods, malformed_stored_period = integer_aliases(
+                {"report_period": row["report_period"]}, KPI_REPORT_PERIOD_ALIASES
+            )
+            if (
+                malformed_year
+                or malformed_stored_year
+                or len(raw_years) != 1
+                or raw_years != stored_years
+            ):
+                invalid_slot = True
+                slot_reason = "KPI fiscal-year metadata unverified"
+            elif (
+                malformed_period
+                or malformed_stored_period
+                or len(raw_periods) > 1
+                or raw_periods != stored_periods
+            ):
+                invalid_slot = True
+                slot_reason = "KPI report-period metadata unverified"
         reason = None
-        if (observed is not None and observed > cutoff) or (
-            fiscal_year is not None and fiscal_year > cutoff.year
-        ):
+        if observed is not None and observed > cutoff:
             reason = "KPI after cutoff"
         elif observed is None:
             reason = (
@@ -233,8 +253,12 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
                 if raw
                 else "legacy KPI observation date provenance unverified"
             )
+        elif slot_reason is not None:
+            reason = slot_reason
         elif fiscal_year is None:
             reason = "KPI fiscal-year metadata unavailable"
+        elif fiscal_year > cutoff.year:
+            reason = "KPI after cutoff"
         if reason:
             rejected.append(
                 {
@@ -250,6 +274,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
                     "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
                     "raw_payload": raw,
                     "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
+                    "invalid_slot": invalid_slot,
                     "reason": reason,
                 }
             )
@@ -269,9 +294,15 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         (company_id,),
     ).fetchall():
         raw = _payload(row)
-        year, malformed_year = _integer_alias(raw, ("year", "y"))
-        report_period, malformed_period = _integer_alias(
-            raw, ("reportPeriod", "report_period", "p")
+        years, malformed_year = integer_aliases(raw, KPI_YEAR_ALIASES)
+        report_periods, malformed_period = integer_aliases(
+            raw, KPI_REPORT_PERIOD_ALIASES
+        )
+        year = next(iter(years)) if not malformed_year and len(years) == 1 else None
+        report_period = (
+            next(iter(report_periods))
+            if not malformed_period and len(report_periods) == 1
+            else None
         )
         observed, _ = aliased_iso_date(raw, KPI_DATE_ALIASES)
         rejected.append(
@@ -289,7 +320,12 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
                 "raw_payload": raw,
                 "payload_hash": row["payload_hash"],
                 "rejected_at": row["rejected_at"],
-                "invalid_slot": malformed_year or malformed_period,
+                "invalid_slot": (
+                    malformed_year
+                    or malformed_period
+                    or len(years) > 1
+                    or len(report_periods) > 1
+                ),
                 "reason": row["reason"],
             }
         )
@@ -299,12 +335,22 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         rejected_year = _fiscal_year(item["year"])
         rejected_period = item["report_period"]
         rejected_date = _date(item["observation_date"])
+        invalid_slot = bool(item.get("invalid_slot"))
         current = not (
             (rejected_date is not None and rejected_date > cutoff)
-            or (rejected_year is not None and rejected_year > cutoff.year)
+            or (
+                not invalid_slot
+                and rejected_year is not None
+                and rejected_year > cutoff.year
+            )
             or item["reason"] == "KPI after cutoff"
         )
-        if current and item["period_type"] != "r12" and item["kpi_id"] in selected_r12:
+        if (
+            current
+            and not invalid_slot
+            and item["period_type"] != "r12"
+            and item["kpi_id"] in selected_r12
+        ):
             current = False
         selected = selected_rows.get((int(item["kpi_id"]), item["period_type"], item["price_type"]))
         selected_year = _fiscal_year(selected["year"]) if selected is not None else None

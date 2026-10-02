@@ -256,6 +256,180 @@ def test_kpi_replacement_does_not_inherit_date_authority(report_period):
     assert load_results_for_company(conn, cid, CUTOFF)["fundamental_kpis"][37] == 50
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_kpi_slot_alias_conflict_preserves_verified_authority_and_exports(
+    reverse, monkeypatch, tmp_path
+):
+    conn, cid = setup()
+    valid = {"y": 2026, "p": 1, "v": 30, "observationDate": CUTOFF}
+    conflicting = {
+        "year": 2026,
+        "y": 2027,
+        "reportPeriod": 1.5,
+        "p": 1,
+        "v": 40,
+        "observationDate": CUTOFF,
+    }
+    if reverse:
+        conflicting = dict(reversed(tuple(conflicting.items())))
+
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [valid]) == 1
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [conflicting]) == 1
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [conflicting]) == 1
+    stored = conn.execute(
+        "SELECT value, raw_payload FROM kpi_observations WHERE kpi_id=37"
+    ).fetchone()
+    assert stored["value"] == 30
+    assert json.loads(stored["raw_payload"]) == valid
+    assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 1
+
+    packet(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["fundamental_kpis"][37] == 30
+    rejected = loaded["selection"]["rejected_kpis"][0]
+    assert rejected["raw_payload"] == conflicting
+    assert rejected["value"] == 40
+    assert rejected["year"] is None
+    assert rejected["report_period"] is None
+    assert rejected["current_refusal"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert exported["rejected_kpis"][0]["raw_payload"] == conflicting
+    assert exported["rejected_kpis"][0]["value"] == 40
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize(
+    "slot_fields",
+    [
+        {"year": True, "p": 1},
+        {"year": 2026.0, "p": 1},
+        {"year": "2026.5", "p": 1},
+        {"year": 2026, "y": 2027, "p": 1},
+        {"y": 2026, "reportPeriod": True},
+        {"y": 2026, "reportPeriod": 1.0},
+        {"y": 2026, "reportPeriod": 1.5, "p": 1},
+        {"y": 2026, "reportPeriod": 2, "report_period": "2", "p": 1},
+    ],
+)
+def test_invalid_kpi_slot_aliases_never_replace_verified_observation(slot_fields):
+    conn, cid = setup()
+    valid = {"y": 2026, "p": 1, "v": 30, "observationDate": CUTOFF}
+    invalid = {**slot_fields, "v": 40, "observationDate": CUTOFF}
+
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [valid]) == 1
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [invalid, invalid]) == 2
+    stored = conn.execute(
+        "SELECT value, raw_payload FROM kpi_observations WHERE kpi_id=37"
+    ).fetchone()
+    assert stored["value"] == 30
+    assert json.loads(stored["raw_payload"]) == valid
+    rejection = conn.execute(
+        "SELECT reason, raw_payload FROM market_input_rejections"
+    ).fetchone()
+    assert "metadata invalid" in rejection["reason"]
+    assert json.loads(rejection["raw_payload"]) == invalid
+    assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "slot_fields",
+    [
+        {"year": "2026", "reportPeriod": "1"},
+        {"y": 2026, "report_period": 1},
+        {
+            "year": 2026,
+            "y": "2026",
+            "reportPeriod": 1,
+            "report_period": "1",
+            "p": 1,
+        },
+    ],
+)
+def test_agreeing_integral_kpi_slot_aliases_preserve_zero(slot_fields):
+    conn, cid = setup()
+    valid = {**slot_fields, "v": 0, "observationDate": CUTOFF}
+
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [valid, valid]) == 2
+    stored = conn.execute(
+        "SELECT year, report_period, value FROM kpi_observations WHERE kpi_id=37"
+    ).fetchall()
+    assert [tuple(row) for row in stored] == [(2026, 1, 0)]
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["fundamental_kpis"][37] == 0
+    assert not loaded["selection"]["rejected_kpis"]
+
+
+@pytest.mark.parametrize(
+    "raw,stored_year,expected_reason",
+    [
+        (
+            {
+                "year": 2026,
+                "y": 2027,
+                "p": 1,
+                "v": 40,
+                "observationDate": CUTOFF,
+            },
+            2026,
+            "KPI fiscal-year metadata unverified",
+        ),
+        (
+            {
+                "y": 2026,
+                "reportPeriod": 1.5,
+                "p": 1,
+                "v": 40,
+                "observationDate": CUTOFF,
+            },
+            2026,
+            "KPI report-period metadata unverified",
+        ),
+        (
+            {
+                "year": 2027,
+                "y": 2026,
+                "p": 1,
+                "v": 40,
+                "observationDate": CUTOFF,
+            },
+            2027,
+            "KPI fiscal-year metadata unverified",
+        ),
+    ],
+)
+def test_persisted_malformed_kpi_slots_are_refused_in_exports(
+    raw, stored_year, expected_reason, monkeypatch, tmp_path
+):
+    conn, cid = setup()
+    valid = {"y": 2026, "p": 1, "v": 30, "observationDate": CUTOFF}
+    assert upsert_kpi_observations(conn, cid, 37, "year", "mean", [valid]) == 1
+    conn.execute(
+        """UPDATE kpi_observations
+           SET year=?, value=40, raw_payload=? WHERE kpi_id=37""",
+        (stored_year, json.dumps(raw)),
+    )
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert 37 not in loaded["fundamental_kpis"]
+    rejected = loaded["selection"]["rejected_kpis"][0]
+    assert rejected["source"] == "kpi_observations"
+    assert rejected["reason"] == expected_reason
+    assert rejected["raw_payload"] == raw
+    assert rejected["value"] == 40
+    assert rejected["current_refusal"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    assert exported["rejected_kpis"][0]["raw_payload"] == raw
+    assert any(expected_reason in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
 @pytest.mark.parametrize(
     "period_type,observed,expected_count,stored_date",
     [

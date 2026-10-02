@@ -11,9 +11,12 @@ from typing import Any
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
 from alphaforge.core.kpi_taxonomy import (
     KPI_DATE_ALIASES,
+    KPI_REPORT_PERIOD_ALIASES,
+    KPI_YEAR_ALIASES,
     PRICE_DATE_ALIASES,
     REPORT_FIELD_MAP,
     aliased_iso_date,
+    integer_aliases,
     report_date_aliases,
     report_integer_aliases,
 )
@@ -730,29 +733,26 @@ def upsert_kpi_observations(
         if reason is None and date_issue:
             reason = f"KPI observation date {date_issue}"
 
-        year = r.get("year") if "year" in r else r.get("y")
-        report_period = next(
-            (
-                r.get(key)
-                for key in ("reportPeriod", "report_period", "p")
-                if r.get(key) is not None
-            ),
-            None,
-        )
         year_int = None
         report_period_int = None
         if period_type != "last":
-            try:
-                year_int = int(year) if year is not None and not isinstance(year, bool) else None
-            except (TypeError, ValueError):
-                year_int = None
-            if year_int is None and reason is None:
-                reason = "KPI fiscal-year metadata unavailable"
-            try:
-                report_period_int = int(report_period) if report_period is not None else None
-            except (TypeError, ValueError):
+            years, malformed_year = integer_aliases(r, KPI_YEAR_ALIASES)
+            report_periods, malformed_period = integer_aliases(
+                r, KPI_REPORT_PERIOD_ALIASES
+            )
+            if malformed_year or len(years) > 1:
+                if reason is None:
+                    reason = "KPI fiscal-year metadata invalid"
+            elif not years:
+                if reason is None:
+                    reason = "KPI fiscal-year metadata unavailable"
+            else:
+                year_int = next(iter(years))
+            if malformed_period or len(report_periods) > 1:
                 if reason is None:
                     reason = "KPI report-period metadata invalid"
+            elif report_periods:
+                report_period_int = next(iter(report_periods))
 
         if reason:
             _record_market_input_rejection(

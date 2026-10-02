@@ -86,6 +86,8 @@ KNOWN_KPI_IDS: dict[int, str] = {
 # Report property metadata canonical names
 PRICE_DATE_ALIASES = ("price_Date", "price_date", "d", "date")
 KPI_DATE_ALIASES = ("observationDate", "observation_date", "date")
+KPI_YEAR_ALIASES = ("year", "y")
+KPI_REPORT_PERIOD_ALIASES = ("reportPeriod", "report_period", "p")
 
 REPORT_PROPERTY_MAP: dict[str, str] = {
     "revenues": "revenue",
@@ -156,12 +158,10 @@ def report_date_aliases(
     return frozenset(parsed), malformed
 
 
-def report_integer_aliases(
-    payload: dict[str, Any], canonical_field: str
-) -> tuple[frozenset[int], bool]:
+def _integer_values(values: tuple[Any, ...]) -> tuple[frozenset[int], bool]:
     parsed = set()
     malformed = False
-    for value in report_alias_values(payload, canonical_field):
+    for value in values:
         if isinstance(value, bool):
             malformed = True
         elif isinstance(value, int):
@@ -171,6 +171,21 @@ def report_integer_aliases(
         else:
             malformed = True
     return frozenset(parsed), malformed
+
+
+def integer_aliases(
+    payload: dict[str, Any], aliases: tuple[str, ...]
+) -> tuple[frozenset[int], bool]:
+    values = tuple(
+        payload[key] for key in aliases if key in payload and payload[key] is not None
+    )
+    return _integer_values(values)
+
+
+def report_integer_aliases(
+    payload: dict[str, Any], canonical_field: str
+) -> tuple[frozenset[int], bool]:
+    return _integer_values(report_alias_values(payload, canonical_field))
 
 
 def is_known_kpi(kpi_id: int) -> bool:
