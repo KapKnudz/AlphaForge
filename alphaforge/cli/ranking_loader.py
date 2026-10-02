@@ -114,6 +114,8 @@ def _report_denomination(row) -> tuple[dict[str, Any], str | None]:
         if key in raw and raw[key] is not None
     ]
     if raw_ratios:
+        if any(isinstance(value, bool) for value in raw_ratios):
+            return result, "report currency ratio is invalid"
         try:
             parsed_ratios = [float(value) for value in raw_ratios]
             if any(not isfinite(value) or value <= 0 for value in parsed_ratios):

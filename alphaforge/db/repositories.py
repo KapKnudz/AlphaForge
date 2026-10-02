@@ -359,7 +359,11 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         ]
         currency_ratio = None
         try:
-            parsed_ratios = [float(value) for value in raw_currency_ratios]
+            parsed_ratios = (
+                []
+                if any(isinstance(value, bool) for value in raw_currency_ratios)
+                else [float(value) for value in raw_currency_ratios]
+            )
             if (
                 parsed_ratios
                 and all(isfinite(value) and value > 0 for value in parsed_ratios)

@@ -192,6 +192,68 @@ def test_matching_ratio_aliases_canonicalize_without_conversion():
     assert loaded["valuation"].raw_market_cap == 100
 
 
+@pytest.mark.parametrize("alias", ["currency_Ratio", "currency_ratio", "currencyRatio"])
+@pytest.mark.parametrize("boolean_ratio", [True, False])
+def test_boolean_ratio_alias_refuses_without_fx_or_valuation(alias, boolean_ratio):
+    conn, cid = setup_company("SEK")
+    report = make_report("SEK", 1.0)
+    report.pop("currency_Ratio")
+    report.update(
+        {
+            alias: boolean_ratio,
+            "conversion_mode": "original",
+            "conversion_target_currency": "SEK",
+            "values_currency": "SEK",
+        }
+    )
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source FROM financial_periods "
+        "WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (None, None, None)
+    conn.execute(
+        "UPDATE financial_periods SET currency_ratio=1, fx_rate_to_sek=1, "
+        "fx_source='currency_ratio' WHERE company_id=?",
+        (cid,),
+    )
+    conn.commit()
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    reason = "report currency ratio is invalid"
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
+@pytest.mark.parametrize("alias", ["currency_Ratio", "currency_ratio", "currencyRatio"])
+@pytest.mark.parametrize("numeric_ratio", [1, 1.0])
+def test_numeric_one_ratio_alias_remains_valid(alias, numeric_ratio):
+    conn, cid = setup_company("SEK")
+    report = make_report("SEK", 1.0)
+    report.pop("currency_Ratio")
+    report.update(
+        {
+            alias: numeric_ratio,
+            "conversion_mode": "original",
+            "conversion_target_currency": "SEK",
+            "values_currency": "SEK",
+        }
+    )
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (1.0, 1.0)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["valuation"].raw_market_cap == 100
+
+
 @pytest.mark.parametrize(
     "alias_value,reason",
     [
