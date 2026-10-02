@@ -54,6 +54,15 @@ acquisition to that date.
 [migrations](../db/migrations/) own keys and constraints;
 [`db/repositories.py`](../alphaforge/db/repositories.py) owns writes.
 
+Schema v15 reconciles two published development v13 shapes: market provenance
+without dividend assurance, and the landed dividend-assurance schema. It also
+repairs the former shape already stamped v14. The additive upgrade creates only
+missing assurance columns/table, preserves all rows and existing strong flags
+and windows, and leaves legacy currency/window evidence unverified. It does not
+infer coverage from legacy extrema or acquire data. Healthy v13/v14 databases
+remain unchanged apart from the version; repeated migration is idempotent.
+This is not a claim that every released v13 database was defective.
+
 | Input | Identity / retained meaning |
 | --- | --- |
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |

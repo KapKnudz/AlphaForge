@@ -1,3 +1,4 @@
+-- Schema v15: includes additive published-v13/v14 dividend-assurance repair.
 -- SQLite 3.38+ (WAL, json1, ON CONFLICT DO UPDATE)
 -- Enable once at connection open: PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
 -- Files: data/alphaforge.db (gitignored) | data/alphaforge.test.db
