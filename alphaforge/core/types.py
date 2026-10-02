@@ -36,7 +36,13 @@ class Report:
     period_end: date | None = None
     report_date: date | None = None
     broken_fiscal_year: bool | None = None
+    # currency is the verified denomination of the numeric values; original
+    # report currency and acquisition conversion provenance remain auditable.
     currency: str | None = None
+    original_currency: str | None = None
+    conversion_mode: str | None = None
+    conversion_target_currency: str | None = None
+    currency_ratio: float | None = None
     raw_payload: dict | None = None
 
     def __post_init__(self) -> None:

@@ -10,11 +10,12 @@ from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     upsert_dividend_window_coverage,
     upsert_dividends,
+    upsert_financial_periods,
     upsert_kpi_observations,
     upsert_prices,
 )
 
-SHAPES = ["market13", "dividend13", "faulty14", "healthy14", "partial14", "older12"]
+SHAPES = ["market13", "dividend13", "faulty14", "healthy14", "partial14", "older12", "v15"]
 
 
 def old_database(shape):
@@ -46,7 +47,11 @@ def old_database(shape):
         conn.execute("ALTER TABLE prices DROP COLUMN raw_payload")
         conn.execute("ALTER TABLE kpi_observations DROP COLUMN raw_payload")
         conn.execute("DROP TABLE market_input_rejections")
-    version = 12 if shape == "older12" else 13 if shape.endswith("13") else 14
+    for column in ("values_currency", "conversion_mode", "conversion_target_currency"):
+        conn.execute(f"ALTER TABLE financial_periods DROP COLUMN {column}")
+    version = (
+        12 if shape == "older12" else 13 if shape.endswith("13") else 15 if shape == "v15" else 14
+    )
     conn.execute(f"PRAGMA user_version={version}")
     conn.commit()
     return conn, cid
@@ -70,7 +75,7 @@ def test_upgrade_preserves_every_existing_column_and_row(shape):
     conn, cid = old_database(shape)
     before = contents(conn)
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     for table, (columns, rows) in before.items():
         projection = ",".join(f'"{column}"' for column in columns)
         assert (
@@ -99,14 +104,25 @@ def test_upgrade_executes_loader_and_real_rank_exports(shape, monkeypatch, tmp_p
     conn, cid = old_database(shape)
     migrate(conn)
     loaded = load_results_for_company(conn, cid, "2026-06-01")
-    assert loaded["financial"] is not None
+    assert loaded["financial"] is None
+    assert any(
+        "report conversion mode unavailable" in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
     score, csv_row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     assert score["input_selection"] == json.loads(csv_row["input_selection"])
     assert dcf[str(cid)]["selection"] == score["input_selection"]
-    # Migration is not acquisition: legacy currency/window/market provenance stays unknown.
-    if shape in {"market13", "faulty14", "older12"}:
-        assert loaded["dividend_yield"]["value"] is None
-    # Actual source writers can restore usability; no migration-created assurance is used.
+    # Migration is not acquisition: exact report reacquisition restores denomination.
+    reacquired = annual(2026, 121)
+    reacquired.update(
+        conversion_mode="original",
+        conversion_target_currency="SEK",
+        values_currency="SEK",
+    )
+    upsert_financial_periods(conn, cid, [reacquired])
+    loaded = load_results_for_company(conn, cid, "2026-06-01")
+    assert loaded["financial"] is not None
+    # Actual source writers can restore dividend usability; no migration-created assurance is used.
     upsert_dividends(conn, cid, [{"exDate": "2026-05-01", "amount": 1, "currency": "SEK"}])
     upsert_dividend_window_coverage(
         conn,
@@ -127,7 +143,7 @@ def test_upgrade_executes_loader_and_real_rank_exports(shape, monkeypatch, tmp_p
 
 def test_fresh_schema_and_repeated_migration():
     conn, cid = setup()
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     before = contents(conn)
     migrate(conn)
     assert contents(conn) == before
@@ -139,11 +155,18 @@ def test_existing_conflict_remains_refused_after_upgrade():
     conn, cid = old_database("healthy14")
     row = {"exDate": "2026-04-01", "amount": 2, "currency": "SEK"}
     upsert_dividends(conn, cid, [row, {**row, "currency": "USD"}])
-    before = contents(conn)
+    before_dividends = contents(conn)["dividends"]
     migrate(conn)
-    assert contents(conn) == before
+    assert contents(conn)["dividends"] == before_dividends
     assert conn.execute(
         "SELECT currency_verified,currency_conflicted FROM dividends WHERE amount=2"
     ).fetchone()[:] == (0, 1)
+    reacquired = annual(2026, 121)
+    reacquired.update(
+        conversion_mode="original",
+        conversion_target_currency="SEK",
+        values_currency="SEK",
+    )
+    upsert_financial_periods(conn, cid, [reacquired])
     assert load_results_for_company(conn, cid, "2026-06-01")["dividend_yield"]["value"] is None
     conn.close()

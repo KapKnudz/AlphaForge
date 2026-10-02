@@ -16,10 +16,21 @@ from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     upsert_company,
-    upsert_financial_periods,
     upsert_kpi_observations,
     upsert_prices,
 )
+from alphaforge.db.repositories import (
+    upsert_financial_periods as _upsert_financial_periods,
+)
+
+
+def upsert_financial_periods(conn, company_id, periods):
+    """Fixture rows model an explicit original-mode Börsdata acquisition."""
+    for report in periods:
+        report.setdefault("conversion_mode", "original")
+        report.setdefault("conversion_target_currency", "SEK")
+        report.setdefault("values_currency", report.get("currency"))
+    return _upsert_financial_periods(conn, company_id, periods)
 
 
 def _mem_conn():

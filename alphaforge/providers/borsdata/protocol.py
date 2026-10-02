@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -33,7 +34,13 @@ class MarketDataProvider(Protocol):
 
     def get_kpi_summary(self, ins_id: int, report_type: str) -> dict[str, Any] | None: ...
 
-    def get_reports(self, ins_ids: list[int], *, original: int = 0) -> list[dict[str, Any]]: ...
+    def get_reports(
+        self,
+        ins_ids: list[int],
+        *,
+        original: int = 0,
+        target_currencies: Mapping[int, str | None] | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def get_stock_prices(
         self, ins_id: int, *, max_count: int | None = None

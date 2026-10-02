@@ -1,0 +1,551 @@
+"""Acquired Börsdata report denominations stay distinct through ranking/export."""
+
+import argparse
+import json
+from unittest.mock import Mock, patch
+
+import pytest
+
+from alphaforge.cli.main import cmd_rank, cmd_sync
+from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.config import Settings
+from alphaforge.db.connection import get_connection
+from alphaforge.db.migrations import migrate
+from alphaforge.db.repositories import upsert_company, upsert_financial_periods, upsert_prices
+from alphaforge.providers.borsdata.adapter import BorsdataAdapter
+
+AS_OF = "2026-06-01"
+
+
+def make_report(currency="USD", ratio=10.0, **overrides):
+    return {
+        "period_type": "year",
+        "period_end": "2025-12-31",
+        "report_Date": "2026-02-01",
+        "year": 2025,
+        "period": 5,
+        "revenues": 100,
+        "operating_Income": 20,
+        "ebit": 20,
+        "profit_To_Equity_Holders": 10,
+        "free_Cash_Flow": 10,
+        "total_Equity": 40,
+        "net_Debt": 5,
+        "number_Of_Shares": 10,
+        "currency": currency,
+        "currency_Ratio": ratio,
+        **overrides,
+    }
+
+
+def setup_company(target="SEK"):
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    cid = upsert_company(
+        conn,
+        {
+            "insId": 101,
+            "name": "Denomination Fixture AB",
+            "ticker": "DEN",
+            "stockPriceCurrency": target,
+            "reportCurrency": "USD",
+        },
+    )
+    conn.execute(
+        "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) "
+        "VALUES (?, 'DEN', 'fixture', 'denomination-fixture')",
+        (cid,),
+    )
+    upsert_prices(
+        conn,
+        cid,
+        [{"d": AS_OF, "c": 10, "v": 100, "currency": target}],
+        currency=target,
+    )
+    return conn, cid
+
+
+def acquire(conn, cid, *, original=0, target="SEK", report=None, targets=None):
+    payload = {
+        "reportList": [
+            {
+                "insId": 101,
+                "reportsYear": [report or make_report()],
+            }
+        ]
+    }
+    adapter = BorsdataAdapter(api_key="fixture")
+    with patch.object(adapter, "_get_json", return_value=payload):
+        rows = adapter.get_reports(
+            [101], original=original, target_currencies=targets or {101: target}
+        )
+    assert len(rows) == 1
+    upsert_financial_periods(conn, cid, rows)
+    return rows[0]
+
+
+def rank_export(conn, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with patch("alphaforge.db.connection.get_connection", return_value=conn):
+        assert (
+            cmd_rank(argparse.Namespace(dsn="sqlite:///:memory:", as_of=AS_OF, watchlist=None)) == 0
+        )
+    ranking = json.loads((tmp_path / "exports" / AS_OF / "ranking.json").read_text())
+    dcf = json.loads((tmp_path / "exports" / AS_OF / "dcf.json").read_text())
+    score = ranking["scores"][0]
+    return score, dcf[str(score["company_id"])]
+
+
+@pytest.mark.parametrize(
+    "original_currency,target,ratio,expected_market_cap",
+    [("USD", "SEK", 10.0, 100.0), ("SEK", "SEK", 1.0, 100.0)],
+)
+def test_converted_and_same_currency_reports_round_trip_without_double_conversion(
+    original_currency, target, ratio, expected_market_cap, monkeypatch, tmp_path
+):
+    conn, cid = setup_company(target)
+    acquire(conn, cid, target=target, report=make_report(original_currency, ratio))
+    stored = conn.execute(
+        "SELECT currency, values_currency, conversion_mode, conversion_target_currency, "
+        "currency_ratio, fx_rate_to_sek, revenue FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (
+        original_currency,
+        target,
+        "converted",
+        target,
+        ratio,
+        ratio if target == "SEK" else None,
+        100.0,
+    )
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 100
+    assert loaded["valuation"].raw_market_cap == expected_market_cap
+    assert loaded["reverse_dcf"]["market_cap"] == expected_market_cap
+    assert loaded["reverse_dcf"]["financial_currency"] == target
+    denomination = loaded["selection"]["report_denominations"][0]
+    assert denomination == {
+        "period_type": "year",
+        "period_end": "2025-12-31",
+        "original_currency": original_currency,
+        "values_currency": target,
+        "conversion_mode": "converted",
+        "conversion_target_currency": target,
+        "currency_ratio": ratio,
+        "fx_rate_to_sek": ratio if target == "SEK" else None,
+    }
+    score, dcf = rank_export(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]["report_denominations"][0]
+    assert exported["original_currency"] == original_currency
+    assert exported["values_currency"] == target
+    assert exported["conversion_mode"] == "converted"
+    assert exported["conversion_target_currency"] == target
+    assert dcf["report_denomination"]["original_currency"] == original_currency
+    assert dcf["report_denomination"]["values_currency"] == target
+    assert dcf["market_cap"] == expected_market_cap
+
+
+def test_same_currency_nonunit_ratio_refuses_without_sek_fx_provenance():
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("SEK", 2.0),
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source "
+        "FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (2.0, None, None)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    reason = "report currency ratio conflicts with same-currency acquisition"
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
+def test_matching_ratio_aliases_canonicalize_without_conversion():
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("USD", 10.0),
+        "currency_ratio": "10",
+        "currencyRatio": 10.0,
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (10.0, 10.0)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["valuation"].raw_market_cap == 100
+
+
+@pytest.mark.parametrize("alias", ["currency_Ratio", "currency_ratio", "currencyRatio"])
+@pytest.mark.parametrize("boolean_ratio", [True, False])
+def test_boolean_ratio_alias_refuses_without_fx_or_valuation(alias, boolean_ratio):
+    conn, cid = setup_company("SEK")
+    report = make_report("SEK", 1.0)
+    report.pop("currency_Ratio")
+    report.update(
+        {
+            alias: boolean_ratio,
+            "conversion_mode": "original",
+            "conversion_target_currency": "SEK",
+            "values_currency": "SEK",
+        }
+    )
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source FROM financial_periods "
+        "WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (None, None, None)
+    conn.execute(
+        "UPDATE financial_periods SET currency_ratio=1, fx_rate_to_sek=1, "
+        "fx_source='currency_ratio' WHERE company_id=?",
+        (cid,),
+    )
+    conn.commit()
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    reason = "report currency ratio is invalid"
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
+@pytest.mark.parametrize("alias", ["currency_Ratio", "currency_ratio", "currencyRatio"])
+@pytest.mark.parametrize("numeric_ratio", [1, 1.0])
+def test_numeric_one_ratio_alias_remains_valid(alias, numeric_ratio):
+    conn, cid = setup_company("SEK")
+    report = make_report("SEK", 1.0)
+    report.pop("currency_Ratio")
+    report.update(
+        {
+            alias: numeric_ratio,
+            "conversion_mode": "original",
+            "conversion_target_currency": "SEK",
+            "values_currency": "SEK",
+        }
+    )
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (1.0, 1.0)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["valuation"].raw_market_cap == 100
+
+
+@pytest.mark.parametrize(
+    "alias_value,reason",
+    [
+        (20.0, "report currency ratio aliases conflict"),
+        (-20.0, "report currency ratio is invalid"),
+        ("invalid", "report currency ratio is invalid"),
+    ],
+)
+def test_conflicting_or_invalid_ratio_alias_refuses(alias_value, reason):
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("USD", 10.0),
+        "currencyRatio": alias_value,
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source, raw_payload "
+        "FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored[:3]) == (None, None, None)
+    assert json.loads(stored["raw_payload"])["currencyRatio"] == alias_value
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
+def test_verified_eur_values_allow_raw_multiples_but_not_sek_hurdle(monkeypatch, tmp_path):
+    conn, cid = setup_company("EUR")
+    acquire(conn, cid, target="EUR", report=make_report("USD", 0.9))
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 100
+    assert loaded["valuation"].raw_market_cap == 100
+    assert loaded["valuation"].raw_ev_ebit == pytest.approx(5.25)
+    assert loaded["reverse_dcf"]["status"] == "unavailable"
+    assert loaded["reverse_dcf"]["dcf"]["available"] is False
+    assert "received EUR" in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
+    assert (
+        conn.execute(
+            "SELECT fx_rate_to_sek FROM financial_periods WHERE company_id=?", (cid,)
+        ).fetchone()[0]
+        is None
+    )
+    score, dcf = rank_export(conn, monkeypatch, tmp_path)
+    assert score["input_selection"]["report_denominations"][0]["values_currency"] == "EUR"
+    assert dcf["market_cap"] == 100
+    assert dcf["dcf"]["available"] is False
+
+
+def test_verified_acquisition_target_is_not_relabelled_by_later_company_update():
+    conn, cid = setup_company("SEK")
+    acquire(conn, cid, target="SEK", report=make_report("USD", 10.0))
+    conn.execute("UPDATE companies SET stock_price_currency='USD' WHERE id=?", (cid,))
+    conn.commit()
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 100
+    assert loaded["reverse_dcf"]["financial_currency"] == "SEK"
+    assert loaded["selection"]["report_denominations"][0]["conversion_target_currency"] == "SEK"
+    assert loaded["valuation"].raw_market_cap == 100
+
+
+def test_original_mode_ratio_is_provenance_not_a_value_conversion():
+    conn, cid = setup_company("SEK")
+    acquire(conn, cid, original=1, target="SEK", report=make_report("USD", 10.0))
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 100
+    assert loaded["selection"]["report_denominations"][0]["values_currency"] == "USD"
+    assert loaded["valuation"].raw_market_cap is None
+    assert any(
+        "conflicts with stock price currency" in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
+    assert loaded["reverse_dcf"]["status"] == "unavailable"
+    assert "values currency USD conflicts with stock price currency SEK" in " ".join(
+        loaded["reverse_dcf"]["dcf"]["missing_information"]
+    )
+
+
+@pytest.mark.parametrize(
+    "report,reason",
+    [
+        (
+            {
+                **make_report(),
+                "conversion_mode": "mystery",
+                "conversion_target_currency": "SEK",
+                "values_currency": "SEK",
+            },
+            "report conversion mode unavailable or unsupported",
+        ),
+        (
+            {
+                **make_report(),
+                "conversion_mode": "converted",
+                "conversion_target_currency": None,
+                "values_currency": None,
+            },
+            "report conversion target currency unavailable or invalid",
+        ),
+        (
+            {
+                **make_report(),
+                "conversion_mode": "converted",
+                "conversion_target_currency": "SEK",
+                "values_currency": "EUR",
+            },
+            "report values currency conflicts with acquisition mode and target",
+        ),
+        (
+            {
+                **make_report("USD", -2.0),
+                "conversion_mode": "original",
+                "conversion_target_currency": "SEK",
+                "values_currency": "USD",
+            },
+            "report currency ratio is invalid",
+        ),
+    ],
+)
+def test_unknown_or_conflicting_acquisition_metadata_refuses(report, reason):
+    conn, cid = setup_company()
+    # Use the repository seam directly so malformed metadata remains auditable.
+    upsert_financial_periods(conn, cid, [report])
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert any(reason in item["reason"] for item in loaded["selection"]["rejected_reports"])
+
+
+def test_legacy_report_remains_unverifiable_after_company_currency_changes():
+    conn, cid = setup_company("SEK")
+    legacy = make_report("SEK", 1.0)
+    upsert_financial_periods(conn, cid, [legacy])
+    conn.execute(
+        "UPDATE financial_periods SET values_currency=NULL, conversion_mode=NULL, "
+        "conversion_target_currency=NULL WHERE company_id=?",
+        (cid,),
+    )
+    conn.execute("UPDATE companies SET stock_price_currency='USD' WHERE id=?", (cid,))
+    conn.commit()
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["financial"] is None
+    assert any(
+        "report conversion mode unavailable" in reason
+        for reason in loaded["selection"]["refusal_reasons"]
+    )
+    assert conn.execute(
+        "SELECT currency, values_currency FROM financial_periods WHERE company_id=?", (cid,)
+    ).fetchone()[:] == ("SEK", None)
+
+
+@pytest.mark.parametrize(
+    "persisted_currency,refusal",
+    [
+        (None, "currencies are not both verified"),
+        ("USD", "conflicts with stock price currency USD"),
+    ],
+)
+def test_unverified_or_conflicting_price_currency_blocks_current_valuation_and_dcf(
+    persisted_currency, refusal
+):
+    conn, cid = setup_company("SEK")
+    acquire(conn, cid, target="SEK", report=make_report("USD", 10.0))
+    conn.execute(
+        "UPDATE prices SET currency=?, raw_payload=? WHERE company_id=?",
+        (persisted_currency, json.dumps({"d": AS_OF, "c": 10, "v": 100}), cid),
+    )
+    conn.execute("UPDATE companies SET stock_price_currency='USD' WHERE id=?", (cid,))
+    conn.commit()
+
+    before = load_results_for_company(conn, cid, AS_OF)
+    conn.execute("UPDATE companies SET stock_price_currency='SEK' WHERE id=?", (cid,))
+    conn.commit()
+    after = load_results_for_company(conn, cid, AS_OF)
+
+    for loaded in (before, after):
+        assert loaded["financial"] is not None
+        assert loaded["valuation"].raw_market_cap is None
+        assert loaded["reverse_dcf"]["market_cap"] is None
+        assert loaded["reverse_dcf"]["status"] == "unavailable"
+        assert refusal in " ".join(loaded["selection"]["valuation_refusals"])
+        assert refusal in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
+
+
+@pytest.mark.parametrize(
+    "instrument_case,stored_company_currency,expected_price_currency",
+    [
+        ("fetch_failure", "SEK", None),
+        ("conflicting_targets", "USD", None),
+        ("verified_target", "SEK", "SEK"),
+    ],
+)
+def test_price_sync_uses_only_invocation_instrument_currency(
+    instrument_case, stored_company_currency, expected_price_currency
+):
+    conn, cid = setup_company("SEK")
+    conn.execute("DELETE FROM prices WHERE company_id=?", (cid,))
+    conn.commit()
+    adapter = Mock(spec=BorsdataAdapter)
+    if instrument_case == "fetch_failure":
+        adapter.get_instruments.side_effect = RuntimeError("synthetic instrument failure")
+    else:
+        currencies = ("SEK", "USD") if instrument_case == "conflicting_targets" else ("SEK",)
+        adapter.get_instruments.return_value = [
+            {
+                "insId": 101,
+                "name": "Denomination Fixture AB",
+                "ticker": "DEN",
+                "stockPriceCurrency": currency,
+            }
+            for currency in currencies
+        ]
+    for name in (
+        "get_sectors",
+        "get_branches",
+        "get_countries",
+        "get_translation_metadata",
+        "get_kpi_metadata",
+        "get_report_metadata",
+        "get_reports",
+        "get_dividends",
+        "get_stock_splits",
+        "get_report_calendar",
+        "get_shorts",
+    ):
+        getattr(adapter, name).return_value = []
+    adapter.get_stock_prices.return_value = [{"d": AS_OF, "c": 10, "v": 100, "currency": "USD"}]
+    adapter.get_kpi_summary.return_value = {"kpis": []}
+    adapter.get_kpi_history.return_value = []
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:",
+        all=False,
+        company=None,
+        ticker="DEN",
+        allow_empty_companies=False,
+    )
+
+    with (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", return_value=adapter),
+    ):
+        assert cmd_sync(args) == 1
+
+    assert (
+        conn.execute("SELECT stock_price_currency FROM companies WHERE id=?", (cid,)).fetchone()[0]
+        == stored_company_currency
+    )
+    price = conn.execute(
+        "SELECT currency, raw_payload FROM prices WHERE company_id=?", (cid,)
+    ).fetchone()
+    assert price["currency"] == expected_price_currency
+    assert json.loads(price["raw_payload"])["currency"] == "USD"
+
+
+def test_unverified_historical_price_currency_blocks_historical_multiples():
+    conn, cid = setup_company("SEK")
+    acquire(
+        conn,
+        cid,
+        target="SEK",
+        report=make_report(
+            "USD",
+            10.0,
+            period_end="2024-12-31",
+            report_Date="2025-02-01",
+            year=2024,
+        ),
+    )
+    acquire(conn, cid, target="SEK", report=make_report("USD", 10.0))
+    upsert_prices(
+        conn,
+        cid,
+        [{"d": "2024-12-31", "c": 10, "v": 100}],
+        currency="SEK",
+    )
+    conn.execute(
+        "UPDATE prices SET currency=NULL WHERE company_id=? AND price_date='2024-12-31'",
+        (cid,),
+    )
+    conn.execute("UPDATE companies SET stock_price_currency='SEK' WHERE id=?", (cid,))
+    conn.commit()
+
+    loaded = load_results_for_company(conn, cid, AS_OF)
+
+    assert loaded["valuation"].raw_market_cap == 100
+    assert loaded["valuation"].ev_ebit_history_count == 0
+    assert loaded["selection"]["historical_price_pairings"][0]["reason"] == (
+        "historical report and stock price currencies are not both verified"
+    )

@@ -22,6 +22,8 @@ from alphaforge.core.kpi_taxonomy import (
 )
 from alphaforge.core.valuation.dividend_yield import is_known_currency
 
+_PRICE_CURRENCY_UNSET = object()
+
 
 def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
     """Upsert companies row; return company id."""
@@ -343,26 +345,68 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         is_placeholder = 1 if (revenue == 0.0 or revenue == 0) and report_date is None else 0
         # New unpublished zero-revenue stubs are retained only in rejection audit;
         # stored legacy placeholders remain loader-excluded.
-        # Also handle fx
+        # The provider currency is original-report provenance.  Value currency,
+        # requested mode and its target are separate acquisition facts supplied
+        # by BorsdataAdapter from this sync's instrument response.
         currency = p.get("currency")
-        currency_ratio = (
-            p.get("currency_Ratio")
-            if "currency_Ratio" in p
-            else p.get("currency_ratio") or p.get("currencyRatio")
-        )
-        fx_rate_to_sek = currency_ratio
-        fx_source = None
-        if fx_rate_to_sek is not None:
-            try:
-                if float(fx_rate_to_sek) > 0:  # type: ignore[arg-type]
-                    fx_source = "currency_ratio"
-                else:
-                    fx_rate_to_sek = None
-            except (TypeError, ValueError):
-                fx_rate_to_sek = None
-        else:
-            # If reportCurrency != stockPriceCurrency but ratio null → keep null, fallback manual later
+        values_currency = p.get("values_currency")
+        conversion_mode = p.get("conversion_mode")
+        conversion_target_currency = p.get("conversion_target_currency")
+        raw_currency_ratios = [
+            p[key]
+            for key in ("currency_Ratio", "currency_ratio", "currencyRatio")
+            if key in p and p[key] is not None
+        ]
+        currency_ratio = None
+        try:
+            parsed_ratios = (
+                []
+                if any(isinstance(value, bool) for value in raw_currency_ratios)
+                else [float(value) for value in raw_currency_ratios]
+            )
+            if (
+                parsed_ratios
+                and all(isfinite(value) and value > 0 for value in parsed_ratios)
+                and len(set(parsed_ratios)) == 1
+            ):
+                currency_ratio = parsed_ratios[0]
+        except (TypeError, ValueError):
             pass
+        target_code = (
+            conversion_target_currency.strip().upper()
+            if isinstance(conversion_target_currency, str)
+            and conversion_target_currency.strip().isascii()
+            and conversion_target_currency.strip().isalpha()
+            and len(conversion_target_currency.strip()) == 3
+            else None
+        )
+        original_code = currency.strip().upper() if isinstance(currency, str) else None
+        values_code = values_currency.strip().upper() if isinstance(values_currency, str) else None
+        denomination_consistent = (
+            values_code == target_code
+            if conversion_mode == "converted"
+            else values_code == original_code
+            if conversion_mode == "original"
+            else False
+        )
+        same_currency_ratio_consistent = not (
+            original_code is not None
+            and original_code == target_code
+            and currency_ratio is not None
+            and currency_ratio != 1.0
+        )
+        fx_rate_to_sek = (
+            currency_ratio
+            if denomination_consistent
+            and same_currency_ratio_consistent
+            and target_code == "SEK"
+            and original_code is not None
+            and original_code.isascii()
+            and original_code.isalpha()
+            and len(original_code) == 3
+            else None
+        )
+        fx_source = "currency_ratio" if fx_rate_to_sek is not None else None
         raw_payload = json.dumps(p, ensure_ascii=False)
         # Map fields via taxonomy where possible
         mapped: dict[str, Any] = {}
@@ -436,14 +480,17 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         conn.execute(
             """
             INSERT INTO financial_periods
-                (company_id, period_type, period_end, report_year, report_period, report_date, broken_fiscal_year, currency, currency_ratio, fx_rate_to_sek, fx_source, revenue, gross_income, operating_profit, ebit, ebitda, net_income, free_cash_flow, operating_cash_flow, investing_cash_flow, financing_cash_flow, equity, total_assets, total_debt, net_debt, cash, eps, dividend_per_share, shares_outstanding, is_placeholder, raw_payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (company_id, period_type, period_end, report_year, report_period, report_date, broken_fiscal_year, currency, values_currency, conversion_mode, conversion_target_currency, currency_ratio, fx_rate_to_sek, fx_source, revenue, gross_income, operating_profit, ebit, ebitda, net_income, free_cash_flow, operating_cash_flow, investing_cash_flow, financing_cash_flow, equity, total_assets, total_debt, net_debt, cash, eps, dividend_per_share, shares_outstanding, is_placeholder, raw_payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, period_type, period_end) DO UPDATE SET
                 report_year=excluded.report_year,
                 report_period=excluded.report_period,
                 report_date=excluded.report_date,
                 broken_fiscal_year=excluded.broken_fiscal_year,
                 currency=excluded.currency,
+                values_currency=excluded.values_currency,
+                conversion_mode=excluded.conversion_mode,
+                conversion_target_currency=excluded.conversion_target_currency,
                 currency_ratio=excluded.currency_ratio,
                 fx_rate_to_sek=excluded.fx_rate_to_sek,
                 fx_source=excluded.fx_source,
@@ -477,6 +524,9 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 report_date,
                 p.get("broken_Fiscal_Year", p.get("broken_fiscal_year")),
                 currency,
+                values_currency,
+                conversion_mode,
+                conversion_target_currency,
                 currency_ratio,
                 fx_rate_to_sek,
                 fx_source,
@@ -555,7 +605,7 @@ def upsert_prices(
     company_id: int,
     rows: list[dict[str, Any]],
     *,
-    currency: str | None = None,
+    currency: str | None | object = _PRICE_CURRENCY_UNSET,
 ) -> int:
     count = 0
     for r in rows:
@@ -590,7 +640,7 @@ def upsert_prices(
             _record_market_input_rejection(conn, company_id, "price", reason, r)
             continue
         price_date = parsed_price_date.isoformat()
-        cur_currency = r.get("currency") or currency
+        cur_currency = r.get("currency") if currency is _PRICE_CURRENCY_UNSET else currency
         conn.execute(
             """
             INSERT INTO prices (company_id, price_date, close, volume, currency, raw_payload)

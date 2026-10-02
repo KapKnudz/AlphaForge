@@ -167,6 +167,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     adapter = BorsdataAdapter()
 
+    # Keep this invocation's provider currency target separate from the mutable
+    # company row; acquired denominations must describe this sync, not later
+    # instrument metadata.
+    acquisition_target_currencies: dict[int, str | None] = {}
+    acquisition_target_conflicts: set[int] = set()
     # Always sync instruments first (seed companies) — idempotent ON CONFLICT
     # This also logs currency exposure per plan 1.3
     try:
@@ -174,6 +179,30 @@ def cmd_sync(args: argparse.Namespace) -> int:
         currency_exposure: list[tuple[int, str | None, str | None, float | None]] = []
         # Persist instruments as companies
         for ins in instruments:
+            raw_ins_id = ins.get("insId") or ins.get("id") or ins.get("borsdata_id")
+            if raw_ins_id is not None:
+                try:
+                    ins_id = int(raw_ins_id)
+                    stock_values = [
+                        value.strip().upper()
+                        for value in (
+                            ins.get("stockPriceCurrency"),
+                            ins.get("stock_price_currency"),
+                        )
+                        if isinstance(value, str) and value.strip()
+                    ]
+                    candidate_target = (
+                        stock_values[0] if stock_values and len(set(stock_values)) == 1 else None
+                    )
+                    if ins_id in acquisition_target_currencies and (
+                        acquisition_target_currencies[ins_id] != candidate_target
+                    ):
+                        acquisition_target_conflicts.add(ins_id)
+                    acquisition_target_currencies[ins_id] = (
+                        None if ins_id in acquisition_target_conflicts else candidate_target
+                    )
+                except (TypeError, ValueError):
+                    pass
             try:
                 cid = upsert_company(conn, ins)
                 # Log currency surface for Swedish watchlist (country_id=1)
@@ -392,7 +421,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # Batch reports fetch (adapter handles 50 + sleep)
         try:
             if ins_ids:
-                reports = adapter.get_reports(ins_ids, original=0)
+                reports = adapter.get_reports(
+                    ins_ids,
+                    original=0,
+                    target_currencies=acquisition_target_currencies,
+                )
                 # Group by insId
                 from collections import defaultdict
 
@@ -468,13 +501,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
             try:
                 price_rows = adapter.get_stock_prices(bid)
                 if price_rows:
-                    # Need currency for prices — lookup from companies
-                    cur = conn.execute(
-                        "SELECT stock_price_currency FROM companies WHERE id=?", (cid,)
+                    upsert_prices(
+                        conn,
+                        cid,
+                        price_rows,
+                        currency=acquisition_target_currencies.get(bid),
                     )
-                    r = cur.fetchone()
-                    cur_ccy = r[0] if r and r[0] else None
-                    upsert_prices(conn, cid, price_rows, currency=cur_ccy)
                 record_job(conn, "sync_prices", company_id=cid, borsdata_id=bid, status="success")
             except Exception as e:
                 sync_failed = True

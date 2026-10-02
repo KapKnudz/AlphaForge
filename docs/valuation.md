@@ -12,12 +12,12 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-annual-rejection-span-v16"`
-  (v16 combines verified dividend-yield provenance with the metric-specific
-  export horizons and checks unresolved annual rejections across the entire
-  selected growth span, not only its latest anchor; `valuation_score` remains
-  heuristic and DCF separate).
-  Financial selection is `verified-dates-consecutive-annual-v2` in the loader;
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-report-denomination-v17"`
+  (v17 retains the v16 verified dividend-yield provenance, metric-specific
+  export horizons and full annual rejection span, and adds acquired report
+  values-currency/conversion provenance; `valuation_score` remains heuristic
+  and DCF separate).
+  Financial selection is `verified-dates-consecutive-annual-denomination-v1` in the loader;
   [the deterministic flow](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring)
   owns its date, freshness, refusal-provenance and export contract.
 * **Current dividend yield:** policy `calendar-ttm-verified-v2` in
@@ -63,7 +63,11 @@ ranking never masquerades as a discounted-cash-flow.
   (market cap from `price × shares` is in MSEK — scaled ×1e6 for bucket
   selection). Missing ROIC (KPI 37) is provisional, not fatal: the DCF stays
   `available` with net reinvestment 0%, lowered confidence, a warning, and
-  `missing_information=("roic",)`.
+  `missing_information=("roic",)`. Report `currency` at calculation is verified
+  values currency; original currency, conversion mode/target and original→target
+  ratio remain separate provenance. Compatible non-SEK raw multiples may be
+  available, but DCF retains its SEK-only required-return refusal and does not
+  convert report values or ratios.
 * **Engine:** `alphaforge/core/valuation/reverse_dcf.py`
   (`ReverseDcfEngine.value/solve`) — projects `revenue → ebit → nopat → fcff`
   with linear fade of `revenue_growth` and `ebit_margin`, then

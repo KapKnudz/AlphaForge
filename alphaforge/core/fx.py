@@ -1,15 +1,14 @@
-"""FX utility — sums-only conversion via Börsdata currency_ratio.
+"""Standalone sums-only arithmetic for a Börsdata currency ratio.
 
-Verified semantics: converted = original * ratio
-  where ratio = currency_ratio from Börsdata reports (ReportV1.currency_Ratio)
-  converts original report-currency → stockPriceCurrency.
+Verified semantics: ``converted = original * ratio``, where ``currency_ratio``
+maps original report currency to stock-price currency. It is not generically an
+FX rate to SEK. Callers must independently verify both denominations and the
+acquisition mode before using it.
 
-Fetch with original=0 so monetary fields arrive already in stockPriceCurrency,
-but persist currency (original) + currency_ratio for provenance and for
-converting sums that need SEK denomination.
-
-This utility MUST only be used for level sums (net debt, market cap, EV).
-Never for ratios (margins, yields, multiples, growth).
+Reports fetched with ``original=0`` already contain converted monetary values;
+the ranking loader therefore retains the ratio as provenance and does not apply
+this helper to those values. This utility must never be used for ratios such as
+margins, yields, multiples, or growth.
 """
 
 from __future__ import annotations
@@ -20,11 +19,12 @@ def convert_sum(value_in_report_ccy: float, rate_sek_per_ccy: float) -> float:
 
     Args:
         value_in_report_ccy: monetary sum in original report currency.
-        rate_sek_per_ccy: currency_ratio (SEK per foreign unit) where
-            rate > 0. For SEK-denominated reports ratio is 1.0.
+        rate_sek_per_ccy: Legacy parameter name for the positive
+            original-report-currency to stock-price-currency ratio. It denotes
+            SEK only when the independently verified target is SEK.
 
     Returns:
-        Value in SEK (stockPriceCurrency when report is foreign).
+        Value in stock-price currency.
 
     Raises:
         ValueError: if rate is not finite or <= 0.

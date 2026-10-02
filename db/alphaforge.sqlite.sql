@@ -1,4 +1,4 @@
--- Schema v15: includes additive published-v13/v14 dividend-assurance repair.
+-- Canonical SQLite schema; incremental upgrades live in db/migrations/.
 -- SQLite 3.38+ (WAL, json1, ON CONFLICT DO UPDATE)
 -- Enable once at connection open: PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
 -- Files: data/alphaforge.db (gitignored) | data/alphaforge.test.db
@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS financial_periods (
     report_date         TEXT,
     broken_fiscal_year  INTEGER CHECK (broken_fiscal_year IN (0,1)),
     currency            TEXT,
+    values_currency     TEXT,
+    conversion_mode     TEXT,
+    conversion_target_currency TEXT,
     currency_ratio      REAL,
     fx_rate_to_sek      REAL CHECK (fx_rate_to_sek IS NULL OR fx_rate_to_sek > 0),
     fx_source           TEXT CHECK (fx_source IN ('currency_ratio','manual','null') OR fx_source IS NULL),

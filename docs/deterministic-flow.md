@@ -64,14 +64,16 @@ assurance are preserved. A healthy dividend-assurance v13 database still receive
 the expected v14 price/KPI `raw_payload` columns and `market_input_rejections`
 table before reaching v15; schemas already containing those structures keep them
 unchanged. Repeated migration is idempotent. This is not a claim that every
-released v13 database was defective.
+released v13 database was defective. Schema v16 additively adds financial-report
+values currency and conversion mode/target; pre-v16 rows remain NULL and
+unverified, with no mutable-company-currency backfill.
 
 | Input | Identity / retained meaning |
 | --- | --- |
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |
-| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
+| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, original currency, values currency, acquisition conversion mode/target, ratio provenance, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
 | KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. Stored observations retain `raw_payload`; malformed or undated inputs are retained in `market_input_rejections`. The writer handles missing report-period keys explicitly for idempotence. |
-| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. Malformed or undated inputs are retained in `market_input_rejections`. |
+| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. CLI sync persists currency only from that invocation's unambiguous instrument target, never from a price-row tag or mutable company metadata; an unavailable target remains NULL. Malformed or undated inputs are retained in `market_input_rejections`. |
 | Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
 | Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
@@ -93,13 +95,38 @@ field-specific; consult [valuation.md](valuation.md) and
 [`ValuationResult`](../alphaforge/core/valuation/types.py), not a blanket percent
 conversion. Volume is a share count and ADTV is in price currency units.
 
-`original=0` delivers monetary fields in stock-price currency while the report's
-`currency` remains original-currency provenance. The writer retains
-`currency_ratio`, copies a positive ratio into `fx_rate_to_sek`, and labels its
-source `currency_ratio`; that column name does not independently verify that
-the target currency is SEK. The raw valuation currency guard and SEK-only hurdle
-are described in [valuation.md](valuation.md); current cross-currency wiring
-limits are noted below. Ratios are never FX-converted by the ranking loader.
+Börsdata's verified `original=0` contract delivers monetary fields in the
+stock-price currency while `currency` remains the original report-currency
+provenance. At acquisition, sync binds the requested mode and target from that
+request and the contemporaneous instrument response; reports persist these
+separately as `conversion_mode`, `conversion_target_currency`, and
+`values_currency`. The loader supplies only verified `values_currency` to
+calculations and refuses unknown, conflicting, or legacy-missing acquisition
+metadata. It never infers a report's historical denomination from mutable
+company currency and does not convert already-converted amounts again.
+`currency_ratio` remains original-report-currency → stock-price-currency
+provenance, not a generic FX rate. The
+[official Börsdata OpenAPI](https://apidoc.borsdata.se/swagger/v1/swagger.json)
+documents `original` with default `0`; the
+[official Reports wiki](https://github.com/Borsdata-Sweden/API/wiki/Reports)
+states: “Converted is default, and means that all reportdata is converted to
+stockprice currency. Original means that reportdata is returned in same currency
+as the Pdf Report. Use the `&original` flag (0,1) to get Converted or Original
+report data.” It further states: “[currency] is the Original report currency
+and is never changed in API call. This will always show Original report currency
+even if the reportdata is converted to Stockprice currency.” The ratio is
+specified as: “[currency_Ratio] is the ratio to convert original Report-currency
+than Stockprice-currency. If Instrument has same Report-currency and
+Stockprice-currency then this is 1.” This documents
+general provider semantics, not a particular stored row's acquisition target or
+mode; each row therefore retains those facts from its own acquisition. The
+`fx_rate_to_sek` column is populated on new rows only when the acquired target is
+verified SEK and the ratio evidence is valid. Every populated ratio alias must
+be numeric, finite, positive and equal to the others (JSON booleans are not
+numbers here); a same-currency original/target pair requires ratio `1`. Ratios
+are not themselves currency-converted or applied to monetary values by the
+ranking loader. The raw valuation currency guard and SEK-only hurdle remain as
+described in [valuation.md](valuation.md).
 
 Missing fundamentals remain `NULL`/`None`; zero is a value, not missing.
 Current ingestion retains zero-revenue/unpublished stubs in
@@ -146,9 +173,13 @@ network fetch. Its effective date predicates are:
   eligible close must be **at most seven calendar days old**, inclusive.
   Historical valuation pairs each report with the last close at/before its
   verified fiscal end, also with an inclusive seven-calendar-day maximum gap.
-  Older/missing pairs do not contribute to historical valuation anchors. Current
-  and historical pairing diagnostics retain the candidate close, raw payload and
-  every original date fact even when the seven-day guard refuses the price.
+  Current and historical raw valuation additionally require the persisted price
+  currency to be verified and to match the report's verified values currency;
+  missing or conflicting denominations are refused without a company-currency
+  fallback. Older/missing/refused pairs do not contribute to historical
+  valuation anchors. Current and historical pairing diagnostics retain the
+  candidate close, raw payload and every original date fact even when a guard
+  refuses the price.
 - KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
   `observation_date <= as_of`. Every populated observation-date alias must
   parse completely and agree. Invalid input is retained in rejection audit
@@ -180,10 +211,11 @@ agreement or supply price/KPI numerical authority; a verified writer upsert can
 replace that row with its real raw payload. Generic
 [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not replace
 these loader predicates. `SELECTION_VERSION` is
-`verified-dates-consecutive-annual-v2`. The loader returns `selection` diagnostics
+`verified-dates-consecutive-annual-denomination-v1`. The loader returns `selection` diagnostics
 also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI/price
-provenance with original payload/value/date facts, selected price date/age,
-historical pairings and annual fiscal ends/refusal reasons. Applicable refusal
+provenance with original payload/value/date facts, selected report denomination
+and acquisition mode/target, selected price date/age, historical pairings and
+annual fiscal ends/refusal reasons. Applicable refusal
 reasons also appear in ranking missing data and readiness
 limitations. A quarter/R12 refusal is superseded only by a unique same-type row
 matching its verified end or its fiscal year plus report period; otherwise only
@@ -291,10 +323,11 @@ Confirmed current gaps against the target design, not policy changes in this doc
 - Verified dates/freshness do not establish historical publication knowledge
   or preserve overwritten financial vintages. Executed-run numerical replay
   snapshots remain a separate launch dependency, not supplied by these guards.
-- Converted cross-currency reports keep original currency in the `Report`
-  passed to the raw valuation guard, which can reject otherwise converted
-  amounts. [`core/fx.py`](../alphaforge/core/fx.py) exists, but the ranking loader
-  does not call it or a manual-rate fallback (plan §3.5).
+- Legacy financial rows without acquired values-currency/mode/target provenance
+  remain unverifiable and are refused; migration does not infer their units from
+  current company metadata. Verified converted reports use values currency for
+  raw multiples; the SEK-only DCF hurdle still refuses non-SEK values. The
+  ranking loader does not apply report ratios or manual FX conversions.
 - Current yield enforces verified complete currency-compatible windows, but live
   provider assurance is absent, so acquisition honestly remains unknown. The
   separate realized-return helper still accepts no coverage and uses an end-price
@@ -319,6 +352,9 @@ Executable cross-boundary coverage lives in
 (verified/unknown/partial windows, foreign-yield refusal, zero versus missing,
 calendar/leap ex-date boundaries and actual ranking/export provenance), and
 [`test_phase2_exit_gate.py`](../tests/test_phase2_exit_gate.py)
-(packet provenance/export, sorting, ADTV and direct readiness).
-These cover particular behaviors, not a complete semantic or live-model audit.
+(packet provenance/export, sorting, ADTV and direct readiness), and
+[`test_report_value_denomination.py`](../tests/test_report_value_denomination.py)
+(acquisition denomination persistence, refusal controls and ranking/export
+propagation). These cover particular behaviors, not a complete semantic or
+live-model audit.
 Use the checks in [CONTRIBUTING.md](../CONTRIBUTING.md#checks).

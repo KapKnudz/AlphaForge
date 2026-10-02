@@ -20,12 +20,23 @@ from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     persist_evidence_packet,
     upsert_company,
-    upsert_financial_periods,
     upsert_prices,
+)
+from alphaforge.db.repositories import (
+    upsert_financial_periods as _upsert_financial_periods,
 )
 from alphaforge.evidence.report_rules import report_rules_metadata
 
 # --- Test fixtures ---
+
+
+def upsert_financial_periods(conn, company_id, periods):
+    """Fixture reports carry explicit same-currency acquisition provenance."""
+    for report in periods:
+        report.setdefault("conversion_mode", "original")
+        report.setdefault("conversion_target_currency", "SEK")
+        report.setdefault("values_currency", report.get("currency"))
+    return _upsert_financial_periods(conn, company_id, periods)
 
 
 def _make_price_bars(
@@ -362,7 +373,7 @@ class TestModelNumberFidelity:
     def test_ranking_model_version_constant(self):
         """Ranking model version is constant across runs."""
         engine = RankingEngine()
-        assert engine.RANKING_MODEL_VERSION == "2026-09-30-annual-rejection-span-v16"
+        assert engine.RANKING_MODEL_VERSION == "2026-09-30-report-denomination-v17"
 
     def test_score_determinism(self):
         """Same company produces same scores regardless of order."""
