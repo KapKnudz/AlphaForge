@@ -1288,12 +1288,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
             evidence_packet_hashes=evidence_packet_hashes,
             numerical_provenance=provenance,
         )
-        (staging_dir / "dcf.json").write_text(
-            canonical(original_outputs["dcf"]), encoding="utf-8"
-        )
-        (staging_dir / "outputs.json").write_text(
-            canonical(original_outputs), encoding="utf-8"
-        )
+        (staging_dir / "dcf.json").write_text(canonical(original_outputs["dcf"]), encoding="utf-8")
+        (staging_dir / "outputs.json").write_text(canonical(original_outputs), encoding="utf-8")
         (staging_dir / "run.json").write_text(canonical(run_metadata), encoding="utf-8")
         names = {path.name for path in staging_dir.iterdir()}
         if exports_dir.exists():
@@ -1315,9 +1311,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
     for name in ("ranking.json", "ranking.csv", "dcf.json", "run.json"):
         shutil.copyfile(exports_dir / name, latest_dir / name)
     (latest_dir / "latest.json").write_text(
-        canonical(
-            {"mutable_latest_alias": True, "run_id": run_id, "artifact_id": artifact_id}
-        ),
+        canonical({"mutable_latest_alias": True, "run_id": run_id, "artifact_id": artifact_id}),
         encoding="utf-8",
     )
 

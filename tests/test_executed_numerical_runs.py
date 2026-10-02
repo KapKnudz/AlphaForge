@@ -135,9 +135,9 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     assert original["metrics"][str(cid)]["dividend_yield"]["value"] == 10
     assert original["dcf"][str(cid)]["dcf"]["available"] is True
     assert original["scores"][0] == score
-    artifact_id = json.loads(
-        (tmp_path / "exports" / CUTOFF / "run.json").read_text()
-    )["artifact_id"]
+    artifact_id = json.loads((tmp_path / "exports" / CUTOFF / "run.json").read_text())[
+        "artifact_id"
+    ]
     artefact = tmp_path / "exports" / "runs" / artifact_id
     assert json.loads((artefact / "outputs.json").read_text()) == original
     text_hashes = []
