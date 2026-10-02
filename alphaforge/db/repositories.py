@@ -341,8 +341,8 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         )
         revenue = p.get("revenues")
         is_placeholder = 1 if (revenue == 0.0 or revenue == 0) and report_date is None else 0
-        # If is_placeholder and all core financials are null/0 → quarantine
-        # Respect plan: is_placeholder=1 rows never enter ranking/valuation (WHERE is_placeholder=0)
+        # New unpublished zero-revenue stubs are retained only in rejection audit;
+        # stored legacy placeholders remain loader-excluded.
         # Also handle fx
         currency = p.get("currency")
         currency_ratio = (
@@ -741,9 +741,7 @@ def upsert_kpi_observations(
         report_period_int = None
         if period_type != "last":
             years, malformed_year = integer_aliases(r, KPI_YEAR_ALIASES)
-            report_periods, malformed_period = integer_aliases(
-                r, KPI_REPORT_PERIOD_ALIASES
-            )
+            report_periods, malformed_period = integer_aliases(r, KPI_REPORT_PERIOD_ALIASES)
             if malformed_year or len(years) > 1:
                 if reason is None:
                     reason = "KPI fiscal-year metadata invalid"

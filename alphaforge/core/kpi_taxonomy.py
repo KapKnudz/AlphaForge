@@ -176,9 +176,7 @@ def _integer_values(values: tuple[Any, ...]) -> tuple[frozenset[int], bool]:
 def integer_aliases(
     payload: dict[str, Any], aliases: tuple[str, ...]
 ) -> tuple[frozenset[int], bool]:
-    values = tuple(
-        payload[key] for key in aliases if key in payload and payload[key] is not None
-    )
+    values = tuple(payload[key] for key in aliases if key in payload and payload[key] is not None)
     return _integer_values(values)
 
 

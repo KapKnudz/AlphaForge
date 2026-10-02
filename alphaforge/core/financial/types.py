@@ -38,7 +38,7 @@ class FinancialResult:
     net_margin: float | None
     fcf_margin: float | None
 
-    # Growth (Year-over-Year)
+    # Annual growth over the latest complete suffix.
     revenue_growth: float | None
     ebit_growth: float | None
     net_income_growth: float | None

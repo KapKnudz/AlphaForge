@@ -536,10 +536,13 @@ def test_sync_retries_then_corrects_legacy_nonobject_financial_slot(legacy_paylo
         failure = json.loads(failed["error"])
         assert failure["code"] == "reports_upsert_failed"
         assert failure["retryable"] is True
-        assert conn.execute(
-            "SELECT raw_payload FROM financial_periods WHERE company_id=?",
-            (company_id,),
-        ).fetchone()[0] == legacy_payload
+        assert (
+            conn.execute(
+                "SELECT raw_payload FROM financial_periods WHERE company_id=?",
+                (company_id,),
+            ).fetchone()[0]
+            == legacy_payload
+        )
 
         assert cmd_sync(args) == 0
         stored = conn.execute(

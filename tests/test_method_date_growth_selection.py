@@ -326,9 +326,7 @@ def test_invalid_kpi_slot_aliases_never_replace_verified_observation(slot_fields
     ).fetchone()
     assert stored["value"] == 30
     assert json.loads(stored["raw_payload"]) == valid
-    rejection = conn.execute(
-        "SELECT reason, raw_payload FROM market_input_rejections"
-    ).fetchone()
+    rejection = conn.execute("SELECT reason, raw_payload FROM market_input_rejections").fetchone()
     assert "metadata invalid" in rejection["reason"]
     assert json.loads(rejection["raw_payload"]) == invalid
     assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 1
@@ -1920,9 +1918,7 @@ def test_invalid_nonannual_year_forms_never_replace_verified_slot(period_type, y
     ).fetchone()
     assert stored["revenue"] == 140
     assert json.loads(stored["raw_payload"]) == original
-    audit = conn.execute(
-        "SELECT reason, raw_payload FROM financial_period_rejections"
-    ).fetchone()
+    audit = conn.execute("SELECT reason, raw_payload FROM financial_period_rejections").fetchone()
     assert audit["reason"] == "fiscal-year metadata unverified"
     assert json.loads(audit["raw_payload"]) == rejected
 

@@ -222,9 +222,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
             stored_years, malformed_stored_year = integer_aliases(
                 {"year": row["year"]}, KPI_YEAR_ALIASES
             )
-            raw_periods, malformed_period = integer_aliases(
-                raw, KPI_REPORT_PERIOD_ALIASES
-            )
+            raw_periods, malformed_period = integer_aliases(raw, KPI_REPORT_PERIOD_ALIASES)
             stored_periods, malformed_stored_period = integer_aliases(
                 {"report_period": row["report_period"]}, KPI_REPORT_PERIOD_ALIASES
             )
@@ -295,9 +293,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
     ).fetchall():
         raw = _payload(row)
         years, malformed_year = integer_aliases(raw, KPI_YEAR_ALIASES)
-        report_periods, malformed_period = integer_aliases(
-            raw, KPI_REPORT_PERIOD_ALIASES
-        )
+        report_periods, malformed_period = integer_aliases(raw, KPI_REPORT_PERIOD_ALIASES)
         year = next(iter(years)) if not malformed_year and len(years) == 1 else None
         report_period = (
             next(iter(report_periods))
@@ -321,10 +317,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
                 "payload_hash": row["payload_hash"],
                 "rejected_at": row["rejected_at"],
                 "invalid_slot": (
-                    malformed_year
-                    or malformed_period
-                    or len(years) > 1
-                    or len(report_periods) > 1
+                    malformed_year or malformed_period or len(years) > 1 or len(report_periods) > 1
                 ),
                 "reason": row["reason"],
             }
@@ -338,11 +331,7 @@ def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float],
         invalid_slot = bool(item.get("invalid_slot"))
         current = not (
             (rejected_date is not None and rejected_date > cutoff)
-            or (
-                not invalid_slot
-                and rejected_year is not None
-                and rejected_year > cutoff.year
-            )
+            or (not invalid_slot and rejected_year is not None and rejected_year > cutoff.year)
             or item["reason"] == "KPI after cutoff"
         )
         if (
@@ -440,23 +429,16 @@ def _rejection_is_current(
 
     is_annual = item.get("period_type") == "year"
     has_slot_identity = bool(ends or years) if is_annual else bool(ends or (years and periods))
-    same_type_rows = [
-        row for row in admitted_rows if row["period_type"] == item.get("period_type")
-    ]
+    same_type_rows = [row for row in admitted_rows if row["period_type"] == item.get("period_type")]
     if ends:
-        matching_rows = [
-            row for row in same_type_rows if ends == {_verified_fiscal_end(row)}
-        ]
+        matching_rows = [row for row in same_type_rows if ends == {_verified_fiscal_end(row)}]
     elif is_annual and years:
-        matching_rows = [
-            row for row in same_type_rows if years == {_verified_fiscal_year(row)}
-        ]
+        matching_rows = [row for row in same_type_rows if years == {_verified_fiscal_year(row)}]
     elif years and periods:
         matching_rows = [
             row
             for row in same_type_rows
-            if years == {_verified_fiscal_year(row)}
-            and periods == {_verified_report_period(row)}
+            if years == {_verified_fiscal_year(row)} and periods == {_verified_report_period(row)}
         ]
     else:
         matching_rows = []
