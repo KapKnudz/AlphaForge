@@ -2534,6 +2534,101 @@ def test_report_period_alone_never_supersedes_a_rejection(period_type):
     assert any(retained["reason"] in reason for reason in loaded["selection"]["refusal_reasons"])
 
 
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_malformed_nonannual_end_alias_remains_current_in_rank_exports(
+    period_type, reverse, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    rows.append(
+        annual(
+            2026,
+            150,
+            period_type=period_type,
+            period=2,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+    )
+    conn, cid = setup(periods=rows)
+    rejected = annual(
+        2025,
+        140,
+        period_type=period_type,
+        period_end="2025-01-01",
+        periodEnd="bad",
+        report_Date="2025-02-01",
+    )
+    rejected.pop("year")
+    rejected.pop("period")
+    if reverse:
+        rejected = dict(reversed(tuple(rejected.items())))
+    assert upsert_financial_periods(conn, cid, [rejected, rejected]) == 0
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    retained = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["raw_payload"] == rejected
+    assert retained["current_refusal"]
+    assert any(retained["reason"] in item for item in loaded["selection"]["refusal_reasons"])
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_rejection = next(
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
+    )
+    assert exported_rejection["raw_payload"] == rejected
+    assert exported_rejection["current_refusal"]
+    assert any(retained["reason"] in item for item in score["missing_data"])
+    assert any(retained["reason"] in item for item in score["readiness_limitations"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"period_end": "2025-01-01", "periodEnd": "2026-05-31"},
+        {"period_end": "2025-01-01", "periodEnd": "2027-01-01"},
+        {"year": 2025, "report_year": 2027, "period": 1, "report_period": 2},
+    ],
+)
+def test_mixed_nonannual_identity_facts_remain_unresolved(identity):
+    rows = [annual(year) for year in range(2023, 2027)]
+    rows.append(
+        annual(
+            2026,
+            150,
+            period_type="r12",
+            period=2,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+    )
+    conn, cid = setup(periods=rows)
+    rejected = {
+        "period_type": "r12",
+        "report_Date": "2025-02-01",
+        "revenues": 140,
+        "currency": "SEK",
+        **identity,
+    }
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    retained = next(
+        item
+        for item in load_results_for_company(conn, cid, CUTOFF)["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert retained["raw_payload"] == rejected
+    assert retained["current_refusal"]
+
+
 @pytest.mark.parametrize("case", ["known_end_conflict", "cross_type", "unknown_slot"])
 def test_nonannual_rejection_conflicts_remain_current_in_rank_exports(case, monkeypatch, tmp_path):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]

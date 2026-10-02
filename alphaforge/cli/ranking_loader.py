@@ -433,7 +433,9 @@ def _rejection_is_current(
         future_checks.append(all(value > cutoff for value in ends))
     if publications:
         future_checks.append(all(value > cutoff for value in publications))
-    if not invalid_identity and any(future_checks):
+    if invalid_identity:
+        return True
+    if any(future_checks):
         return False
 
     is_annual = item.get("period_type") == "year"
@@ -458,7 +460,7 @@ def _rejection_is_current(
         ]
     else:
         matching_rows = []
-    superseded = not invalid_identity and has_slot_identity and len(matching_rows) == 1
+    superseded = has_slot_identity and len(matching_rows) == 1
     if superseded:
         return False
     if not is_annual:
@@ -472,13 +474,12 @@ def _rejection_is_current(
         latest_period = _verified_report_period(latest_same_type)
         older_checks = []
         if ends and latest_end is not None:
-            older_checks.append(next(iter(ends)) < latest_end)
+            older_checks.append(all(value < latest_end for value in ends))
         if years and latest_year is not None:
-            rejected_year = next(iter(years))
-            if rejected_year != latest_year:
-                older_checks.append(rejected_year < latest_year)
-            elif periods and latest_period is not None:
-                older_checks.append(next(iter(periods)) < latest_period)
+            if all(value < latest_year for value in years):
+                older_checks.append(True)
+            elif years == {latest_year} and periods and latest_period is not None:
+                older_checks.append(all(value < latest_period for value in periods))
             else:
                 older_checks.append(False)
         return not (older_checks and all(older_checks))

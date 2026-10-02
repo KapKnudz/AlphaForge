@@ -59,9 +59,12 @@ without dividend assurance, and the landed dividend-assurance schema. It also
 repairs the former shape already stamped v14. The additive upgrade creates only
 missing assurance columns/table, preserves all rows and existing strong flags
 and windows, and leaves legacy currency/window evidence unverified. It does not
-infer coverage from legacy extrema or acquire data. Healthy v13/v14 databases
-remain unchanged apart from the version; repeated migration is idempotent.
-This is not a claim that every released v13 database was defective.
+infer coverage from legacy extrema or acquire data. Existing rows and dividend
+assurance are preserved. A healthy dividend-assurance v13 database still receives
+the expected v14 price/KPI `raw_payload` columns and `market_input_rejections`
+table before reaching v15; schemas already containing those structures keep them
+unchanged. Repeated migration is idempotent. This is not a claim that every
+released v13 database was defective.
 
 | Input | Identity / retained meaning |
 | --- | --- |
