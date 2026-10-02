@@ -17,6 +17,8 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
+from alphaforge.cli.main import cmd_rank
+from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.core.frozen_packet import validate_frozen_packet
 from alphaforge.core.gate.readiness import AgentReadinessGate
@@ -26,6 +28,8 @@ from alphaforge.db.migrations import migrate
 from alphaforge.db.repositories import (
     load_evidence_packet,
     load_evidence_selection_manifest,
+    mark_evidence_packets_unusable,
+    persist_evidence_diagnostic,
     persist_evidence_packet,
     persist_evidence_selection_manifest,
     upsert_company,
@@ -599,3 +603,211 @@ def test_extraction_configuration_change_reuses_verified_bytes_not_old_extractio
     assert new["extraction_id"] != old["extraction_id"]
     assert changed.pdf_fetch_attempts == 0
     assert validate_frozen_packet(first.packet)
+
+
+def test_v2_manifest_identity_survives_ranking_loader_and_actual_exports(
+    lane, monkeypatch, tmp_path
+):
+    conn, company_id, store = lane
+    entries = [item()]
+    first, _ = run(lane, entries)
+    assert first.status == "complete"
+    replay, replay_requests = run(lane, entries, fetch=False)
+    assert replay.status == "complete"
+    assert replay.packet_hash == first.packet_hash
+    assert replay.pdf_fetch_attempts == replay.downloaded == 0
+    assert replay_requests == ["https://mfn.se/all/a/flow?offset=0&limit=48"]
+    packet, manifest = view(lane)
+    persisted_row = conn.execute(
+        """SELECT manifest_id, manifest_json FROM evidence_selection_manifests
+           WHERE company_id=? AND as_of=? ORDER BY id DESC LIMIT 1""",
+        (company_id, AS_OF),
+    ).fetchone()
+    persisted = json.loads(persisted_row["manifest_json"])
+    batch_fingerprints = [
+        row[0]
+        for row in conn.execute(
+            """SELECT source_input_fingerprint FROM evidence_observation_batches
+               WHERE company_id=? AND as_of=? ORDER BY effective_at, batch_id""",
+            (company_id, AS_OF),
+        )
+    ]
+    assert len(batch_fingerprints) == 2
+    assert set(batch_fingerprints) == {persisted["source_input_fingerprint"]}
+    assert packet["selection_manifest_id"] == persisted_row["manifest_id"]
+    assert manifest.manifest_id == persisted_row["manifest_id"]
+    assert json.loads(json.dumps(manifest.to_dict(), ensure_ascii=False)) == persisted
+
+    monkeypatch.setattr("alphaforge.evidence.manifest_store.LocalPdfArtifactStore", lambda: store)
+    loaded = load_results_for_company(conn, company_id, AS_OF)
+    assert (
+        json.loads(json.dumps(loaded["research_evidence"]["evidence_manifest"], ensure_ascii=False))
+        == persisted
+    )
+    assert (
+        loaded["research_evidence"]["evidence_packet"]["selection_manifest_id"]
+        == manifest.manifest_id
+    )
+
+    conn.execute(
+        "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) VALUES (?,?,?,?)",
+        (company_id, "FLOW", "fixture", "manifest-identity"),
+    )
+    conn.commit()
+    rank_dir = tmp_path / "rank-output"
+    rank_dir.mkdir()
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda _settings: conn)
+    monkeypatch.chdir(rank_dir)
+    args = SimpleNamespace(dsn="sqlite:///:memory:", as_of=AS_OF, watchlist=None)
+    assert cmd_rank(args) == 0
+    output = rank_dir / "exports" / AS_OF
+    names = ("ranking.json", "ranking.csv", "dcf.json")
+    first_exports = {name: (output / name).read_bytes() for name in names}
+    ranking = json.loads(first_exports["ranking.json"])
+    assert ranking["evidence_packet_hashes"] == {str(company_id): packet["packet_hash"]}
+    assert ranking["scores"][0]["evidence_packet_hash"] == packet["packet_hash"]
+
+    assert cmd_rank(args) == 0
+    assert {name: (output / name).read_bytes() for name in names} == first_exports
+
+
+def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
+    conn, company_id, store = lane
+    first, _ = run(lane, [item()])
+    assert first.status == "complete"
+    original_id = first.packet["selection_manifest_id"]
+    original_fp = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests WHERE manifest_id=?",
+            (original_id,),
+        ).fetchone()[0]
+    )["source_input_fingerprint"]
+
+    changed_fp = "b" * 64
+    RevisionRecorder(
+        conn,
+        store,
+        company_id=company_id,
+        as_of=AS_OF,
+        source_input_fingerprint=changed_fp,
+        report_rules_fingerprint=report_rules_metadata()["fingerprint"],
+        effective_at=(NOW + timedelta(seconds=100))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        max_pages=50,
+        max_pdf_bytes=25 * 1024 * 1024,
+    )
+    persist_evidence_diagnostic(
+        conn,
+        company_id=company_id,
+        as_of=AS_OF,
+        status="evidence_incomplete",
+        diagnostic={"reason": "fixture incomplete changed-feed batch"},
+        report_rules_fingerprint=report_rules_metadata()["fingerprint"],
+    )
+    mark_evidence_packets_unusable(
+        conn, company_id=company_id, as_of=AS_OF, reason="evidence_incomplete"
+    )
+    conn.execute(
+        "DELETE FROM evidence_selection_manifests WHERE company_id=? AND as_of=?",
+        (company_id, AS_OF),
+    )
+    assert (
+        conn.execute(
+            "SELECT 1 FROM evidence_selection_manifests WHERE company_id=? AND as_of=?",
+            (company_id, AS_OF),
+        ).fetchone()
+        is None
+    )
+
+    packet, current = view(lane)
+    assert packet is None
+    assert current.source_input_fingerprint == changed_fp
+    assert current.source_input_fingerprint != original_fp
+    assert current.manifest_id != original_id
+
+    explicit_fp = "c" * 64
+    explicit = load_evidence_selection_manifest(
+        conn,
+        company_id=company_id,
+        as_of=AS_OF,
+        report_rules=report_rules_metadata(),
+        source_input_fingerprint=explicit_fp,
+        artifact_store=store,
+    )
+    assert explicit.source_input_fingerprint == explicit_fp
+    assert explicit.manifest_id != current.manifest_id
+
+    mismatched_rules = {
+        **report_rules_metadata(),
+        "fingerprint": "different-window-rules",
+        "history_window": {
+            **report_rules_metadata()["history_window"],
+            "interim_lookback_years": 3,
+        },
+    }
+    mismatched = load_evidence_selection_manifest(
+        conn,
+        company_id=company_id,
+        as_of=AS_OF,
+        report_rules=mismatched_rules,
+        artifact_store=store,
+    )
+    assert mismatched.source_input_fingerprint is None
+    assert mismatched.manifest_id != current.manifest_id
+
+    different_as_of = load_evidence_selection_manifest(
+        conn,
+        company_id=company_id,
+        as_of="2026-09-30",
+        report_rules=report_rules_metadata(),
+        artifact_store=store,
+    )
+    assert different_as_of.source_input_fingerprint is None
+    assert different_as_of.manifest_id != current.manifest_id
+
+
+def test_v2_incomplete_acquisition_persists_current_feed_identity(lane):
+    conn, company_id, _store = lane
+    good = item()
+    first, _ = run(lane, [good])
+    assert first.status == "complete"
+    first_fp = json.loads(
+        conn.execute(
+            "SELECT manifest_json FROM evidence_selection_manifests WHERE manifest_id=?",
+            (first.packet["selection_manifest_id"],),
+        ).fetchone()[0]
+    )["source_input_fingerprint"]
+
+    blocked = item("q1-blocked", "Flow AB Interim Report Q1 2026")
+    blocked["properties"]["tags"] = ["sub:report", "sub:report:interim:q1"]
+    incomplete, _ = run(
+        lane,
+        [good, blocked],
+        pages={blocked["url"]: "<html><body>missing authoritative report heading</body></html>"},
+        fetch=False,
+    )
+    assert incomplete.status == "evidence_incomplete"
+    assert incomplete.packet is None
+
+    packet, manifest = view(lane)
+    assert packet is None
+    persisted_row = conn.execute(
+        """SELECT manifest_id, manifest_json FROM evidence_selection_manifests
+           WHERE company_id=? AND as_of=? ORDER BY id DESC LIMIT 1""",
+        (company_id, AS_OF),
+    ).fetchone()
+    persisted = json.loads(persisted_row["manifest_json"])
+    latest_batch_fp = conn.execute(
+        """SELECT source_input_fingerprint FROM evidence_observation_batches
+           WHERE company_id=? AND as_of=? ORDER BY effective_at DESC, batch_id DESC LIMIT 1""",
+        (company_id, AS_OF),
+    ).fetchone()[0]
+    assert latest_batch_fp != first_fp
+    assert (
+        manifest.source_input_fingerprint
+        == latest_batch_fp
+        == persisted["source_input_fingerprint"]
+    )
+    assert manifest.manifest_id == persisted_row["manifest_id"]
+    assert json.loads(json.dumps(manifest.to_dict(), ensure_ascii=False)) == persisted
