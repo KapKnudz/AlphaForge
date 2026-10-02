@@ -767,8 +767,10 @@ def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
     assert different_as_of.manifest_id != current.manifest_id
 
 
-def test_v2_incomplete_acquisition_persists_current_feed_identity(lane):
-    conn, company_id, _store = lane
+def test_v2_incomplete_acquisition_persists_current_feed_identity(
+    lane, monkeypatch, tmp_path
+):
+    conn, company_id, store = lane
     good = item()
     first, _ = run(lane, [good])
     assert first.status == "complete"
@@ -778,6 +780,22 @@ def test_v2_incomplete_acquisition_persists_current_feed_identity(lane):
             (first.packet["selection_manifest_id"],),
         ).fetchone()[0]
     )["source_input_fingerprint"]
+
+    conn.execute(
+        "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) VALUES (?,?,?,?)",
+        (company_id, "FLOW", "fixture", "changed-incomplete-feed"),
+    )
+    conn.commit()
+    rank_dir = tmp_path / "rank-output"
+    rank_dir.mkdir()
+    monkeypatch.setattr("alphaforge.evidence.manifest_store.LocalPdfArtifactStore", lambda: store)
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda _settings: conn)
+    monkeypatch.chdir(rank_dir)
+    args = SimpleNamespace(dsn="sqlite:///:memory:", as_of=AS_OF, watchlist=None)
+    assert cmd_rank(args) == 0
+    output = rank_dir / "exports" / AS_OF
+    names = ("ranking.json", "ranking.csv", "dcf.json")
+    complete_exports = {name: (output / name).read_bytes() for name in names}
 
     blocked = item("q1-blocked", "Flow AB Interim Report Q1 2026")
     blocked["properties"]["tags"] = ["sub:report", "sub:report:interim:q1"]
@@ -811,3 +829,17 @@ def test_v2_incomplete_acquisition_persists_current_feed_identity(lane):
     )
     assert manifest.manifest_id == persisted_row["manifest_id"]
     assert json.loads(json.dumps(manifest.to_dict(), ensure_ascii=False)) == persisted
+
+    loaded = load_results_for_company(conn, company_id, AS_OF)
+    loaded_manifest = loaded["research_evidence"]["evidence_manifest"]
+    assert loaded_manifest["manifest_id"] == manifest.manifest_id
+    assert loaded_manifest["source_input_fingerprint"] == latest_batch_fp
+    assert loaded["research_evidence"]["evidence_packet"] is None
+
+    assert cmd_rank(args) == 0
+    incomplete_exports = {name: (output / name).read_bytes() for name in names}
+    assert incomplete_exports["ranking.json"] != complete_exports["ranking.json"]
+    ranking = json.loads(incomplete_exports["ranking.json"])
+    assert ranking["evidence_packet_hashes"] == {}
+    assert ranking["scores"][0]["evidence_packet_hash"] is None
+    assert ranking["scores"][0]["readiness_status"] == "evidence_blocked"
