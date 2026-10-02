@@ -394,21 +394,30 @@ def _rejection_is_current(
 
     is_annual = item.get("period_type") == "year"
     has_slot_identity = bool(ends or years) if is_annual else bool(ends or (years and periods))
-    matching_rows = [
-        row
-        for row in admitted_rows
-        if row["period_type"] == item.get("period_type")
-        and (not years or years == {_verified_fiscal_year(row)})
-        and (not ends or ends == {_verified_fiscal_end(row)})
-        and (not periods or periods == {_verified_report_period(row)})
+    same_type_rows = [
+        row for row in admitted_rows if row["period_type"] == item.get("period_type")
     ]
+    if ends:
+        matching_rows = [
+            row for row in same_type_rows if ends == {_verified_fiscal_end(row)}
+        ]
+    elif is_annual and years:
+        matching_rows = [
+            row for row in same_type_rows if years == {_verified_fiscal_year(row)}
+        ]
+    elif years and periods:
+        matching_rows = [
+            row
+            for row in same_type_rows
+            if years == {_verified_fiscal_year(row)}
+            and periods == {_verified_report_period(row)}
+        ]
+    else:
+        matching_rows = []
     superseded = not invalid_identity and has_slot_identity and len(matching_rows) == 1
     if superseded:
         return False
     if not is_annual:
-        same_type_rows = [
-            row for row in admitted_rows if row["period_type"] == item.get("period_type")
-        ]
         if not same_type_rows:
             return True
         latest_same_type = max(

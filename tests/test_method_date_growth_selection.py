@@ -1878,6 +1878,62 @@ def test_contextual_annual_rejections_archive_only_rejected_restatements(case, e
         assert json.loads(archived[0]["raw_payload"]) == original
 
 
+@pytest.mark.parametrize("reverse_initial", [False, True])
+def test_exact_slot_year_correction_supersedes_old_label_audit(
+    reverse_initial, monkeypatch, tmp_path
+):
+    cutoff = "2028-06-01"
+    duplicate = annual(
+        2026,
+        121,
+        period_end="2027-03-31",
+        report_Date="2027-05-01",
+    )
+    initial = [annual(2025, 100), annual(2026, 110), duplicate]
+    if reverse_initial:
+        initial.reverse()
+    conn, cid = setup(periods=initial, price_date=cutoff)
+    correction = annual(2027, 121)
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchall()
+    assert len(archived) == 1
+    assert archived[0]["reason"] == "duplicate annual fiscal slot"
+    assert json.loads(archived[0]["raw_payload"]) == duplicate
+    packet(conn, cid, cutoff)
+
+    loaded = load_results_for_company(conn, cid, cutoff)
+    audit = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == duplicate
+    assert not audit["current_refusal"]
+    assert loaded["selection"]["annual_history"]["period_ends"] == [
+        "2025-03-31",
+        "2026-03-31",
+        "2027-03-31",
+    ]
+    assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+    assert loaded["financial"].revenue_growth_years == 2
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path, cutoff)
+    exported = score["input_selection"]
+    exported_audit = next(
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
+    )
+    assert exported_audit["raw_payload"] == duplicate
+    assert not exported_audit["current_refusal"]
+    assert score["revenue_growth"] == pytest.approx(0.1)
+    assert score["revenue_growth_years"] == 2
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.1)
+
+
 @pytest.mark.parametrize(
     "case,current_refusal",
     [
@@ -1980,6 +2036,55 @@ def test_corrected_nonannual_rejection_is_audit_only_in_rank_exports(
     )
     assert not retained_export["current_refusal"]
     assert not any("fiscal end unavailable or invalid" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+def test_exact_end_replacement_supersedes_mismatched_nonannual_labels(
+    period_type, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    rows.append(
+        annual(
+            2026,
+            150,
+            period_type=period_type,
+            period=2,
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+        )
+    )
+    conn, cid = setup(periods=rows)
+    rejected = annual(
+        2025,
+        140,
+        period_type=period_type,
+        period=1,
+        period_end="2026-05-31",
+        report_Date=None,
+    )
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    audit = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == rejected
+    assert not audit["current_refusal"]
+    assert not any(audit["reason"] in item for item in loaded["selection"]["refusal_reasons"])
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_audit = next(
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
+    )
+    assert exported_audit["raw_payload"] == rejected
+    assert not exported_audit["current_refusal"]
+    assert not any(audit["reason"] in item for item in score["missing_data"])
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
 
