@@ -5,6 +5,7 @@ import copy
 import json
 import sqlite3
 from dataclasses import make_dataclass
+from pathlib import Path
 
 import pytest
 from test_method_date_growth_selection import (
@@ -235,6 +236,31 @@ def test_consumed_fields_and_rules_change_identity(change):
     second, changed_hash = retain_inputs(conn, changed, rules)
     assert second != first
     assert (financial_hash == changed_hash) == (change in {"rules", "code"})
+    assert digest(text) == digest(capture_inputs(conn, companies(conn), CUTOFF)[1])
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "alphaforge/evidence/report_rules.py",
+        "alphaforge/evidence/mfn_taxonomy.py",
+    ],
+)
+def test_readiness_rule_implementation_changes_numerical_identity(monkeypatch, dependency):
+    conn, _ = seeded()
+    body, text = capture_inputs(conn, companies(conn), CUTOFF)
+    first, financial_hash = retain_inputs(conn, body, rules_bundle())
+    target = Path(__file__).parents[1] / dependency
+    original_read_bytes = Path.read_bytes
+
+    def changed_read_bytes(path):
+        contents = original_read_bytes(path)
+        return contents + b"\n" if path == target else contents
+
+    monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
+    second, changed_hash = retain_inputs(conn, body, rules_bundle())
+    assert second != first
+    assert changed_hash == financial_hash
     assert digest(text) == digest(capture_inputs(conn, companies(conn), CUTOFF)[1])
 
 

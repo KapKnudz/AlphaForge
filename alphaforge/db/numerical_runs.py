@@ -88,6 +88,8 @@ def rules_bundle() -> dict:
             Path(__file__),
             ROOT / "alphaforge/db/migrations.py",
             ROOT / "alphaforge/config.py",
+            ROOT / "alphaforge/evidence/report_rules.py",
+            ROOT / "alphaforge/evidence/mfn_taxonomy.py",
             ROOT / "db/alphaforge.sqlite.sql",
         ]
         + sorted((ROOT / "db/migrations").glob("*.sql"))
