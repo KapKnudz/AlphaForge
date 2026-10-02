@@ -235,12 +235,16 @@ def _intrinsic_period_rejection_reason(row: Any) -> str | None:
         if row["period_type"] == "year":
             return "annual stub or duration unverified"
         return "fiscal start metadata unverified"
+    fiscal_year = next(iter(years)) if len(years) == 1 else None
+    if fiscal_year is not None and not 1 <= fiscal_year <= 9999:
+        if row["period_type"] == "year":
+            return "annual fiscal-year metadata unverified"
+        return "fiscal-year metadata unverified"
     if row["period_type"] != "year":
         return None
 
     reasons = []
-    fiscal_year = next(iter(years)) if len(years) == 1 else None
-    if fiscal_year is None or not 1 <= fiscal_year <= 9999:
+    if fiscal_year is None:
         reasons.append("annual fiscal-year metadata unverified")
     if starts:
         start = next(iter(starts))

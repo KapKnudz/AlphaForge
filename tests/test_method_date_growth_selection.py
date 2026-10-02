@@ -1822,6 +1822,148 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
     assert dcf[str(cid)]["selection"] == exported
 
 
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_out_of_range_nonannual_resync_preserves_verified_slot_and_exports(
+    period_type, reverse, monkeypatch, tmp_path
+):
+    annuals = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    original = annual(
+        2026,
+        140,
+        period_type=period_type,
+        period=2,
+        period_end="2026-05-31",
+        report_Date=CUTOFF,
+        operating_Income=35,
+    )
+    conn, cid = setup(periods=[*annuals, original])
+    rejected = {
+        **original,
+        "year": 10000,
+        "revenues": 999,
+        "operating_Income": 999,
+    }
+    if reverse:
+        rejected = dict(reversed(tuple(rejected.items())))
+
+    assert upsert_financial_periods(conn, cid, [rejected, rejected]) == 0
+    stored = conn.execute(
+        "SELECT revenue, raw_payload FROM financial_periods WHERE period_type=? AND period_end=?",
+        (period_type, "2026-05-31"),
+    ).fetchone()
+    assert stored["revenue"] == 140
+    assert json.loads(stored["raw_payload"]) == original
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchall()
+    assert len(archived) == 1
+    assert archived[0]["reason"] == "fiscal-year metadata unverified"
+    assert json.loads(archived[0]["raw_payload"]) == rejected
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["financial"].operating_margin == pytest.approx(0.25)
+    if period_type == "r12":
+        assert loaded["reverse_dcf"]["current_revenue"] == 140
+    audit = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "ingestion_rejection"
+    )
+    assert audit["raw_payload"] == rejected
+    assert audit["current_refusal"]
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    exported = score["input_selection"]
+    exported_audit = next(
+        item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
+    )
+    assert exported_audit["raw_payload"] == rejected
+    assert exported_audit["current_refusal"]
+    assert any("fiscal-year metadata unverified" in item for item in score["missing_data"])
+    assert json.loads(row["input_selection"]) == exported
+    assert dcf[str(cid)]["selection"] == exported
+    if period_type == "r12":
+        assert dcf[str(cid)]["current_revenue"] == 140
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize(
+    "year_fields",
+    [
+        {"year": 0},
+        {"year": -1},
+        {"year": True},
+        {"year": 2026.5},
+        {"year": 2026, "report_year": 10000},
+    ],
+)
+def test_invalid_nonannual_year_forms_never_replace_verified_slot(period_type, year_fields):
+    original = annual(
+        2026,
+        140,
+        period_type=period_type,
+        period=2,
+        period_end="2026-05-31",
+        report_Date=CUTOFF,
+    )
+    conn, cid = setup(periods=[original])
+    rejected = {**original, "revenues": 999}
+    rejected.pop("year")
+    rejected.update(year_fields)
+
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+    stored = conn.execute(
+        "SELECT revenue, raw_payload FROM financial_periods WHERE period_type=?",
+        (period_type,),
+    ).fetchone()
+    assert stored["revenue"] == 140
+    assert json.loads(stored["raw_payload"]) == original
+    audit = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchone()
+    assert audit["reason"] == "fiscal-year metadata unverified"
+    assert json.loads(audit["raw_payload"]) == rejected
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize("report_year", [None, 1, 2027, 9999])
+def test_valid_nonannual_year_boundaries_and_missing_label_remain_authoritative(
+    period_type, report_year
+):
+    original = annual(
+        2026,
+        140,
+        period_type=period_type,
+        period=2,
+        period_end="2026-05-31",
+        report_Date=CUTOFF,
+        operating_Income=28,
+    )
+    conn, cid = setup(periods=[annual(2026), original])
+    correction = {
+        **original,
+        "year": report_year,
+        "revenues": 150,
+        "operating_Income": 45,
+    }
+    if report_year is None:
+        correction.pop("year")
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+    stored = conn.execute(
+        "SELECT revenue, raw_payload FROM financial_periods WHERE period_type=?",
+        (period_type,),
+    ).fetchone()
+    assert stored["revenue"] == 150
+    assert json.loads(stored["raw_payload"]) == correction
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["financial"].operating_margin == pytest.approx(0.3)
+    assert not loaded["selection"]["rejected_reports"]
+
+
 @pytest.mark.parametrize(
     "legacy_payload",
     [None, "[]", '"legacy"'],
