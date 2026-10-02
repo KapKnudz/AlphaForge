@@ -12,7 +12,12 @@ import pytest
 from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
 from alphaforge.db.migrations import migrate
-from alphaforge.db.repositories import relink_watchlist, upsert_company
+from alphaforge.db.repositories import (
+    relink_watchlist,
+    upsert_company,
+    upsert_financial_periods,
+    upsert_kpi_observations,
+)
 from alphaforge.providers.borsdata.adapter import BorsdataAdapter, BorsdataContractError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "borsdata"
@@ -403,6 +408,335 @@ def test_sync_persists_fixture_values_and_kpi_history_idempotently():
             ).fetchone()[0]
             == "failed"
         )
+
+
+@pytest.mark.parametrize("legacy_payload", [None, "[]"], ids=["null", "array"])
+def test_sync_retries_then_corrects_legacy_nonobject_financial_slot(legacy_payload):
+    import argparse
+
+    from alphaforge.cli.main import cmd_sync
+
+    correction = {
+        "insId": 909,
+        "period_type": "year",
+        "period_end": "2026-03-31",
+        "report_Date": "2026-05-01",
+        "year": 2026,
+        "period": 5,
+        "revenues": 200,
+        "operating_Income": 40,
+        "profit_To_Equity_Holders": 20,
+        "free_Cash_Flow": 20,
+        "total_Equity": 80,
+        "net_Debt": 5,
+        "number_Of_Shares": 10,
+        "currency": "SEK",
+    }
+
+    class FinancialCorrectionAdapter:
+        def get_instruments(self):
+            return [
+                {
+                    "insId": 909,
+                    "name": "Legacy Financial AB",
+                    "ticker": "RAW",
+                    "instrument": 1,
+                    "branchId": 1,
+                }
+            ]
+
+        def get_branches(self):
+            return [{"id": 1, "name": "Branch 1", "nameEn": "Branch 1"}]
+
+        def get_sectors(self):
+            return []
+
+        def get_countries(self):
+            return []
+
+        def get_translation_metadata(self):
+            return []
+
+        def get_kpi_metadata(self):
+            return []
+
+        def get_report_metadata(self):
+            return []
+
+        def get_reports(self, ins_ids, *, original=0):
+            return [correction]
+
+        def get_stock_prices(self, ins_id, *, max_count=None):
+            return []
+
+        def get_kpi_summary(self, ins_id, report_type):
+            return {"kpis": []}
+
+        def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            return []
+
+        def get_dividends(self, ins_ids=None):
+            return []
+
+        def get_stock_splits(self):
+            return []
+
+        def get_report_calendar(self, ins_ids=None):
+            return []
+
+        def get_shorts(self):
+            return []
+
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    company_id = upsert_company(
+        conn,
+        {
+            "insId": 909,
+            "name": "Legacy Financial AB",
+            "ticker": "RAW",
+            "instrument": 1,
+            "branchId": 1,
+        },
+    )
+    original = dict(correction)
+    original["revenues"] = 100
+    assert upsert_financial_periods(conn, company_id, [original]) == 1
+    conn.execute(
+        "UPDATE financial_periods SET raw_payload=? WHERE company_id=?",
+        (legacy_payload, company_id),
+    )
+    conn.commit()
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:",
+        all=False,
+        company=None,
+        ticker="RAW",
+        allow_empty_companies=False,
+    )
+
+    with (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.db.migrations.migrate", return_value=None),
+        patch(
+            "alphaforge.providers.borsdata.adapter.BorsdataAdapter",
+            FinancialCorrectionAdapter,
+        ),
+    ):
+        with patch(
+            "alphaforge.db.repositories.upsert_financial_periods",
+            side_effect=RuntimeError("synthetic financial persistence failure"),
+        ):
+            assert cmd_sync(args) == 1
+        failed = conn.execute(
+            "SELECT status, error FROM jobs WHERE job_type='sync_reports' AND company_id=?",
+            (company_id,),
+        ).fetchone()
+        assert failed["status"] == "failed"
+        failure = json.loads(failed["error"])
+        assert failure["code"] == "reports_upsert_failed"
+        assert failure["retryable"] is True
+        assert (
+            conn.execute(
+                "SELECT raw_payload FROM financial_periods WHERE company_id=?",
+                (company_id,),
+            ).fetchone()[0]
+            == legacy_payload
+        )
+
+        assert cmd_sync(args) == 0
+        stored = conn.execute(
+            "SELECT revenue, raw_payload FROM financial_periods WHERE company_id=?",
+            (company_id,),
+        ).fetchone()
+        assert stored["revenue"] == 200
+        assert json.loads(stored["raw_payload"]) == correction
+        assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+        assert cmd_sync(args) == 0
+        retried = conn.execute(
+            "SELECT status FROM jobs WHERE job_type='sync_reports' AND company_id=?",
+            (company_id,),
+        ).fetchone()
+        assert retried["status"] == "success"
+
+
+def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
+    import argparse
+
+    from alphaforge.cli.main import cmd_sync
+
+    class RejectedKpiAdapter:
+        def get_instruments(self):
+            return [
+                {
+                    "insId": 909,
+                    "name": "Rejected KPI AB",
+                    "ticker": "RKPI",
+                    "instrument": 1,
+                    "branchId": 1,
+                }
+            ]
+
+        def get_branches(self):
+            return [{"id": 1, "name": "Branch 1", "nameEn": "Branch 1"}]
+
+        def get_sectors(self):
+            return []
+
+        def get_countries(self):
+            return []
+
+        def get_translation_metadata(self):
+            return []
+
+        def get_kpi_metadata(self):
+            return [
+                {
+                    "kpiId": kpi_id,
+                    "nameSv": f"KPI {kpi_id}",
+                    "nameEn": f"KPI {kpi_id}",
+                    "format": None,
+                    "isString": False,
+                }
+                for kpi_id in (37, 42, 99)
+            ]
+
+        def get_report_metadata(self):
+            return []
+
+        def get_reports(self, ins_ids, *, original=0):
+            return []
+
+        def get_stock_prices(self, ins_id, *, max_count=None):
+            return []
+
+        def get_kpi_summary(self, ins_id, report_type):
+            if report_type in {"year", "r12"}:
+                return {
+                    "kpis": [
+                        {
+                            "kpiId": 99,
+                            "values": [
+                                {"y": 2026, "p": 5, "v": 0},
+                                {"y": 2026, "p": 4, "v": None},
+                                {"y": 2026, "p": 1, "v": None, "value": 7},
+                            ],
+                        }
+                    ]
+                }
+            return {"kpis": []}
+
+        def get_kpi_history(self, ins_id, kpi_id, report_type, price_type):
+            if kpi_id == 37:
+                return [
+                    {
+                        "year": 2026,
+                        "y": 2027,
+                        "reportPeriod": 1.5,
+                        "p": 1,
+                        "v": 40,
+                        "observationDate": "2026-06-01",
+                    }
+                ]
+            period = 3 if kpi_id == 99 else 2
+            return [{"y": 2026, "p": period, "v": 0}]
+
+        def get_dividends(self, ins_ids=None):
+            return []
+
+        def get_stock_splits(self):
+            return []
+
+        def get_report_calendar(self, ins_ids=None):
+            return []
+
+        def get_shorts(self):
+            return []
+
+    args = argparse.Namespace(
+        dsn="sqlite:///:memory:",
+        all=True,
+        company=None,
+        ticker=None,
+        allow_empty_companies=True,
+    )
+    conn = get_connection(Settings.from_env(dsn="sqlite:///:memory:"))
+    migrate(conn)
+    company_id = upsert_company(
+        conn,
+        {
+            "insId": 909,
+            "name": "Rejected KPI AB",
+            "ticker": "RKPI",
+            "instrument": 1,
+            "branchId": 1,
+        },
+    )
+    assert (
+        upsert_kpi_observations(
+            conn,
+            company_id,
+            37,
+            "year",
+            "mean",
+            [{"y": 2026, "p": 1, "v": 30, "observationDate": "2026-06-01"}],
+        )
+        == 1
+    )
+    common_patches = (
+        patch("alphaforge.db.connection.get_connection", return_value=conn),
+        patch("alphaforge.db.migrations.migrate", return_value=None),
+        patch("alphaforge.providers.borsdata.adapter.BorsdataAdapter", RejectedKpiAdapter),
+    )
+    with common_patches[0], common_patches[1], common_patches[2]:
+        assert cmd_sync(args) == 0
+        assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 1
+        stored = conn.execute(
+            "SELECT value, raw_payload FROM kpi_observations WHERE kpi_id=37"
+        ).fetchone()
+        assert stored["value"] == 30
+        assert json.loads(stored["raw_payload"]) == {
+            "y": 2026,
+            "p": 1,
+            "v": 30,
+            "observationDate": "2026-06-01",
+        }
+        assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 12
+        assert [
+            tuple(row)
+            for row in conn.execute(
+                """SELECT kpi_id, count(*) FROM market_input_rejections
+                   GROUP BY kpi_id ORDER BY kpi_id"""
+            ).fetchall()
+        ] == [(37, 2), (42, 2), (99, 8)]
+        assert cmd_sync(args) == 0
+        assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 12
+        assert {
+            row[0]
+            for row in conn.execute(
+                "SELECT status FROM jobs WHERE job_type LIKE 'sync_kpis%'"
+            ).fetchall()
+        } == {"success"}
+
+        with patch(
+            "alphaforge.db.repositories.upsert_kpi_observations",
+            side_effect=RuntimeError("synthetic KPI persistence failure"),
+        ):
+            assert cmd_sync(args) == 1
+        failed = conn.execute(
+            """SELECT status, error FROM jobs
+               WHERE job_type='sync_kpis_37_year'"""
+        ).fetchone()
+        assert failed["status"] == "failed"
+        failure = json.loads(failed["error"])
+        assert failure["code"] == "kpi_history_upsert_failed"
+        assert failure["retryable"] is True
+
+        assert cmd_sync(args) == 0
+        retried = conn.execute(
+            "SELECT status FROM jobs WHERE job_type='sync_kpis_37_year'"
+        ).fetchone()
+        assert retried["status"] == "success"
 
 
 @pytest.mark.integration

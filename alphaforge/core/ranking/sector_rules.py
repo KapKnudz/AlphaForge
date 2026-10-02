@@ -121,19 +121,24 @@ def _property_growth(financial, histories):
             missing.append("Property revenue growth not available")
         else:
             snapshot_growth = revenue_growth
-            years = getattr(financial, "revenue_growth_years", 1)
-            period = f"{years}y CAGR" if years > 1 else "YoY"
-            label = (
-                "Property revenue/share growth"
-                if financial.revenue_per_share_growth is not None
-                else "Property revenue growth"
+            per_share = financial.revenue_per_share_growth is not None
+            years = getattr(
+                financial,
+                "revenue_per_share_growth_years" if per_share else "revenue_growth_years",
+                1,
             )
+            period = f"{years}y CAGR" if years > 1 else "YoY"
+            label = "Property revenue/share growth" if per_share else "Property revenue growth"
             if revenue_growth >= 0.10:
                 positives.append(f"{label} {revenue_growth:.0%} ({period}) — strong")
             elif revenue_growth < 0:
                 negatives.append(f"{label} {revenue_growth:.0%} ({period}) — declining")
     if financial and financial.share_dilution:
-        negatives.append(f"Share count growth {financial.share_count_growth:.0%} — dilution")
+        years = getattr(financial, "share_count_growth_years", 1)
+        period = f"{years}y CAGR" if years > 1 else "YoY"
+        negatives.append(
+            f"Share count growth {financial.share_count_growth:.0%} ({period}) — dilution"
+        )
         flags.append("share_dilution")
     return _result(
         [(_growth_score(snapshot_growth, 0.15), 1.0)], positives, negatives, missing, flags
@@ -261,20 +266,25 @@ def score_bank(financial, valuation, sector_data: dict):
     growth_positives = []
     growth_negatives = []
     if earnings_growth is not None:
-        years = getattr(financial, "net_income_growth_years", 1)
-        period = f"{years}y CAGR" if years > 1 else "YoY"
-        label = (
-            "Bank earnings/share growth"
-            if financial.net_income_per_share_growth is not None
-            else "Bank earnings growth"
+        per_share = financial.net_income_per_share_growth is not None
+        years = getattr(
+            financial,
+            "net_income_per_share_growth_years" if per_share else "net_income_growth_years",
+            1,
         )
+        period = f"{years}y CAGR" if years > 1 else "YoY"
+        label = "Bank earnings/share growth" if per_share else "Bank earnings growth"
         if earnings_growth >= 0.10:
             growth_positives.append(f"{label} {earnings_growth:.0%} ({period}) — strong")
         elif earnings_growth < 0:
             growth_negatives.append(f"{label} {earnings_growth:.0%} ({period}) — declining")
     growth_flags = []
     if financial and financial.share_dilution:
-        growth_negatives.append(f"Share count growth {financial.share_count_growth:.0%} — dilution")
+        years = getattr(financial, "share_count_growth_years", 1)
+        period = f"{years}y CAGR" if years > 1 else "YoY"
+        growth_negatives.append(
+            f"Share count growth {financial.share_count_growth:.0%} ({period}) — dilution"
+        )
         growth_flags.append("share_dilution")
     growth = _result(
         [(_growth_score(earnings_growth, 0.20), 1.0)],

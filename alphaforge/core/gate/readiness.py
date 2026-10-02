@@ -151,6 +151,16 @@ class AgentReadinessGate:
                 )
             )
 
+        selection = candidate.full_results.get("selection") or {}
+        limitations.extend(
+            ReadinessBlocker(
+                code="input_selection_refused",
+                category="valuation",
+                message=str(reason),
+            )
+            for reason in selection.get("refusal_reasons", ())
+        )
+
         forward_scenario_readiness = assess_forward_scenario_readiness(candidate)
         return AgentReadinessAssessment(
             company_id=candidate.company_id,

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
 
-from alphaforge.config import Settings
+from alphaforge.config import SCHEMA_VERSION, Settings
 from alphaforge.core.fx import convert_sum
 from alphaforge.core.point_in_time import in_window
 from alphaforge.db.connection import get_connection
@@ -28,7 +29,7 @@ def mem_conn():
 
 
 def test_schema_user_version_and_wal(mem_conn):
-    assert get_user_version(mem_conn) == 13
+    assert get_user_version(mem_conn) == SCHEMA_VERSION
     cur = mem_conn.execute("PRAGMA journal_mode;")
     mode = cur.fetchone()[0]
     # In-memory returns "memory" or "wal" — check that migrate set it (not delete)
@@ -65,7 +66,7 @@ def test_v1_dividend_constraint_migrates_for_type_4(mem_conn):
         (company_id, "2025-05-15", 1.25, "SEK", 4),
     )
     mem_conn.commit()
-    assert get_user_version(mem_conn) == 13
+    assert get_user_version(mem_conn) == SCHEMA_VERSION
     assert mem_conn.execute("SELECT dividend_type FROM dividends").fetchone()[0] == 4
     for table in (
         "mfn_issuer_mappings",
@@ -129,22 +130,20 @@ def test_is_placeholder_quarantine_visible(mem_conn):
         "period_type": "quarter",
         "period_end": "2025-03-31",
     }
-    upsert_financial_periods(mem_conn, int(cid), [stub])
-    cur = mem_conn.execute(
-        "SELECT is_placeholder, revenue, report_date FROM financial_periods WHERE company_id=?",
+    assert upsert_financial_periods(mem_conn, int(cid), [stub]) == 0
+    assert (
+        mem_conn.execute(
+            "SELECT count(*) FROM financial_periods WHERE company_id=?", (cid,)
+        ).fetchone()[0]
+        == 0
+    )
+    rejection = mem_conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections WHERE company_id=?",
         (cid,),
-    )
-    row = cur.fetchone()
-    assert row is not None
-    assert int(row[0]) == 1
-    # Ranking/valuation path must filter: WHERE is_placeholder=0 excludes this row
-    cur = mem_conn.execute(
-        "SELECT count(*) FROM financial_periods WHERE company_id=? AND is_placeholder=0", (cid,)
-    )
-    assert cur.fetchone()[0] == 0
-    # But quarantine is visible (unfiltered count 1)
-    cur = mem_conn.execute("SELECT count(*) FROM financial_periods WHERE company_id=?", (cid,))
-    assert cur.fetchone()[0] == 1
+    ).fetchone()
+    assert rejection is not None
+    assert rejection["reason"] == "placeholder"
+    assert json.loads(rejection["raw_payload"]) == stub
 
 
 def test_bilingual_dedupe_suppresses_one_per_pair():
@@ -353,6 +352,7 @@ def test_idempotent_sync_twice_identical_rowcounts(mem_conn):
             "period": 4,
             "period_type": "year",
             "period_end": "2024-12-31",
+            "currency": "SEK",
         },
     ]
     upsert_financial_periods(mem_conn, cid, periods)

@@ -1,3 +1,4 @@
+-- Schema v15: includes additive published-v13/v14 dividend-assurance repair.
 -- SQLite 3.38+ (WAL, json1, ON CONFLICT DO UPDATE)
 -- Enable once at connection open: PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
 -- Files: data/alphaforge.db (gitignored) | data/alphaforge.test.db
@@ -79,6 +80,37 @@ CREATE TABLE IF NOT EXISTS financial_periods (
 CREATE INDEX IF NOT EXISTS idx_financials_company_period_end ON financial_periods(company_id, period_type, period_end DESC);
 CREATE INDEX IF NOT EXISTS idx_financials_pit ON financial_periods(company_id, period_type, report_date, period_end) WHERE is_placeholder = 0;
 
+CREATE TABLE IF NOT EXISTS financial_period_rejections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    reason              TEXT NOT NULL,
+    period_type         TEXT,
+    report_year         TEXT,
+    report_period       TEXT,
+    payload_hash        TEXT NOT NULL,
+    raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+    rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (company_id, payload_hash, reason)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_financial_period_rejections_company
+    ON financial_period_rejections(company_id, rejected_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_input_rejections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    input_type          TEXT NOT NULL CHECK (input_type IN ('price','kpi')),
+    reason              TEXT NOT NULL,
+    kpi_id              INTEGER,
+    period_type         TEXT,
+    price_type          TEXT,
+    payload_hash        TEXT NOT NULL,
+    raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+    rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (company_id, payload_hash, reason)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_market_input_rejections_company
+    ON market_input_rejections(company_id, input_type, rejected_at DESC);
+
 CREATE TABLE IF NOT EXISTS kpi_observations (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -91,6 +123,7 @@ CREATE TABLE IF NOT EXISTS kpi_observations (
     value               REAL,
     fx_rate_to_sek      REAL CHECK (fx_rate_to_sek IS NULL OR fx_rate_to_sek > 0),
     fx_source           TEXT CHECK (fx_source IN ('currency_ratio','manual','null') OR fx_source IS NULL),
+    raw_payload         TEXT CHECK (raw_payload IS NULL OR json_valid(raw_payload)),
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     CHECK ((period_type='last' AND observation_date IS NOT NULL) OR (period_type IN ('year','r12') AND year IS NOT NULL))
 ) STRICT;
@@ -110,6 +143,7 @@ CREATE TABLE IF NOT EXISTS prices (
     close               REAL NOT NULL CHECK (close > 0),
     volume              INTEGER CHECK (volume IS NULL OR volume >= 0),
     currency            TEXT,
+    raw_payload         TEXT CHECK (raw_payload IS NULL OR json_valid(raw_payload)),
     fetched_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY (company_id, price_date)
 ) WITHOUT ROWID, STRICT;

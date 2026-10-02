@@ -8,7 +8,7 @@ branched migration history appears (plan §3.4 promotion signal), switch to
 alembic with autogenerate and keep this module as the SQLite→Postgres
 translation entry point.
 
-Current version: SCHEMA_VERSION = 13 (db/alphaforge.sqlite.sql).
+Current version: SCHEMA_VERSION = 15 (db/alphaforge.sqlite.sql).
 Bumping the version means: add db/migrations/NNN.sql and extend
 migrate() to apply it when user_version < NNN.
 """
@@ -286,6 +286,53 @@ def migrate(conn: sqlite3.Connection) -> None:
         set_user_version(conn, 13)
         conn.commit()
         current = 13
+    if current < 14:
+        price_columns = {row[1] for row in conn.execute("PRAGMA table_info(prices);")}
+        if "raw_payload" not in price_columns:
+            conn.execute(
+                "ALTER TABLE prices ADD COLUMN raw_payload TEXT "
+                "CHECK (raw_payload IS NULL OR json_valid(raw_payload))"
+            )
+        kpi_columns = {row[1] for row in conn.execute("PRAGMA table_info(kpi_observations);")}
+        if "raw_payload" not in kpi_columns:
+            conn.execute(
+                "ALTER TABLE kpi_observations ADD COLUMN raw_payload TEXT "
+                "CHECK (raw_payload IS NULL OR json_valid(raw_payload))"
+            )
+        candidates = [
+            Path("db/migrations/014_market_input_rejection_provenance.sql"),
+            Path(__file__).resolve().parents[2]
+            / "db"
+            / "migrations"
+            / "014_market_input_rejection_provenance.sql",
+        ]
+        migration_path = next((path for path in candidates if path.exists()), None)
+        if migration_path is None:
+            raise FileNotFoundError(
+                f"market input provenance migration not found (tried {candidates})"
+            )
+        conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 14)
+        conn.commit()
+        current = 14
+    if current < 15:
+        # Published market-v13 and its faulty v14 upgrade lack dividend assurance.
+        # Shape checks preserve flags from the independent dividend-v13 lineage.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dividends);")}
+        for column in ("currency_verified", "currency_conflicted"):
+            if column not in columns:
+                conn.execute(
+                    f"ALTER TABLE dividends ADD COLUMN {column} "
+                    f"INTEGER NOT NULL DEFAULT 0 CHECK ({column} IN (0,1))"
+                )
+        migration_path = (
+            Path(__file__).resolve().parents[2]
+            / "db/migrations/015_repair_published_dividend_assurance.sql"
+        )
+        conn.executescript(migration_path.read_text(encoding="utf-8"))
+        set_user_version(conn, 15)
+        conn.commit()
+        current = 15
     if current < SCHEMA_VERSION:
         _apply_initial_schema(conn)
         set_user_version(conn, SCHEMA_VERSION)
@@ -303,6 +350,37 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             name_en TEXT,
             fetched_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         ) STRICT;
+
+        CREATE TABLE IF NOT EXISTS financial_period_rejections (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            reason              TEXT NOT NULL,
+            period_type         TEXT,
+            report_year         TEXT,
+            report_period       TEXT,
+            payload_hash        TEXT NOT NULL,
+            raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+            rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, payload_hash, reason)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_financial_period_rejections_company
+            ON financial_period_rejections(company_id, rejected_at DESC);
+
+        CREATE TABLE IF NOT EXISTS market_input_rejections (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_id          INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            input_type          TEXT NOT NULL CHECK (input_type IN ('price','kpi')),
+            reason              TEXT NOT NULL,
+            kpi_id              INTEGER,
+            period_type         TEXT,
+            price_type          TEXT,
+            payload_hash        TEXT NOT NULL,
+            raw_payload         TEXT NOT NULL CHECK (json_valid(raw_payload)),
+            rejected_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE (company_id, payload_hash, reason)
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_market_input_rejections_company
+            ON market_input_rejections(company_id, input_type, rejected_at DESC);
 
         -- Deterministic MFN identity is explicit source-of-truth data.  A
         -- candidate row is deliberately separate from the verified mapping so
@@ -417,6 +495,21 @@ def _ensure_schema_extensions(conn: sqlite3.Connection) -> None:
             ON evidence_packets(company_id, as_of, usable, report_rules_fingerprint, id DESC);
         """
     )
+    price_columns = {row[1] for row in conn.execute("PRAGMA table_info(prices);").fetchall()}
+    if "raw_payload" not in price_columns:
+        conn.execute(
+            "ALTER TABLE prices ADD COLUMN raw_payload TEXT "
+            "CHECK (raw_payload IS NULL OR json_valid(raw_payload))"
+        )
+    kpi_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(kpi_observations);").fetchall()
+    }
+    if "raw_payload" not in kpi_columns:
+        conn.execute(
+            "ALTER TABLE kpi_observations ADD COLUMN raw_payload TEXT "
+            "CHECK (raw_payload IS NULL OR json_valid(raw_payload))"
+        )
+
     document_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(research_documents);").fetchall()
     }

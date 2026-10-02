@@ -78,6 +78,7 @@ def test_loader_uses_only_data_visible_at_as_of_and_split_adjusts_history():
             {
                 "period_type": "year",
                 "period_end": "2024-12-31",
+                "year": 2024,
                 "report_Date": "2025-02-01T00:00:00",
                 "revenues": 100,
                 "operating_Income": 20,
@@ -89,6 +90,7 @@ def test_loader_uses_only_data_visible_at_as_of_and_split_adjusts_history():
             {
                 "period_type": "year",
                 "period_end": "2025-12-31",
+                "year": 2025,
                 "report_Date": "2026-02-01",
                 "revenues": 200,
                 "operating_Income": 40,
@@ -102,7 +104,7 @@ def test_loader_uses_only_data_visible_at_as_of_and_split_adjusts_history():
     upsert_prices(
         conn,
         company_id,
-        [{"d": "2025-03-01T00:00:00", "c": 10, "v": 100}, {"d": "2026-03-01", "c": 20, "v": 100}],
+        [{"d": "2025-12-30T00:00:00", "c": 10, "v": 100}, {"d": "2026-12-30", "c": 20, "v": 100}],
         currency="SEK",
     )
     upsert_stock_splits(

@@ -16,6 +16,25 @@ class CompanyScore:
 
     total_score: float = 0.0
 
+    revenue_growth: float | None = None
+    revenue_growth_years: int = 0
+    ebit_growth: float | None = None
+    ebit_growth_years: int = 0
+    net_income_growth: float | None = None
+    net_income_growth_years: int = 0
+    revenue_per_share_growth: float | None = None
+    revenue_per_share_growth_years: int = 0
+    ebit_per_share_growth: float | None = None
+    ebit_per_share_growth_years: int = 0
+    net_income_per_share_growth: float | None = None
+    net_income_per_share_growth_years: int = 0
+    fcf_per_share_growth: float | None = None
+    fcf_per_share_growth_years: int = 0
+    book_value_per_share_growth: float | None = None
+    book_value_per_share_growth_years: int = 0
+    share_count_growth: float | None = None
+    share_count_growth_years: int = 0
+
     positives: list[str] = field(default_factory=list)
     negatives: list[str] = field(default_factory=list)
     missing_data: list[str] = field(default_factory=list)
@@ -36,6 +55,7 @@ class CompanyScore:
     # must never replace this with a hash of the score JSON itself.
     evidence_packet_hash: str | None = None
     scoring_audit: dict = field(default_factory=dict)
+    input_selection: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.rank_eligible and self.ranking_section == "ranked":
@@ -51,6 +71,24 @@ class CompanyScore:
             "valuation_score": self.valuation_score,
             "balance_sheet_score": self.balance_sheet_score,
             "total_score": self.total_score,
+            "revenue_growth": self.revenue_growth,
+            "revenue_growth_years": self.revenue_growth_years,
+            "ebit_growth": self.ebit_growth,
+            "ebit_growth_years": self.ebit_growth_years,
+            "net_income_growth": self.net_income_growth,
+            "net_income_growth_years": self.net_income_growth_years,
+            "revenue_per_share_growth": self.revenue_per_share_growth,
+            "revenue_per_share_growth_years": self.revenue_per_share_growth_years,
+            "ebit_per_share_growth": self.ebit_per_share_growth,
+            "ebit_per_share_growth_years": self.ebit_per_share_growth_years,
+            "net_income_per_share_growth": self.net_income_per_share_growth,
+            "net_income_per_share_growth_years": self.net_income_per_share_growth_years,
+            "fcf_per_share_growth": self.fcf_per_share_growth,
+            "fcf_per_share_growth_years": self.fcf_per_share_growth_years,
+            "book_value_per_share_growth": self.book_value_per_share_growth,
+            "book_value_per_share_growth_years": self.book_value_per_share_growth_years,
+            "share_count_growth": self.share_count_growth,
+            "share_count_growth_years": self.share_count_growth_years,
             "positives": self.positives,
             "negatives": self.negatives,
             "missing_data": self.missing_data,
@@ -66,6 +104,7 @@ class CompanyScore:
             "readiness_limitations": self.readiness_limitations,
             "evidence_packet_hash": self.evidence_packet_hash,
             "scoring_audit": self.scoring_audit,
+            "input_selection": self.input_selection,
         }
 
 

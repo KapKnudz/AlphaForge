@@ -12,9 +12,26 @@ class FinancialCalculator:
         growth_current: CurrentFinancials | None = None,
         latest_quarter: CurrentFinancials | None = None,
         prior_year_quarter: CurrentFinancials | None = None,
+        *,
+        growth_available: bool = True,
     ) -> FinancialResult:
 
         growth_current = growth_current or current
+        if not growth_available:
+            # Preserve current margins/balance inputs without substituting a
+            # mixed or unverified series for annual growth and consistency.
+            growth_current = CurrentFinancials(
+                revenue=None,
+                operating_profit=None,
+                ebit=None,
+                ebitda=None,
+                net_income=None,
+                free_cash_flow=None,
+                equity=None,
+                total_assets=None,
+                total_debt=None,
+            )
+            historical = HistoricalFinancials([], [], [], [])
 
         (
             revenue_growth,
@@ -31,8 +48,13 @@ class FinancialCalculator:
             net_income_per_share_growth,
             fcf_per_share_growth,
             book_value_per_share_growth,
-            per_share_years,
+            revenue_per_share_years,
+            ebit_per_share_years,
+            net_income_per_share_years,
+            fcf_per_share_years,
+            book_value_per_share_years,
             share_count_growth,
+            share_count_years,
         ) = self._per_share_metrics(growth_current, historical)
         (
             margin_volatility,
@@ -93,7 +115,13 @@ class FinancialCalculator:
             fcf_per_share_growth=fcf_per_share_growth,
             book_value_per_share_growth=book_value_per_share_growth,
             share_count_growth=share_count_growth,
-            per_share_growth_years=per_share_years,
+            per_share_growth_years=revenue_per_share_years,
+            revenue_per_share_growth_years=revenue_per_share_years,
+            ebit_per_share_growth_years=ebit_per_share_years,
+            net_income_per_share_growth_years=net_income_per_share_years,
+            fcf_per_share_growth_years=fcf_per_share_years,
+            book_value_per_share_growth_years=book_value_per_share_years,
+            share_count_growth_years=share_count_years,
             share_dilution=bool(share_count_growth is not None and share_count_growth > 0.05),
             gross_margin=self.calculate_ratio(current.gross_income, current.revenue),
             cash_conversion=(
@@ -157,7 +185,12 @@ class FinancialCalculator:
             for name, value in values.items()
         ]
         share_growth = self._growth(current.shares_outstanding, historical.shares_history)
-        return (*[item[0] for item in growths], growths[0][1], share_growth[0])
+        return (
+            *[item[0] for item in growths],
+            *[item[1] for item in growths],
+            share_growth[0],
+            share_growth[1],
+        )
 
     def _quality_metrics(self, current, historical, latest_quarter, prior_year_quarter, growth):
         recent = (
@@ -171,11 +204,10 @@ class FinancialCalculator:
             historical.operating_profit_history,
             historical.revenue_history,
         )
-        fcf_values = [
-            value
-            for value in historical.fcf_history + [current.free_cash_flow]
-            if value is not None
-        ]
+        fcf_values = self._latest_complete_suffix(
+            historical.fcf_history + [current.free_cash_flow],
+            lambda value: value is not None,
+        )
         positive_fcf_ratio = (
             sum(value > 0 for value in fcf_values) / len(fcf_values) if fcf_values else None
         )
@@ -197,20 +229,15 @@ class FinancialCalculator:
         current_value: float | None,
         history: list[float | None],
     ) -> tuple[float | None, int]:
-        if current_value is None or current_value <= 0 or not history:
-            return None, 1
-
-        previous_value = history[-1]
-        if previous_value is None or previous_value <= 0:
-            return None, 1
-
-        periods = min(3, len(history))
-        baseline = history[-periods]
-        if baseline is None or baseline <= 0:
-            periods = 1
-            baseline = previous_value
-
-        return (current_value / baseline) ** (1 / periods) - 1, periods
+        values = self._latest_complete_suffix(
+            [*history, current_value],
+            lambda value: value is not None and value > 0,
+            limit=4,
+        )
+        if len(values) < 2:
+            return None, 0
+        periods = len(values) - 1
+        return (values[-1] / values[0]) ** (1 / periods) - 1, periods
 
     @staticmethod
     def calculate_yoy_change(
@@ -249,11 +276,30 @@ class FinancialCalculator:
         revenue_history: list[float | None],
     ) -> list[float]:
         values = [
-            self.calculate_ratio(profit, revenue)
+            self.calculate_ratio(profit, revenue) if revenue is not None and revenue > 0 else None
             for profit, revenue in zip(profit_history, revenue_history, strict=False)
         ]
-        values.append(self.calculate_ratio(current_profit, current_revenue))
-        return [value for value in values[-5:] if value is not None]
+        values.append(
+            self.calculate_ratio(current_profit, current_revenue)
+            if current_revenue is not None and current_revenue > 0
+            else None
+        )
+        return self._latest_complete_suffix(
+            values,
+            lambda value: value is not None,
+            limit=5,
+        )
+
+    @staticmethod
+    def _latest_complete_suffix(values, usable, *, limit=None):
+        suffix = []
+        for value in reversed(values):
+            if not usable(value):
+                break
+            suffix.append(value)
+            if limit is not None and len(suffix) == limit:
+                break
+        return list(reversed(suffix))
 
     @staticmethod
     def is_turnaround(current_value: float | None, history: list[float | None]) -> bool:

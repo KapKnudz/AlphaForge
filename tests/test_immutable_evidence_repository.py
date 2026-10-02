@@ -123,7 +123,7 @@ def test_migration_adds_exact_nine_tables_and_append_only_guards(tmp_path):
         )
     }
     assert NEW_TABLES <= tables
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 13
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     connection.execute("INSERT INTO companies (borsdata_id, name) VALUES (1, 'Acme')")
     batch = append_observation_batch(connection, _batch(1, "one", "2026-09-24T10:00:00Z"))
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):

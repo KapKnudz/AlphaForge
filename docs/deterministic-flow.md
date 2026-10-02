@@ -37,7 +37,10 @@ without trusting provider `maxCount` (optional slicing is local). Sync stores
 reports, prices, annual/R12 KPI history, dividends, splits, report calendar,
 reference/metadata caches and available Börsdata short snapshots. KPI 37/42
 history is requested directly even if summary discovery omits it. Unsupported
-KPI responses can remain missing. Integration retries belong to
+KPI responses can remain missing. KPI writer counts include non-null rows durably
+retained as explicit rejections, so intended date refusals do not become sync
+failures; a rejection-write exception still produces a retryable failed job and
+nonzero sync exit. Integration retries belong to
 [`providers/http.py`](../alphaforge/providers/http.py); sync records branch job
 outcomes and isolates many per-company failures, not one all-or-nothing fleet
 transaction. Each per-company dividend batch is savepoint-atomic: any date, type
@@ -51,20 +54,33 @@ acquisition to that date.
 [migrations](../db/migrations/) own keys and constraints;
 [`db/repositories.py`](../alphaforge/db/repositories.py) owns writes.
 
+Schema v15 reconciles two published development v13 shapes: market provenance
+without dividend assurance, and the landed dividend-assurance schema. It also
+repairs the former shape already stamped v14. The additive upgrade creates only
+missing assurance columns/table, preserves all rows and existing strong flags
+and windows, and leaves legacy currency/window evidence unverified. It does not
+infer coverage from legacy extrema or acquire data. Existing rows and dividend
+assurance are preserved. A healthy dividend-assurance v13 database still receives
+the expected v14 price/KPI `raw_payload` columns and `market_input_rejections`
+table before reaching v15; schemas already containing those structures keep them
+unchanged. Repeated migration is idempotent. This is not a claim that every
+released v13 database was defective.
+
 | Input | Identity / retained meaning |
 | --- | --- |
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |
-| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. If period end is absent, the writer can fall back to publication date; it is not always a verified fiscal-period end. |
-| KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. The writer handles missing report-period keys explicitly for idempotence. |
-| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency; no OHLC history. |
+| Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, currency/FX metadata, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
+| KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. Stored observations retain `raw_payload`; malformed or undated inputs are retained in `market_input_rejections`. The writer handles missing report-period keys explicitly for idempotence. |
+| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. Malformed or undated inputs are retained in `market_input_rejections`. |
 | Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
 | Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
 
 Market-data upserts replace values at these keys; they are not append-only
-vintages. Raw report/instrument payloads and acquisition timestamps provide
-provenance, but `fetched_at` is not consistently refreshed on conflict. This
-storage differs intentionally from the immutable textual-evidence history.
+vintages. Raw report/price/KPI/instrument payloads, hashed rejected payloads and
+acquisition timestamps provide provenance, but `fetched_at` is not consistently
+refreshed on conflict. This storage differs intentionally from the immutable
+textual-evidence history.
 
 ## 2. Units, currencies and missing values
 
@@ -86,9 +102,13 @@ are described in [valuation.md](valuation.md); current cross-currency wiring
 limits are noted below. Ratios are never FX-converted by the ranking loader.
 
 Missing fundamentals remain `NULL`/`None`; zero is a value, not missing.
-Zero-revenue/unpublished stubs are quarantined as `is_placeholder=1`; other
-unpublished reports also fail loader filtering. Absent live EBITDA and gross
-debt are not invented from net debt. Missing score inputs produce diagnostics
+Current ingestion retains zero-revenue/unpublished stubs in
+`financial_period_rejections` with their original payload and a `placeholder`
+reason before any numerical upsert. Other reports without a verified publication
+date are retained there with their refusal reason. Preserved legacy
+`financial_periods` rows marked `is_placeholder=1` remain excluded by the loader;
+verified published zero fundamentals remain valid values. Absent live EBITDA and
+gross debt are not invented from net debt. Missing score inputs produce diagnostics
 (`missing_data`, `data_quality`, availability and eligibility), not zero-valued
 fundamentals. A numeric diagnostic score can still be emitted for an ineligible
 company. Yield availability/window/currency/coverage facts are returned by the
@@ -102,14 +122,39 @@ not a standalone yield column. DCF unavailability and provisional inputs have th
 [`load_results_for_company`](../alphaforge/cli/ranking_loader.py) performs no
 network fetch. Its effective date predicates are:
 
-- Reports: `is_placeholder=0`, `period_end <= as_of`, non-null
-  `report_date <= as_of`, ordered by period end then publication date.
-- Prices: `price_date <= as_of`; latest eligible close is selected, without
-  an age limit. Historical valuation pairs reports with the last close at or
-  before each stored period end.
-- KPIs: non-null value, `year <= cutoff.year`, and observation date absent **or**
-  `<= as_of`. Latest eligible values are collected per KPI; R12 overrides
-  non-R12 history. Yearless `last` snapshots do not pass that year predicate.
+- Reports: `is_placeholder=0`, verified fiscal end and publication date,
+  `period_end <= report_date <= as_of`. Every populated alias for publication,
+  fiscal year/end/start and report period must parse and agree; contradictory
+  or malformed aliases remain refusal provenance regardless of key order. ISO
+  dates and datetimes are normalized to a calendar day only after the complete
+  value parses successfully.
+  Fiscal ends must match an explicit fiscal-end field in the retained raw
+  payload; legacy publication-as-end keys and rows without source metadata are
+  excluded. The writer retains intrinsically invalid rows in rejection audit
+  before any same-slot upsert, so an invalid resync cannot replace a verified
+  report. An intrinsically valid same-slot report remains an authoritative
+  correction and replaces the stored row even when its currency or fiscal-year
+  label changes peer comparability; rows in one batch are applied in order.
+  Cutoff filtering and annual-series selection then report incompatible
+  currency, duplicate labels or nonconsecutive chronology as unavailable growth
+  instead of preserving stale numerical authority. The writer also skips rows
+  without a valid explicit fiscal end rather than inventing a key from a
+  publication date or year/quarter. Rows sort by fiscal end, publication date,
+  then quarter/annual/R12 (R12 wins exact ties).
+- Prices: every populated date alias must parse completely and agree before
+  normalization, and the verified `price_date` must be `<= as_of`; the latest
+  eligible close must be **at most seven calendar days old**, inclusive.
+  Historical valuation pairs each report with the last close at/before its
+  verified fiscal end, also with an inclusive seven-calendar-day maximum gap.
+  Older/missing pairs do not contribute to historical valuation anchors. Current
+  and historical pairing diagnostics retain the candidate close, raw payload and
+  every original date fact even when the seven-day guard refuses the price.
+- KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
+  `observation_date <= as_of`. Every populated observation-date alias must
+  parse completely and agree. Invalid input is retained in rejection audit
+  rather than replacing a verified same-slot observation. Latest eligible
+  values are collected per KPI; R12 overrides non-R12 history. Yearless
+  `last` snapshots remain excluded.
 - Dividend inputs: trailing calendar twelve months ending at `as_of`, with
   `(start,end]` ex-date bounds. The previous-year anniversary clamps February 29
   to February 28; e.g. `2028-02-29` uses `(2027-02-28,2028-02-29]`, and
@@ -127,19 +172,60 @@ network fetch. Its effective date predicates are:
   counts; [evidence-flow.md](evidence-flow.md) owns its cutoff, usability,
   fingerprint and retained-object checks.
 
-These are date-level checks, not a historical ingestion-vintage query. Generic
+These are **cutoff-filtered stored observations with verified applicable
+dates**, not historical-known-then correctness or an ingestion-vintage query.
+Market rows migrated without their original raw payload remain stored as
+`legacy_missing_raw_payload` diagnostics but cannot establish date-alias
+agreement or supply price/KPI numerical authority; a verified writer upsert can
+replace that row with its real raw payload. Generic
 [`point_in_time.py`](../alphaforge/core/point_in_time.py) helpers do not replace
-the loader's predicates or add price-age checks automatically.
+these loader predicates. `SELECTION_VERSION` is
+`verified-dates-consecutive-annual-v2`. The loader returns `selection` diagnostics
+also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI/price
+provenance with original payload/value/date facts, selected price date/age,
+historical pairings and annual fiscal ends/refusal reasons. Applicable refusal
+reasons also appear in ranking missing data and readiness
+limitations. A quarter/R12 refusal is superseded only by a unique same-type row
+matching its verified end or its fiscal year plus report period; otherwise only
+chronology provably older than the latest same-type row becomes audit-only.
+An unresolved annual slot within the entire selected annual growth span, not
+just at or after its latest anchor, makes annual comparisons unavailable.
+Rejected slots before the selected suffix, genuinely corrected slots and
+consistent future observations remain audit-only. A conflicting rejected price
+is also audit-only when every populated date fact parses and strictly predates a
+newer verified admitted price; malformed, unknown or mixed current/future facts
+remain current refusals.
+Stale prices retain their raw evidence as diagnostics, not as available closes,
+raw multiples or DCF inputs; current financial margins/balance facts can still
+be available.
 
-The loader maps all eligible report types into the financial/heuristic path:
-latest row is current, earlier rows are history. It adjusts historical shares to
-the latest report's share basis using stored split events without changing raw
-rows ([`financial/per_share.py`](../alphaforge/core/financial/per_share.py)).
+The latest eligible report remains the current financial/heuristic basis.
+Growth, per-share growth, dilution and consistency instead use the latest
+annual anchor and the maximal latest **consecutive annual fiscal suffix**.
+`period_type="year"` is authoritative; provider report-period labels do not
+reclassify it. Fiscal-year labels must normalize to known, unique consecutive
+integers, and verified ends must be annual anniversaries (including non-calendar
+years and leap month-end). Explicit starts, when supplied, must describe
+365/366-day periods. A gap, duplicate, stub, unverified date or currency mismatch
+stops the suffix without bridging it; older omitted rows remain in selection
+provenance and do not suppress a valid latest suffix. A defect at the latest
+anchor leaves annual metrics unavailable. `broken_fiscal_year` alone is not a
+stub flag and does not exclude a non-calendar fiscal series. Quarter/R12
+insertions cannot change annual growth. No quarter YoY is supplied without a
+matched pair.
+Each total, per-share and share-count growth result carries its own actual validated
+horizon; score descriptions use the horizon of the selected metric. Uncomputable
+growth carries a zero-year horizon, not a fabricated year or rate.
+
+The loader adjusts historical shares, including the annual anchor, into the
+latest report's share basis using stored splits without changing raw rows
+([`financial/per_share.py`](../alphaforge/core/financial/per_share.py)).
 [`FinancialMapper`](../alphaforge/core/financial/mapper.py) and
-[`FinancialCalculator`](../alphaforge/core/financial/calculator.py) produce the
-financial metrics. DCF separately selects latest R12, else latest annual, and
-uses annual history for assumption policy. Calculation and assumption ownership
-is detailed in [valuation.md](valuation.md), not redefined here.
+[`FinancialCalculator`](../alphaforge/core/financial/calculator.py) own arithmetic;
+`growth_available=False` suppresses unverified annual metrics, not current ratios.
+DCF retains its separate latest-R12/else-annual current basis and receives the
+same validated annual history for assumption policy. Calculation and assumption
+ownership is detailed in [valuation.md](valuation.md), not redefined here.
 
 Pure supporting APIs exist for
 [liquidity](../alphaforge/core/coverage/liquidity.py),
@@ -168,15 +254,18 @@ precede evidence, then valuation). Evidence-lane packets must be hash-valid and
 current-rules; reverse DCF must be available. Missing historical EV/EBIT
 anchors are a **limitation**, not a blocker. The gate supports only `general`
 for future analysis, though sector scoring exists. Legacy direct callers have
-a document-only fallback; see the CLI sector-wiring discrepancy below. `rank`
+a document-only fallback. `cmd_rank` copies the scored method to the gate
+candidate, even for missing inputs; direct loader candidates use the same
+sector-routing helper. Bank/property therefore report `method_unsupported`
+before evidence/valuation blockers. FCFF DCF sector refusal is unchanged. `rank`
 persists assessments but makes no paid thesis-model call.
 
 `cmd_rank` writes these flat, operator/downstream-consumer interfaces:
 
 | Output | Contract |
 | --- | --- |
-| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data and scoring audit survive serialization. |
-| `exports/<as_of>/ranking.csv` | Display subset of scores, eligibility/readiness reasons and evidence hash; unranked rows have blank rank, list fields use semicolons. |
+| `exports/<as_of>/ranking.json` | Full scores, model version, counts, scalar evidence hash and company-ID-keyed hash map; readiness, missing-data, input-selection provenance, scoring audit, and each computed growth value with its own horizon survive serialization. |
+| `exports/<as_of>/ranking.csv` | Display subset of scores, explicit growth value/horizon columns, eligibility/readiness reasons, `missing_data`, structured `input_selection` and evidence hash; unavailable values are empty while zero values and zero-year horizons remain explicit. |
 | `exports/<as_of>/dcf.json` | Company-ID-keyed auditable DCF/reverse-DCF payloads, including structured unavailable outcomes; not a score replacement. |
 | `ranking_runs` | New run row with scores, `as_of`, model version, universe hash and inputs summary. Scalar `packet_hash` is populated only for a one-company run with a packet; multi-company evidence provenance lives in `inputs_summary.evidence_packet_hashes`. |
 
@@ -199,20 +288,13 @@ new `rank`; they are not immutable thesis revisions or the planned standalone
 
 Confirmed current gaps against the target design, not policy changes in this document:
 
-- Strict publication-aware PIT and old-price rejection are not universal:
-  undated KPI history can pass on year alone; latest stored price has no age
-  gate. See the loader predicates above versus plan §§3.4, 7.3.
+- Verified dates/freshness do not establish historical publication knowledge
+  or preserve overwritten financial vintages. Executed-run numerical replay
+  snapshots remain a separate launch dependency, not supplied by these guards.
 - Converted cross-currency reports keep original currency in the `Report`
   passed to the raw valuation guard, which can reject otherwise converted
   amounts. [`core/fx.py`](../alphaforge/core/fx.py) exists, but the ranking loader
   does not call it or a manual-rate fallback (plan §3.5).
-- Financial/heuristic history mixes annual/R12/quarter rows rather than a
-  normalized annual series; DCF does isolate annual history. This limits any
-  claim that all exported growth periods represent calendar years.
-- Engine sector routing and CLI readiness are not fully aligned: the loader
-  constructs `candidate.ranking_model="general"` and `cmd_rank` does not replace
-  it with the score's sector model. Direct gate tests rejecting bank/property
-  do not prove sector rejection through the CLI.
 - Current yield enforces verified complete currency-compatible windows, but live
   provider assurance is absent, so acquisition honestly remains unknown. The
   separate realized-return helper still accepts no coverage and uses an end-price

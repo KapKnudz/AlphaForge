@@ -38,7 +38,7 @@ class FinancialResult:
     net_margin: float | None
     fcf_margin: float | None
 
-    # Growth (Year-over-Year)
+    # Annual growth over the latest complete suffix.
     revenue_growth: float | None
     ebit_growth: float | None
     net_income_growth: float | None
@@ -74,6 +74,12 @@ class FinancialResult:
     book_value_per_share_growth: float | None = None
     share_count_growth: float | None = None
     per_share_growth_years: int = 1
+    revenue_per_share_growth_years: int = 1
+    ebit_per_share_growth_years: int = 1
+    net_income_per_share_growth_years: int = 1
+    fcf_per_share_growth_years: int = 1
+    book_value_per_share_growth_years: int = 1
+    share_count_growth_years: int = 1
     share_dilution: bool = False
 
     # Current cash quality and multi-year consistency.

@@ -984,6 +984,24 @@ def export_ranking_files(
                 "total_score",
                 "quality_score",
                 "growth_score",
+                "revenue_growth",
+                "revenue_growth_years",
+                "ebit_growth",
+                "ebit_growth_years",
+                "net_income_growth",
+                "net_income_growth_years",
+                "revenue_per_share_growth",
+                "revenue_per_share_growth_years",
+                "ebit_per_share_growth",
+                "ebit_per_share_growth_years",
+                "net_income_per_share_growth",
+                "net_income_per_share_growth_years",
+                "fcf_per_share_growth",
+                "fcf_per_share_growth_years",
+                "book_value_per_share_growth",
+                "book_value_per_share_growth_years",
+                "share_count_growth",
+                "share_count_growth_years",
                 "valuation_score",
                 "balance_sheet_score",
                 "ranking_model",
@@ -995,6 +1013,8 @@ def export_ranking_files(
                 "readiness_limitations",
                 "evidence_packet_hash",
                 "data_quality",
+                "missing_data",
+                "input_selection",
             ]
         )
         for i, score in enumerate(ranking.scores, 1):
@@ -1006,6 +1026,24 @@ def export_ranking_files(
                     score.total_score,
                     score.quality_score,
                     score.growth_score,
+                    score.revenue_growth,
+                    score.revenue_growth_years,
+                    score.ebit_growth,
+                    score.ebit_growth_years,
+                    score.net_income_growth,
+                    score.net_income_growth_years,
+                    score.revenue_per_share_growth,
+                    score.revenue_per_share_growth_years,
+                    score.ebit_per_share_growth,
+                    score.ebit_per_share_growth_years,
+                    score.net_income_per_share_growth,
+                    score.net_income_per_share_growth_years,
+                    score.fcf_per_share_growth,
+                    score.fcf_per_share_growth_years,
+                    score.book_value_per_share_growth,
+                    score.book_value_per_share_growth_years,
+                    score.share_count_growth,
+                    score.share_count_growth_years,
                     score.valuation_score,
                     score.balance_sheet_score,
                     score.ranking_model,
@@ -1017,6 +1055,8 @@ def export_ranking_files(
                     ";".join(score.readiness_limitations),
                     score.evidence_packet_hash or "",
                     score.data_quality,
+                    ";".join(score.missing_data),
+                    json.dumps(score.input_selection, ensure_ascii=False, sort_keys=True),
                 ]
             )
 
@@ -1139,10 +1179,15 @@ def cmd_rank(args: argparse.Namespace) -> int:
         loaded = results_by_company.get(score.company_id, {})
         candidate = loaded.get("candidate")
         if candidate is None:
-            score.readiness_status = "evidence_blocked"
-            score.readiness_blockers = ["ranking inputs unavailable"]
-            continue
+            from types import SimpleNamespace
+
+            candidate = SimpleNamespace(
+                company_id=score.company_id,
+                research_evidence=loaded.get("research_evidence") or {},
+                full_results=loaded,
+            )
         candidate.ticker = score.ticker
+        candidate.ranking_model = score.ranking_model
         assessment = gate.assess(candidate)
         score.readiness_status = assessment.status
         score.readiness_blockers = [f"{item.code}: {item.message}" for item in assessment.blockers]

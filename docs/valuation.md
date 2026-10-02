@@ -12,9 +12,14 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-verified-dividend-yield-v13"`
-  (v13 corrects first-authoritative denomination refresh of unverified legacy rows;
-  DCF policy/engine are unchanged and exported separately).
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-annual-rejection-span-v16"`
+  (v16 combines verified dividend-yield provenance with the metric-specific
+  export horizons and checks unresolved annual rejections across the entire
+  selected growth span, not only its latest anchor; `valuation_score` remains
+  heuristic and DCF separate).
+  Financial selection is `verified-dates-consecutive-annual-v2` in the loader;
+  [the deterministic flow](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring)
+  owns its date, freshness, refusal-provenance and export contract.
 * **Current dividend yield:** policy `calendar-ttm-verified-v2` in
   [`dividend_yield.py`](../alphaforge/core/valuation/dividend_yield.py) produces
   percentage points from `sum(amount) / selected_close * 100` only for an
@@ -30,8 +35,7 @@ ranking never masquerades as a discounted-cash-flow.
   currencies are valid without conversion. No report FX or
   realized-return/reinvestment substitution. The v2 provenance rule admits the
   first authoritative supported denomination for an unverified, conflict-free
-  row,
-  including a valid-looking legacy tag such as assumed SEK. Only contradictory
+  row, including a valid-looking legacy tag such as assumed SEK. Only contradictory
   **verified** supported denominations establish a sticky conflict; unusable/missing
   fresh tags do not erase earlier verified denomination evidence or certify a
   window.
@@ -45,7 +49,13 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v11-market-cap-hurdle"`) — 5-year projection,
+  (`VERSION = "reverse-dcf-v12-consecutive-annual-growth"`) — historical growth
+  uses the latest consecutive positive-revenue suffix without bridging missing
+  or nonpositive observations; this calculation is distinct from v11.
+  An unresolved annual slot inside the selected fiscal span removes historical
+  growth authority; the existing explicit zero-growth fallback remains recorded
+  in assumption sources, never a CAGR across that uncertain span.
+  5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
   EBIT margin revenue-weighted over 3–5 annuals, reinvestment from
   **Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount
@@ -59,12 +69,14 @@ ranking never masquerades as a discounted-cash-flow.
   with linear fade of `revenue_growth` and `ebit_margin`, then
   `terminal_value = terminal_fcff / (discount - terminal_growth)`.
 * **Wiring:** `alphaforge/cli/ranking_loader.py:load_results_for_company`
-  builds `DcfPolicyDecision` from PIT-filtered annuals and `kpi_observations`
-  (37), then `ReverseDcfEngine` → `DcfValue` (enterprise/equity/value per
-  share, terminal value, 5 `ProjectedCashFlow` with `fcff`/`discounted_fcff`).
-  PIT means `year <= cutoff.year AND observation_date <= as_of`; KPI 37/42
-  prefer R12 over annual explicitly. DCF market cap, enterprise value, and the
-  required-return hurdle come from the selected DCF report (latest R12, else
+  builds `DcfPolicyDecision` from validated consecutive annual fiscal history
+  and dated `kpi_observations` (37), then `ReverseDcfEngine` → `DcfValue`
+  (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
+  with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
+  cutoff-filtered verified-date contract, **not historical-known-then PIT**.
+  Rejected market inputs cannot drive valuation; missing ROIC retains the
+  policy's explicit provisional behavior. DCF market cap, enterprise value, and
+  the required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,
@@ -118,5 +130,7 @@ without error.
   stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`
   — except missing ROIC, which yields a provisional available DCF at 0%
   reinvestment (see policy above).
-* Deterministic: identical PIT inputs → identical `DcfValue` and `valuation_score`.
+* Deterministic: identical selected stored inputs under identical rules →
+  identical `DcfValue` and `valuation_score`; this does not retain financial
+  vintages or implement executed-run numerical replay.
 * Credentials never appear in exports or logs (`authKey` redacted in adapter).

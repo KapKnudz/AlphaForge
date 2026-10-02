@@ -4,10 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
+from math import isfinite
 from typing import Any
 
 from alphaforge.core.frozen_packet import EVIDENCE_RULES_VERSION, validate_frozen_packet
+from alphaforge.core.kpi_taxonomy import (
+    KPI_DATE_ALIASES,
+    KPI_REPORT_PERIOD_ALIASES,
+    KPI_YEAR_ALIASES,
+    PRICE_DATE_ALIASES,
+    REPORT_FIELD_MAP,
+    aliased_iso_date,
+    integer_aliases,
+    report_date_aliases,
+    report_integer_aliases,
+)
 from alphaforge.core.valuation.dividend_yield import is_known_currency
 
 
@@ -128,16 +140,209 @@ def relink_watchlist(conn: Any) -> int:
     return linked
 
 
+def _record_financial_period_rejection(
+    conn: Any,
+    company_id: int,
+    reason: str,
+    period_type: Any,
+    report_year: Any,
+    report_period: Any,
+    raw_payload: str,
+) -> None:
+    payload = json.loads(raw_payload)
+    payload_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO financial_period_rejections
+            (company_id, reason, period_type, report_year, report_period,
+             payload_hash, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
+        """,
+        (
+            company_id,
+            reason,
+            str(period_type) if period_type is not None else None,
+            str(report_year) if report_year is not None else None,
+            str(report_period) if report_period is not None else None,
+            payload_hash,
+            raw_payload,
+        ),
+    )
+
+
+def _financial_period_payload(row: Any) -> dict[str, Any] | None:
+    try:
+        value = row["raw_payload"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(value) if value else None
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _intrinsic_period_rejection_reason(row: Any) -> str | None:
+    raw = _financial_period_payload(row)
+    if raw is None:
+        return None
+    ends, malformed_end = report_date_aliases(raw, "period_end")
+    publications, malformed_publication = report_date_aliases(raw, "report_date")
+    years, malformed_year = report_integer_aliases(raw, "report_year")
+    periods, malformed_period = report_integer_aliases(raw, "report_period")
+    starts, malformed_start = report_date_aliases(raw, "period_start")
+    stored_ends, stored_end_malformed = report_date_aliases(
+        {"period_end": row["period_end"]}, "period_end"
+    )
+    stored_publications, stored_publication_malformed = report_date_aliases(
+        {"report_date": row["report_date"]}, "report_date"
+    )
+    stored_years, _ = report_integer_aliases({"report_year": row["report_year"]}, "report_year")
+    stored_periods, _ = report_integer_aliases(
+        {"report_period": row["report_period"]}, "report_period"
+    )
+    verified_end = (
+        next(iter(ends))
+        if not malformed_end and not stored_end_malformed and len(ends) == 1 and ends == stored_ends
+        else None
+    )
+    publication = (
+        next(iter(publications))
+        if not malformed_publication
+        and not stored_publication_malformed
+        and len(publications) == 1
+        and publications == stored_publications
+        else None
+    )
+    if row["is_placeholder"]:
+        return "placeholder"
+    if verified_end is None or publication is None:
+        return "fiscal end or publication date unverified"
+    if publication < verified_end:
+        return "publication precedes fiscal end"
+    if malformed_year or len(years) > 1 or (years and years != stored_years):
+        if row["period_type"] == "year":
+            return "annual fiscal-year metadata unverified"
+        return "fiscal-year metadata unverified"
+    if malformed_period or len(periods) > 1 or (periods and periods != stored_periods):
+        return "report period metadata unverified"
+    if malformed_start or len(starts) > 1:
+        if row["period_type"] == "year":
+            return "annual stub or duration unverified"
+        return "fiscal start metadata unverified"
+    fiscal_year = next(iter(years)) if len(years) == 1 else None
+    if fiscal_year is not None and not 1 <= fiscal_year <= 9999:
+        if row["period_type"] == "year":
+            return "annual fiscal-year metadata unverified"
+        return "fiscal-year metadata unverified"
+    if row["period_type"] != "year":
+        return None
+
+    reasons = []
+    if fiscal_year is None:
+        reasons.append("annual fiscal-year metadata unverified")
+    if starts:
+        start = next(iter(starts))
+        if not 365 <= (verified_end - start).days + 1 <= 366:
+            reasons.append("annual stub or duration unverified")
+    if not row["currency"]:
+        reasons.append("annual currency comparability unverified")
+    return "; ".join(dict.fromkeys(reasons)) or None
+
+
+def _contextual_annual_rejection_reason(conn: Any, company_id: int, target: Any) -> str | None:
+    if target["period_type"] != "year":
+        return None
+    rows = conn.execute(
+        """
+        SELECT * FROM financial_periods
+        WHERE company_id=? AND period_type='year'
+        ORDER BY period_end ASC, report_date ASC
+        """,
+        (company_id,),
+    ).fetchall()
+    annuals = [
+        row
+        for row in rows
+        if _financial_period_payload(row) is not None
+        and _intrinsic_period_rejection_reason(row) is None
+    ]
+    target_index = next(
+        (index for index, row in enumerate(annuals) if row["id"] == target["id"]),
+        None,
+    )
+    if target_index is None or not annuals:
+        return None
+
+    years = [int(row["report_year"]) for row in annuals]
+    latest_index = len(annuals) - 1
+    selected_start = latest_index
+    boundary_index = None
+    boundary_reason = None
+    for index in range(latest_index - 1, -1, -1):
+        candidate = annuals[index]
+        newer = annuals[selected_start]
+        if years[index] == years[selected_start]:
+            boundary_index = index
+            boundary_reason = "duplicate annual fiscal slot"
+            break
+        previous_end = date.fromisoformat(str(candidate["period_end"])[:10])
+        newer_end = date.fromisoformat(str(newer["period_end"])[:10])
+        same_month_end = (
+            previous_end.month == newer_end.month
+            and (previous_end + timedelta(days=1)).day == (newer_end + timedelta(days=1)).day == 1
+        )
+        if (
+            newer_end.year != previous_end.year + 1
+            or (
+                (previous_end.month, previous_end.day) != (newer_end.month, newer_end.day)
+                and not same_month_end
+            )
+            or years[selected_start] != years[index] + 1
+        ):
+            boundary_index = index
+            boundary_reason = "annual periods are not consecutive fiscal anniversaries"
+            break
+        if str(candidate["currency"]).upper() != str(newer["currency"]).upper():
+            boundary_index = index
+            boundary_reason = "annual currency comparability unverified"
+            break
+        selected_start = index
+
+    if boundary_index is None:
+        return None
+    if target_index <= boundary_index or selected_start == latest_index:
+        return boundary_reason
+    return None
+
+
 def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str, Any]]) -> int:
     count = 0
     for p in periods:
         # Use-core kpi_taxonomy to map? Keep raw mapping here minimal
-        # Determine is_placeholder: revenue 0.0 + report_Date null → placeholder
+        publications, malformed_publication = report_date_aliases(p, "report_date")
+        years, malformed_year = report_integer_aliases(p, "report_year")
+        report_periods, malformed_period = report_integer_aliases(p, "report_period")
+        report_date = (
+            next(iter(publications)).isoformat()
+            if not malformed_publication and len(publications) == 1
+            else None
+        )
+        report_year = next(iter(years)) if not malformed_year and len(years) == 1 else None
+        report_period = (
+            next(iter(report_periods))
+            if not malformed_period and len(report_periods) == 1
+            else None
+        )
         revenue = p.get("revenues")
-        report_date = p.get("report_Date") or p.get("reportDate") or p.get("ReportDate")
         is_placeholder = 1 if (revenue == 0.0 or revenue == 0) and report_date is None else 0
-        # If is_placeholder and all core financials are null/0 → quarantine
-        # Respect plan: is_placeholder=1 rows never enter ranking/valuation (WHERE is_placeholder=0)
+        # New unpublished zero-revenue stubs are retained only in rejection audit;
+        # stored legacy placeholders remain loader-excluded.
         # Also handle fx
         currency = p.get("currency")
         currency_ratio = (
@@ -160,8 +365,6 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             pass
         raw_payload = json.dumps(p, ensure_ascii=False)
         # Map fields via taxonomy where possible
-        from alphaforge.core.kpi_taxonomy import REPORT_FIELD_MAP
-
         mapped: dict[str, Any] = {}
         for k, v in p.items():
             canon = REPORT_FIELD_MAP.get(k)
@@ -169,29 +372,64 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 mapped[canon] = v
         # period_type / period_end handling — caller supplies period_type if not in payload
         period_type = p.get("period_type") or mapped.get("period_type") or "year"
-        period_end = (
-            p.get("period_End")
-            or p.get("report_End_Date")
-            or p.get("period_end")
-            or p.get("periodEnd")
-            or p.get("report_Date")
-            or p.get("reportDate")
-            or p.get("date")
-        )
-        # Fallback: use report_year/period to synthesize period_end if missing → skip
-        if not period_end:
-            # Try to derive from year/period for quarantine check
-            if is_placeholder:
-                # For placeholder rows, use a synthetic period_end to allow quarantine visibility
-                # Use report year or current placeholder key
-                ry = p.get("year") or p.get("report_year") or 0
-                rp = p.get("period") or p.get("report_period") or 0
-                period_end = f"{ry:04d}-{rp:02d}-01" if ry else None
-            if not period_end:
-                continue
-        # Normalize to YYYY-MM-DD
-        if isinstance(period_end, str) and len(period_end) > 10:
-            period_end = period_end[:10]
+        period_ends, malformed_period_end = report_date_aliases(p, "period_end")
+        if malformed_period_end or len(period_ends) != 1:
+            _record_financial_period_rejection(
+                conn,
+                company_id,
+                "fiscal end unavailable or invalid",
+                period_type,
+                report_year,
+                report_period,
+                raw_payload,
+            )
+            continue
+        period_end = next(iter(period_ends)).isoformat()
+        incoming = {
+            "raw_payload": raw_payload,
+            "period_type": period_type,
+            "period_end": period_end,
+            "report_year": report_year,
+            "report_period": report_period,
+            "report_date": report_date,
+            "is_placeholder": is_placeholder,
+            "currency": currency,
+        }
+        reason = _intrinsic_period_rejection_reason(incoming)
+        if reason:
+            _record_financial_period_rejection(
+                conn,
+                company_id,
+                reason,
+                period_type,
+                report_year,
+                report_period,
+                raw_payload,
+            )
+            continue
+        existing = conn.execute(
+            """
+            SELECT * FROM financial_periods
+            WHERE company_id=? AND period_type=? AND period_end=?
+            """,
+            (company_id, period_type, period_end),
+        ).fetchone()
+        existing_payload = _financial_period_payload(existing) if existing is not None else None
+        if existing_payload is not None and existing_payload != p:
+            reason = _intrinsic_period_rejection_reason(existing)
+            if reason is None:
+                reason = _contextual_annual_rejection_reason(conn, company_id, existing)
+            if reason:
+                _record_financial_period_rejection(
+                    conn,
+                    company_id,
+                    reason,
+                    existing["period_type"],
+                    existing["report_year"],
+                    existing["report_period"],
+                    existing["raw_payload"],
+                )
+
         # Use mapped for other financials — REPORT_FIELD_MAP now covers live keys
         # (total_Equity, net_Debt, cash_Flow_From_Operating_Activities …) so that
         # ROE, D/E and cash conversion are not silently dropped.
@@ -234,10 +472,10 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
                 company_id,
                 period_type,
                 period_end,
-                p.get("year") or p.get("report_year"),
-                p.get("period") or p.get("report_period"),
+                report_year,
+                report_period,
                 report_date,
-                p.get("broken_Fiscal_Year") or p.get("broken_fiscal_year"),
+                p.get("broken_Fiscal_Year", p.get("broken_fiscal_year")),
                 currency,
                 currency_ratio,
                 fx_rate_to_sek,
@@ -269,6 +507,49 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
     return count
 
 
+def _record_market_input_rejection(
+    conn: Any,
+    company_id: int,
+    input_type: str,
+    reason: str,
+    raw: dict[str, Any],
+    *,
+    kpi_id: int | None = None,
+    period_type: str | None = None,
+    price_type: str | None = None,
+) -> None:
+    raw_payload = json.dumps(raw, ensure_ascii=False)
+    identity = {
+        "input_type": input_type,
+        "kpi_id": kpi_id,
+        "period_type": period_type,
+        "price_type": price_type,
+        "payload": raw,
+    }
+    payload_hash = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO market_input_rejections
+            (company_id, input_type, reason, kpi_id, period_type, price_type,
+             payload_hash, raw_payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company_id, payload_hash, reason) DO NOTHING
+        """,
+        (
+            company_id,
+            input_type,
+            reason,
+            kpi_id,
+            period_type,
+            price_type,
+            payload_hash,
+            raw_payload,
+        ),
+    )
+
+
 def upsert_prices(
     conn: Any,
     company_id: int,
@@ -278,7 +559,8 @@ def upsert_prices(
 ) -> int:
     count = 0
     for r in rows:
-        price_date = r.get("price_Date") or r.get("price_date") or r.get("d") or r.get("date")
+        raw_payload = json.dumps(r, ensure_ascii=False)
+        parsed_price_date, date_issue = aliased_iso_date(r, PRICE_DATE_ALIASES)
         close = next(
             (r.get(key) for key in ("close", "c", "price") if r.get(key) is not None),
             None,
@@ -287,24 +569,43 @@ def upsert_prices(
             (r.get(key) for key in ("volume", "vol", "v") if r.get(key) is not None),
             None,
         )
-        if price_date is None or close is None:
+        reason = f"stock price date {date_issue}" if date_issue else None
+        try:
+            close_value = float(close) if close is not None else None
+        except (TypeError, ValueError):
+            close_value = None
+        if reason is None and (
+            close_value is None or not isfinite(close_value) or close_value <= 0
+        ):
+            reason = "stock price value unavailable or invalid"
+        try:
+            volume_value = int(volume) if volume is not None else None
+        except (TypeError, ValueError):
+            volume_value = None
+            if reason is None:
+                reason = "stock price volume invalid"
+        if reason is None and volume_value is not None and volume_value < 0:
+            reason = "stock price volume invalid"
+        if reason:
+            _record_market_input_rejection(conn, company_id, "price", reason, r)
             continue
-        if isinstance(price_date, str) and len(price_date) > 10:
-            price_date = price_date[:10]
+        price_date = parsed_price_date.isoformat()
         cur_currency = r.get("currency") or currency
         conn.execute(
             """
-            INSERT INTO prices (company_id, price_date, close, volume, currency)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO prices (company_id, price_date, close, volume, currency, raw_payload)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_id, price_date) DO UPDATE SET
-                close=excluded.close, volume=excluded.volume, currency=excluded.currency
+                close=excluded.close, volume=excluded.volume, currency=excluded.currency,
+                raw_payload=excluded.raw_payload
             """,
             (
                 company_id,
                 price_date,
-                float(close),
-                int(volume) if volume is not None else None,
+                close_value,
+                volume_value,
                 cur_currency,
+                raw_payload,
             ),
         )
         count += 1
@@ -419,43 +720,80 @@ def upsert_kpi_observations(
 ) -> int:
     count = 0
     for r in rows:
-        val = r.get("v") if "v" in r else r.get("value")
-        if val is None:
-            continue
+        raw_payload = json.dumps(r, ensure_ascii=False)
+        val = next(
+            (r.get(key) for key in ("v", "value") if r.get(key) is not None),
+            None,
+        )
         try:
-            val_f = float(val)
+            val_f = float(val) if val is not None else None
         except (TypeError, ValueError):
+            val_f = None
+        reason = None
+        if val_f is None or not isfinite(val_f):
+            reason = "KPI value unavailable or invalid"
+
+        parsed_observation_date, date_issue = aliased_iso_date(r, KPI_DATE_ALIASES)
+        if reason is None and date_issue:
+            reason = f"KPI observation date {date_issue}"
+
+        year_int = None
+        report_period_int = None
+        if period_type != "last":
+            years, malformed_year = integer_aliases(r, KPI_YEAR_ALIASES)
+            report_periods, malformed_period = integer_aliases(r, KPI_REPORT_PERIOD_ALIASES)
+            if malformed_year or len(years) > 1:
+                if reason is None:
+                    reason = "KPI fiscal-year metadata invalid"
+            elif not years:
+                if reason is None:
+                    reason = "KPI fiscal-year metadata unavailable"
+            else:
+                year_int = next(iter(years))
+            if malformed_period or len(report_periods) > 1:
+                if reason is None:
+                    reason = "KPI report-period metadata invalid"
+            elif report_periods:
+                report_period_int = next(iter(report_periods))
+
+        if reason:
+            _record_market_input_rejection(
+                conn,
+                company_id,
+                "kpi",
+                reason,
+                r,
+                kpi_id=kpi_id,
+                period_type=period_type,
+                price_type=price_type,
+            )
+            if val is not None:
+                count += 1
             continue
-        # v null-filtered client-side
-        if r.get("v") is None and "v" in r:
-            # keep null-filtered?
-            pass
-        year = r.get("year") if "year" in r else r.get("y")
-        report_period = r.get("reportPeriod") or r.get("report_period") or r.get("p")
-        observation_date = r.get("observationDate") or r.get("observation_date") or r.get("date")
+
+        observation_date = parsed_observation_date.isoformat()
         if period_type == "last":
-            if not observation_date:
-                observation_date = r.get("date") or r.get("observation_date")
-            if not observation_date:
-                continue
-            if isinstance(observation_date, str) and len(observation_date) > 10:
-                observation_date = observation_date[:10]
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, observation_date, value)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations
+                    (company_id, kpi_id, period_type, price_type, observation_date,
+                     value, raw_payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, observation_date)
-                WHERE period_type='last' DO UPDATE SET value=excluded.value
+                WHERE period_type='last' DO UPDATE SET
+                    value=excluded.value, raw_payload=excluded.raw_payload
                 """,
-                (company_id, kpi_id, period_type, price_type, observation_date, val_f),
+                (
+                    company_id,
+                    kpi_id,
+                    period_type,
+                    price_type,
+                    observation_date,
+                    val_f,
+                    raw_payload,
+                ),
             )
         else:
-            if year is None:
-                continue
-            year_int = int(year)
-            report_period_int = int(report_period) if report_period is not None else None
-            if isinstance(observation_date, str) and len(observation_date) > 10:
-                observation_date = observation_date[:10]
             if report_period_int is None:
                 existing = conn.execute(
                     """
@@ -468,17 +806,22 @@ def upsert_kpi_observations(
                 ).fetchone()
                 if existing:
                     conn.execute(
-                        "UPDATE kpi_observations SET value=?, observation_date=COALESCE(?, observation_date) WHERE id=?",
-                        (val_f, observation_date, int(existing[0])),
+                        """UPDATE kpi_observations
+                           SET value=?, observation_date=?, raw_payload=? WHERE id=?""",
+                        (val_f, observation_date, raw_payload, int(existing[0])),
                     )
                     count += 1
                     continue
             conn.execute(
                 """
-                INSERT INTO kpi_observations (company_id, kpi_id, period_type, price_type, year, report_period, observation_date, value)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO kpi_observations
+                    (company_id, kpi_id, period_type, price_type, year,
+                     report_period, observation_date, value, raw_payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(company_id, kpi_id, period_type, price_type, year, report_period)
-                WHERE period_type IN ('year','r12') DO UPDATE SET value=excluded.value, observation_date=COALESCE(excluded.observation_date, kpi_observations.observation_date)
+                WHERE period_type IN ('year','r12') DO UPDATE SET
+                    value=excluded.value, observation_date=excluded.observation_date,
+                    raw_payload=excluded.raw_payload
                 """,
                 (
                     company_id,
@@ -489,6 +832,7 @@ def upsert_kpi_observations(
                     report_period_int,
                     observation_date,
                     val_f,
+                    raw_payload,
                 ),
             )
         count += 1

@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 from alphaforge.core.financial.calculator import FinancialCalculator
 from alphaforge.core.financial.mapper import FinancialMapper
 from alphaforge.core.financial.per_share import adjust_historical_shares
+from alphaforge.core.kpi_taxonomy import (
+    KPI_DATE_ALIASES,
+    KPI_REPORT_PERIOD_ALIASES,
+    KPI_YEAR_ALIASES,
+    PRICE_DATE_ALIASES,
+    aliased_iso_date,
+    integer_aliases,
+    parse_iso_date,
+    report_date_aliases,
+    report_integer_aliases,
+)
+from alphaforge.core.ranking.sector_rules import ranking_model_for_branch
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.dividend_yield import (
@@ -19,6 +31,495 @@ from alphaforge.core.valuation.dividend_yield import (
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
+
+SELECTION_VERSION = "verified-dates-consecutive-annual-v2"
+MAX_PRICE_AGE_DAYS = 7
+
+
+def _date(value: Any) -> date | None:
+    return parse_iso_date(value)
+
+
+def _payload(row) -> dict:
+    value = row["raw_payload"]
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value) if value else None
+    except (ValueError, TypeError):
+        parsed = None
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _verified_fiscal_end(row) -> date | None:
+    ends, malformed = report_date_aliases(_payload(row), "period_end")
+    stored = _date(row["period_end"])
+    return stored if not malformed and stored is not None and ends == {stored} else None
+
+
+def _fiscal_year(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        year = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        year = int(value.strip())
+    else:
+        return None
+    return year if 1 <= year <= 9999 else None
+
+
+def _verified_publication(row) -> date | None:
+    publications, malformed = report_date_aliases(_payload(row), "report_date")
+    stored = _date(row["report_date"])
+    return stored if not malformed and stored is not None and publications == {stored} else None
+
+
+def _verified_fiscal_year(row) -> int | None:
+    years, malformed = report_integer_aliases(_payload(row), "report_year")
+    stored = _fiscal_year(row["report_year"])
+    return stored if not malformed and stored is not None and years == {stored} else None
+
+
+def _verified_report_period(row) -> int | None:
+    periods, malformed = report_integer_aliases(_payload(row), "report_period")
+    stored_values, stored_malformed = report_integer_aliases(
+        {"report_period": row["report_period"]}, "report_period"
+    )
+    if malformed or stored_malformed or len(stored_values) != 1 or periods != stored_values:
+        return None
+    return next(iter(stored_values))
+
+
+def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
+    annuals = [row for row in rows if row["period_type"] == "year"]
+    if not annuals:
+        return [], ["annual history unavailable"], []
+
+    metadata = []
+    for row in annuals:
+        year = _verified_fiscal_year(row)
+        end = _verified_fiscal_end(row)
+        currency = str(row["currency"]).upper() if row["currency"] else None
+        issues = []
+        if year is None:
+            issues.append("annual fiscal-year metadata unverified")
+        if end is None:
+            issues.append("annual fiscal end unverified")
+        starts, malformed_start = report_date_aliases(_payload(row), "period_start")
+        if malformed_start or len(starts) > 1:
+            issues.append("annual stub or duration unverified")
+        elif starts:
+            start = next(iter(starts))
+            if end is None or not 365 <= (end - start).days + 1 <= 366:
+                issues.append("annual stub or duration unverified")
+        if currency is None:
+            issues.append("annual currency comparability unverified")
+        metadata.append((row, year, end, currency, issues))
+
+    def excluded(items, boundary_reason: str) -> list[dict]:
+        values = []
+        for row, _, _, _, issues in items:
+            values.append(
+                {
+                    "id": row["id"],
+                    "period_end": row["period_end"],
+                    "report_year": row["report_year"],
+                    "report_period": row["report_period"],
+                    "raw_payload": _payload(row),
+                    "reason": "; ".join(issues) if issues else boundary_reason,
+                }
+            )
+        return values
+
+    latest = metadata[-1]
+    latest_reasons = list(latest[4])
+    if latest_reasons:
+        reasons = sorted(set(latest_reasons))
+        return [], reasons, excluded(metadata, "; ".join(reasons))
+
+    selected = [latest]
+    boundary_index = -1
+    boundary_reason = ""
+    for index in range(len(metadata) - 2, -1, -1):
+        candidate = metadata[index]
+        newer = selected[0]
+        if candidate[4]:
+            boundary_index = index
+            boundary_reason = "; ".join(candidate[4])
+            break
+        previous, end = candidate[2], newer[2]
+        if candidate[1] == newer[1]:
+            boundary_index = index
+            boundary_reason = "duplicate annual fiscal slot"
+            break
+        same_month_end = (
+            previous.month == end.month
+            and (previous + timedelta(days=1)).day == (end + timedelta(days=1)).day == 1
+        )
+        if (
+            end.year != previous.year + 1
+            or ((previous.month, previous.day) != (end.month, end.day) and not same_month_end)
+            or newer[1] != candidate[1] + 1
+        ):
+            boundary_index = index
+            boundary_reason = "annual periods are not consecutive fiscal anniversaries"
+            break
+        if candidate[3] != newer[3]:
+            boundary_index = index
+            boundary_reason = "annual currency comparability unverified"
+            break
+        selected.insert(0, candidate)
+
+    omitted = (
+        excluded(metadata[: boundary_index + 1], boundary_reason) if boundary_index >= 0 else []
+    )
+    reasons = []
+    if len(selected) < 2:
+        reasons = [boundary_reason or "fewer than two consecutive annual periods"]
+    return [item[0] for item in selected], reasons, omitted
+
+
+def _date_facts(payload: dict[str, Any], aliases: tuple[str, ...]) -> dict[str, Any]:
+    return {key: payload[key] for key in aliases if key in payload and payload[key] is not None}
+
+
+def _raw_value(payload: dict[str, Any], aliases: tuple[str, ...]) -> Any:
+    return next(
+        (payload[key] for key in aliases if key in payload and payload[key] is not None),
+        None,
+    )
+
+
+def _select_kpis(conn, company_id: int, cutoff: date) -> tuple[dict[int, float], list[dict]]:
+    kpi_r12: dict[int, float] = {}
+    kpi_annual: dict[int, float] = {}
+    selected_rows = {}
+    rejected = []
+    rows = conn.execute(
+        """
+        SELECT id, kpi_id, value, period_type, observation_date, year,
+               price_type, report_period, raw_payload
+        FROM kpi_observations WHERE company_id=? AND value IS NOT NULL
+        ORDER BY observation_date ASC, year ASC, report_period ASC, price_type ASC
+        """,
+        (company_id,),
+    ).fetchall()
+    for row in rows:
+        raw = _payload(row)
+        stored_observed = _date(row["observation_date"])
+        if raw:
+            observed, date_issue = aliased_iso_date(raw, KPI_DATE_ALIASES)
+            if date_issue or observed != stored_observed:
+                observed = None
+        else:
+            observed = None
+        fiscal_year = _fiscal_year(row["year"])
+        invalid_slot = False
+        slot_reason = None
+        if row["period_type"] != "last" and raw:
+            raw_years, malformed_year = integer_aliases(raw, KPI_YEAR_ALIASES)
+            stored_years, malformed_stored_year = integer_aliases(
+                {"year": row["year"]}, KPI_YEAR_ALIASES
+            )
+            raw_periods, malformed_period = integer_aliases(raw, KPI_REPORT_PERIOD_ALIASES)
+            stored_periods, malformed_stored_period = integer_aliases(
+                {"report_period": row["report_period"]}, KPI_REPORT_PERIOD_ALIASES
+            )
+            if (
+                malformed_year
+                or malformed_stored_year
+                or len(raw_years) != 1
+                or raw_years != stored_years
+            ):
+                invalid_slot = True
+                slot_reason = "KPI fiscal-year metadata unverified"
+            elif (
+                malformed_period
+                or malformed_stored_period
+                or len(raw_periods) > 1
+                or raw_periods != stored_periods
+            ):
+                invalid_slot = True
+                slot_reason = "KPI report-period metadata unverified"
+        reason = None
+        if observed is not None and observed > cutoff:
+            reason = "KPI after cutoff"
+        elif observed is None:
+            reason = (
+                "KPI observation date unverified"
+                if raw
+                else "legacy KPI observation date provenance unverified"
+            )
+        elif slot_reason is not None:
+            reason = slot_reason
+        elif fiscal_year is None:
+            reason = "KPI fiscal-year metadata unavailable"
+        elif fiscal_year > cutoff.year:
+            reason = "KPI after cutoff"
+        if reason:
+            rejected.append(
+                {
+                    "id": row["id"],
+                    "source": "kpi_observations",
+                    "kpi_id": row["kpi_id"],
+                    "period_type": row["period_type"],
+                    "price_type": row["price_type"],
+                    "year": row["year"],
+                    "report_period": row["report_period"],
+                    "observation_date": row["observation_date"],
+                    "value": row["value"],
+                    "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
+                    "raw_payload": raw,
+                    "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
+                    "invalid_slot": invalid_slot,
+                    "reason": reason,
+                }
+            )
+            continue
+        target = kpi_r12 if row["period_type"] == "r12" else kpi_annual
+        kpi_id = int(row["kpi_id"])
+        target[kpi_id] = float(row["value"])
+        selected_rows[(kpi_id, row["period_type"], row["price_type"])] = row
+
+    for row in conn.execute(
+        """
+        SELECT id, reason, kpi_id, period_type, price_type, payload_hash,
+               raw_payload, rejected_at
+        FROM market_input_rejections
+        WHERE company_id=? AND input_type='kpi' ORDER BY id ASC
+        """,
+        (company_id,),
+    ).fetchall():
+        raw = _payload(row)
+        years, malformed_year = integer_aliases(raw, KPI_YEAR_ALIASES)
+        report_periods, malformed_period = integer_aliases(raw, KPI_REPORT_PERIOD_ALIASES)
+        year = next(iter(years)) if not malformed_year and len(years) == 1 else None
+        report_period = (
+            next(iter(report_periods))
+            if not malformed_period and len(report_periods) == 1
+            else None
+        )
+        observed, _ = aliased_iso_date(raw, KPI_DATE_ALIASES)
+        rejected.append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "kpi_id": row["kpi_id"],
+                "period_type": row["period_type"],
+                "price_type": row["price_type"],
+                "year": year,
+                "report_period": report_period,
+                "observation_date": observed.isoformat() if observed is not None else None,
+                "value": _raw_value(raw, ("v", "value")),
+                "date_facts": _date_facts(raw, KPI_DATE_ALIASES),
+                "raw_payload": raw,
+                "payload_hash": row["payload_hash"],
+                "rejected_at": row["rejected_at"],
+                "invalid_slot": (
+                    malformed_year or malformed_period or len(years) > 1 or len(report_periods) > 1
+                ),
+                "reason": row["reason"],
+            }
+        )
+
+    selected_r12 = set(kpi_r12)
+    for item in rejected:
+        rejected_year = _fiscal_year(item["year"])
+        rejected_period = item["report_period"]
+        rejected_date = _date(item["observation_date"])
+        invalid_slot = bool(item.get("invalid_slot"))
+        current = not (
+            (rejected_date is not None and rejected_date > cutoff)
+            or (not invalid_slot and rejected_year is not None and rejected_year > cutoff.year)
+            or item["reason"] == "KPI after cutoff"
+        )
+        if (
+            current
+            and not invalid_slot
+            and item["period_type"] != "r12"
+            and item["kpi_id"] in selected_r12
+        ):
+            current = False
+        selected = selected_rows.get((int(item["kpi_id"]), item["period_type"], item["price_type"]))
+        selected_year = _fiscal_year(selected["year"]) if selected is not None else None
+        selected_period = selected["report_period"] if selected is not None else None
+        if current and item["period_type"] == "last":
+            selected_date = _date(selected["observation_date"]) if selected is not None else None
+            if rejected_date is not None and selected_date is not None:
+                current = rejected_date > selected_date
+        elif current and not item.get("invalid_slot") and rejected_year is not None:
+            if selected_year is not None and selected_year > rejected_year:
+                current = False
+            elif selected_year == rejected_year:
+                if selected_period == rejected_period:
+                    current = False
+                elif selected_period is not None and rejected_period is not None:
+                    current = int(selected_period) < int(rejected_period)
+        item.pop("invalid_slot", None)
+        item["current_refusal"] = current
+    return ({**kpi_annual, **kpi_r12}, rejected)
+
+
+def _selection_refusal_reasons(selection: dict[str, Any]) -> list[str]:
+    annual_history = selection.get("annual_history", {})
+    reasons = list(annual_history.get("reasons", []))
+    reasons.extend(selection.get("price", {}).get("reasons", []))
+    reasons.extend(
+        f"price {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
+        for item in selection.get("rejected_prices", [])
+        if item.get("reason") and item.get("current_refusal", True)
+    )
+    reasons.extend(
+        f"report {item.get('id', item.get('payload_hash', 'unknown'))}: {item['reason']}"
+        for item in selection.get("rejected_reports", [])
+        if item.get("reason") and item.get("current_refusal", True)
+    )
+    reasons.extend(
+        f"historical price for {item.get('period_end', 'unknown')}: {item['reason']}"
+        for item in selection.get("historical_price_pairings", [])
+        if item.get("reason")
+    )
+    reasons.extend(
+        f"KPI {item.get('kpi_id', 'unknown')}: {item['reason']}"
+        for item in selection.get("rejected_kpis", [])
+        if item.get("reason") and item.get("current_refusal", True)
+    )
+    return list(dict.fromkeys(reasons))
+
+
+def _rejection_is_current(
+    item: dict[str, Any],
+    cutoff: date,
+    admitted_rows: list,
+    annual_history_start,
+) -> bool:
+    if item.get("reason") == "after cutoff":
+        return False
+
+    raw = item.get("raw_payload") or {}
+    years, malformed_year = report_integer_aliases(raw, "report_year")
+    ends, malformed_end = report_date_aliases(raw, "period_end")
+    periods, malformed_period = report_integer_aliases(raw, "report_period")
+    publications, malformed_publication = report_date_aliases(raw, "report_date")
+    starts, malformed_start = report_date_aliases(raw, "period_start")
+    invalid_identity = (
+        malformed_year
+        or malformed_end
+        or malformed_period
+        or malformed_publication
+        or malformed_start
+        or len(years) > 1
+        or len(ends) > 1
+        or len(periods) > 1
+        or len(publications) > 1
+        or len(starts) > 1
+        or any(_fiscal_year(value) is None for value in years)
+    )
+
+    future_checks = []
+    if ends:
+        future_checks.append(all(value > cutoff for value in ends))
+    if publications:
+        future_checks.append(all(value > cutoff for value in publications))
+    if invalid_identity:
+        return True
+    if any(future_checks):
+        return False
+
+    is_annual = item.get("period_type") == "year"
+    has_slot_identity = bool(ends or years) if is_annual else bool(ends or (years and periods))
+    same_type_rows = [row for row in admitted_rows if row["period_type"] == item.get("period_type")]
+    if ends:
+        matching_rows = [row for row in same_type_rows if ends == {_verified_fiscal_end(row)}]
+    elif is_annual and years:
+        matching_rows = [row for row in same_type_rows if years == {_verified_fiscal_year(row)}]
+    elif years and periods:
+        matching_rows = [
+            row
+            for row in same_type_rows
+            if years == {_verified_fiscal_year(row)} and periods == {_verified_report_period(row)}
+        ]
+    else:
+        matching_rows = []
+    superseded = has_slot_identity and len(matching_rows) == 1
+    if superseded:
+        return False
+    if not is_annual:
+        if not same_type_rows:
+            return True
+        latest_same_type = max(
+            same_type_rows, key=lambda row: _verified_fiscal_end(row) or date.min
+        )
+        latest_end = _verified_fiscal_end(latest_same_type)
+        latest_year = _verified_fiscal_year(latest_same_type)
+        latest_period = _verified_report_period(latest_same_type)
+        older_checks = []
+        if ends and latest_end is not None:
+            older_checks.append(all(value < latest_end for value in ends))
+        if years and latest_year is not None:
+            if all(value < latest_year for value in years):
+                older_checks.append(True)
+            elif years == {latest_year} and periods and latest_period is not None:
+                older_checks.append(all(value < latest_period for value in periods))
+            else:
+                older_checks.append(False)
+        return not (older_checks and all(older_checks))
+
+    if annual_history_start is None:
+        return True
+    # An unresolved slot inside the entire selected growth span is not historical audit only.
+    anchor_year = _verified_fiscal_year(annual_history_start)
+    anchor_end = _verified_fiscal_end(annual_history_start)
+    comparisons = []
+    if years and anchor_year is not None:
+        comparisons.append(any(year >= anchor_year for year in years))
+    if ends and anchor_end is not None:
+        comparisons.append(any(end >= anchor_end for end in ends))
+    return any(comparisons) if comparisons else True
+
+
+def _price_rejection_is_current(item: dict[str, Any], cutoff: date, admitted_rows: list) -> bool:
+    raw = item.get("raw_payload") or {}
+    if raw:
+        values = [raw[key] for key in PRICE_DATE_ALIASES if key in raw and raw[key] is not None]
+        rejected_dates = [_date(value) for value in values]
+        if not values or any(value is None for value in rejected_dates):
+            return True
+    else:
+        rejected_dates = [_date(item.get("price_date"))]
+        if rejected_dates[0] is None:
+            return True
+
+    known_dates = [value for value in rejected_dates if value is not None]
+    if all(value > cutoff for value in known_dates):
+        return False
+    if any(value > cutoff for value in known_dates):
+        return True
+    admitted_dates = {_date(row["price_date"]) for row in admitted_rows}
+    latest_date = max((value for value in admitted_dates if value is not None), default=None)
+    if latest_date is None:
+        return True
+    if all(value < latest_date for value in known_dates):
+        return False
+    return len(set(known_dates)) != 1 or known_dates[0] not in admitted_dates
+
+
+def _price_evidence(row) -> dict[str, Any]:
+    if row is None:
+        return {
+            "value": None,
+            "date_facts": {},
+            "raw_payload": None,
+            "provenance": None,
+        }
+    raw = _payload(row)
+    return {
+        "value": row["close"],
+        "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+        "raw_payload": raw,
+        "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
+    }
 
 
 def _number(value: Any) -> float | None:
@@ -40,20 +541,6 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         investing_value = _number(row["investing_cash_flow"])
     except (KeyError, IndexError, TypeError):
         investing_value = None
-    try:
-        raw_value = row["raw_payload"]
-    except (KeyError, IndexError, TypeError):
-        raw_value = None
-    raw_payload: dict | None = None
-    if isinstance(raw_value, dict):
-        raw_payload = raw_value
-    elif isinstance(raw_value, str) and raw_value:
-        try:
-            parsed = json.loads(raw_value)
-        except (ValueError, TypeError):
-            parsed = None
-        if isinstance(parsed, dict):
-            raw_payload = parsed
     return Report(
         revenue=_number(row["revenue"]),
         operating_profit=_number(row["operating_profit"]),
@@ -71,19 +558,25 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         gross_income=_number(row["gross_income"]),
         operating_cash_flow=_number(row["operating_cash_flow"]),
         investing_cash_flow=investing_value,
-        raw_payload=raw_payload,
+        raw_payload=_payload(row) or None,
         cash=_number(row["cash"]),
         eps=_number(row["eps"]),
         dividend_per_share=_number(row["dividend_per_share"]),
-        year=row["report_year"],
-        period=row["report_period"],
+        year=_verified_fiscal_year(row),
+        period=_verified_report_period(row),
+        period_end=_verified_fiscal_end(row),
+        report_date=_verified_publication(row),
+        broken_fiscal_year=row["broken_fiscal_year"],
         currency=row["currency"],
     )
 
 
 def _price(row, fallback_currency: str | None) -> StockPrice:
+    price_date = _date(row["price_date"])
+    if price_date is None:
+        raise ValueError("stock price date unverified")
     return StockPrice(
-        date=date.fromisoformat(str(row["price_date"])[:10]),
+        date=price_date,
         close=float(row["close"]),
         volume=int(row["volume"]) if row["volume"] is not None else None,
         currency=row["currency"] or fallback_currency,
@@ -91,7 +584,7 @@ def _price(row, fallback_currency: str | None) -> StockPrice:
 
 
 def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any]:
-    """Load all ranking inputs visible at *as_of* (never current live rows)."""
+    """Select cutoff-filtered stored observations, not historical vintages."""
     cutoff = date.fromisoformat(as_of[:10])
     evidence_packet, selection_manifest = load_evidence_view(
         conn, company_id=company_id, as_of=as_of[:10]
@@ -107,36 +600,230 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         if row.get("published_at") and str(row["published_at"])[:10] <= as_of[:10]
     ]
     company = conn.execute(
-        "SELECT stock_price_currency, report_currency FROM companies WHERE id=?", (company_id,)
+        "SELECT stock_price_currency, report_currency, branch_id FROM companies WHERE id=?",
+        (company_id,),
     ).fetchone()
     stock_currency = company[0] if company else None
+    branch_id = int(company[2]) if company and company[2] is not None else None
+    research_evidence = {
+        "documents": docs,
+        "evidence_packet": evidence_packet,
+        "evidence_manifest": selection_manifest.to_dict(),
+        "evidence_lane": bool(evidence_packet),
+    }
+    rejected_reports = []
+    for row in conn.execute(
+        """
+        SELECT id, reason, period_type, report_year, report_period,
+               payload_hash, raw_payload, rejected_at
+        FROM financial_period_rejections
+        WHERE company_id=? ORDER BY id ASC
+        """,
+        (company_id,),
+    ).fetchall():
+        rejected_reports.append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "reason": row["reason"],
+                "period_type": row["period_type"],
+                "report_year": row["report_year"],
+                "report_period": row["report_period"],
+                "payload_hash": row["payload_hash"],
+                "raw_payload": _payload(row),
+                "rejected_at": row["rejected_at"],
+            }
+        )
+    kpis, rejected_kpis = _select_kpis(conn, company_id, cutoff)
+    selection: dict[str, Any] = {
+        "version": SELECTION_VERSION,
+        "max_price_age_calendar_days": MAX_PRICE_AGE_DAYS,
+        "rejected_reports": rejected_reports,
+        "historical_price_pairings": [],
+        "rejected_kpis": rejected_kpis,
+        "rejected_prices": [],
+    }
 
-    period_rows = conn.execute(
+    stored_period_rows = conn.execute(
         """
         SELECT * FROM financial_periods
-        WHERE company_id=? AND is_placeholder=0
-          AND substr(period_end, 1, 10) <= ?
-          AND report_date IS NOT NULL AND substr(report_date, 1, 10) <= ?
-        ORDER BY period_end ASC, report_date ASC
+        WHERE company_id=?
+        ORDER BY period_end ASC, report_date ASC,
+                 CASE period_type WHEN 'quarter' THEN 0 WHEN 'year' THEN 1 ELSE 2 END ASC
         """,
-        (company_id, cutoff.isoformat(), cutoff.isoformat()),
+        (company_id,),
     ).fetchall()
-    price_rows = conn.execute(
+    period_rows = []
+    for row in stored_period_rows:
+        raw = _payload(row)
+        end = _verified_fiscal_end(row)
+        publication = _verified_publication(row)
+        years, malformed_year = report_integer_aliases(raw, "report_year")
+        report_periods, malformed_period = report_integer_aliases(raw, "report_period")
+        starts, malformed_start = report_date_aliases(raw, "period_start")
+        fiscal_year = _verified_fiscal_year(row)
+        report_period = _verified_report_period(row)
+        reason = None
+        if row["is_placeholder"]:
+            reason = "placeholder"
+        elif end is None or publication is None:
+            reason = "fiscal end or publication date unverified"
+        elif malformed_year or len(years) > 1 or (years and fiscal_year is None):
+            reason = "fiscal-year metadata unverified"
+        elif (
+            malformed_period
+            or len(report_periods) > 1
+            or (report_periods and report_period is None)
+        ):
+            reason = "report period metadata unverified"
+        elif malformed_start or len(starts) > 1:
+            reason = "fiscal start metadata unverified"
+        elif end > cutoff or publication > cutoff:
+            reason = "after cutoff"
+        elif publication < end:
+            reason = "publication precedes fiscal end"
+        if reason:
+            selection["rejected_reports"].append(
+                {
+                    "id": row["id"],
+                    "source": "financial_periods",
+                    "period_type": row["period_type"],
+                    "period_end": row["period_end"],
+                    "report_year": row["report_year"],
+                    "report_period": row["report_period"],
+                    "report_date": row["report_date"],
+                    "raw_payload": _payload(row),
+                    "reason": reason,
+                }
+            )
+        else:
+            period_rows.append(row)
+    annual_period_rows, annual_reasons, excluded_annuals = _annual_series(period_rows)
+    admitted_annuals = [row for row in period_rows if row["period_type"] == "year"]
+    annual_history_start = (
+        annual_period_rows[0]
+        if annual_period_rows
+        else (admitted_annuals[-1] if admitted_annuals else None)
+    )
+    for item in selection["rejected_reports"]:
+        item["current_refusal"] = _rejection_is_current(
+            item, cutoff, period_rows, annual_history_start
+        )
+    blocking_rejections = [
+        item
+        for item in selection["rejected_reports"]
+        if item.get("period_type") == "year" and item["current_refusal"]
+    ]
+    if annual_period_rows and blocking_rejections:
+        annual_period_rows = []
+        annual_reasons = [
+            "unresolved applicable annual rejection: "
+            + "; ".join(sorted({item["reason"] for item in blocking_rejections}))
+        ]
+    selection["annual_history"] = {
+        "period_ends": [row["period_end"] for row in annual_period_rows],
+        "reasons": annual_reasons,
+        "excluded": excluded_annuals,
+    }
+    stored_price_rows = conn.execute(
+        "SELECT * FROM prices WHERE company_id=? ORDER BY price_date ASC",
+        (company_id,),
+    ).fetchall()
+    price_rows = []
+    for row in stored_price_rows:
+        raw = _payload(row)
+        stored_date = _date(row["price_date"])
+        if raw:
+            verified_date, date_issue = aliased_iso_date(raw, PRICE_DATE_ALIASES)
+            if date_issue or verified_date != stored_date:
+                verified_date = None
+        else:
+            verified_date = None
+        if verified_date is None or verified_date > cutoff:
+            selection["rejected_prices"].append(
+                {
+                    "id": f"price:{row['price_date']}",
+                    "source": "prices",
+                    "price_date": row["price_date"],
+                    "value": row["close"],
+                    "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+                    "raw_payload": raw,
+                    "provenance": "verified_raw_payload" if raw else "legacy_missing_raw_payload",
+                    "reason": (
+                        "stock price after cutoff"
+                        if verified_date is not None and verified_date > cutoff
+                        else (
+                            "stock price date unverified"
+                            if raw
+                            else "legacy stock price date provenance unverified"
+                        )
+                    ),
+                }
+            )
+        else:
+            price_rows.append(row)
+    for row in conn.execute(
         """
-        SELECT * FROM prices
-        WHERE company_id=? AND substr(price_date, 1, 10) <= ?
-        ORDER BY price_date ASC
+        SELECT id, reason, payload_hash, raw_payload, rejected_at
+        FROM market_input_rejections
+        WHERE company_id=? AND input_type='price' ORDER BY id ASC
         """,
-        (company_id, cutoff.isoformat()),
-    ).fetchall()
-    if not period_rows or not price_rows:
-        _missing = []
-        if not period_rows:
-            _missing.append("financial_period")
-        if not price_rows:
-            _missing.append("price")
+        (company_id,),
+    ).fetchall():
+        raw = _payload(row)
+        rejected_date, _ = aliased_iso_date(raw, PRICE_DATE_ALIASES)
+        selection["rejected_prices"].append(
+            {
+                "id": f"rejection:{row['id']}",
+                "source": "ingestion_rejection",
+                "price_date": rejected_date.isoformat() if rejected_date is not None else None,
+                "value": _raw_value(raw, ("close", "c", "price")),
+                "date_facts": _date_facts(raw, PRICE_DATE_ALIASES),
+                "raw_payload": raw,
+                "payload_hash": row["payload_hash"],
+                "rejected_at": row["rejected_at"],
+                "reason": row["reason"],
+            }
+        )
+    for item in selection["rejected_prices"]:
+        item["current_refusal"] = _price_rejection_is_current(item, cutoff, price_rows)
+
+    candidate_price = _price(price_rows[-1], stock_currency) if price_rows else None
+    current_price_rejections = [
+        item for item in selection["rejected_prices"] if item["current_refusal"]
+    ]
+    latest_price = candidate_price
+    price_missing = []
+    if latest_price is None:
+        price_missing.append("latest stock price unavailable")
+    elif current_price_rejections:
+        price_missing.append(
+            "unresolved applicable stock price rejection: "
+            + "; ".join(sorted({item["reason"] for item in current_price_rejections}))
+        )
+        price_missing.append("latest stock price unavailable")
+        latest_price = None
+    elif (cutoff - latest_price.date).days > MAX_PRICE_AGE_DAYS:
+        price_missing.append("stock price is older than seven calendar days")
+        latest_price = None
+    selection["price"] = {
+        "selected_date": latest_price.date.isoformat() if latest_price else None,
+        "candidate_date": candidate_price.date.isoformat() if candidate_price else None,
+        "age_calendar_days": (cutoff - candidate_price.date).days if candidate_price else None,
+        **_price_evidence(price_rows[-1] if price_rows else None),
+        "reasons": price_missing,
+    }
+    if not period_rows:
+        selection["refusal_reasons"] = _selection_refusal_reasons(selection)
+        _missing = ["financial_period", *price_missing]
+        if selection["rejected_reports"]:
+            _missing.append(
+                "financial fiscal end/publication unavailable under verified-date selection"
+            )
         _unavailable = {
             "status": "unavailable",
+            "missing_information": _missing,
+            "selection": selection,
             "dcf": {
                 "available": False,
                 "policy_version": None,
@@ -147,13 +834,21 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         return {
             "financial": None,
             "valuation": None,
-            "fundamental_kpis": {},
-            "research_evidence": {
-                "documents": docs,
-                "evidence_packet": evidence_packet,
-                "evidence_manifest": selection_manifest.to_dict(),
-                "evidence_lane": bool(evidence_packet),
-            },
+            "fundamental_kpis": kpis,
+            "sector_kpis": {"current": kpis, "histories": {}},
+            "research_evidence": research_evidence,
+            "selection": selection,
+            "candidate": SimpleNamespace(
+                company_id=company_id,
+                ticker="",
+                ranking_model=ranking_model_for_branch(branch_id),
+                research_evidence=research_evidence,
+                full_results={
+                    "valuation": None,
+                    "reverse_dcf": _unavailable,
+                    "selection": selection,
+                },
+            ),
             "dcf": {
                 "policy": None,
                 "value": None,
@@ -203,11 +898,22 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     else:
         dcf_current_report = None
     financial_mapper = FinancialMapper()
+    annual_reports = []
+    for row in annual_period_rows:
+        shares = _number(row["shares_outstanding"])
+        if shares is not None and split_events:
+            shares = adjust_historical_shares(
+                shares, str(row["period_end"])[:10], comparison_date, split_events
+            )
+        annual_reports.append(_report(row, shares_override=shares))
+    latest_annual = annual_reports[-1] if annual_reports else None
+    historical_annuals = annual_reports[:-1]
     financial = FinancialCalculator().calculate(
         financial_mapper.to_current(current_report),
-        financial_mapper.to_historical(historical_reports),
+        financial_mapper.to_historical(historical_annuals),
+        growth_current=financial_mapper.to_current(latest_annual) if latest_annual else None,
+        growth_available=len(annual_reports) >= 2,
     )
-    latest_price = _price(price_rows[-1], stock_currency)
     current_raw = compute_raw_valuation(latest_price, current_report)
     dcf_raw = compute_raw_valuation(latest_price, dcf_current_report)
 
@@ -216,10 +922,22 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         candidates = [
             p for p in price_rows if str(p["price_date"])[:10] <= str(row["period_end"])[:10]
         ]
-        if candidates:
-            historical_raw.append(
-                compute_raw_valuation(_price(candidates[-1], stock_currency), report)
-            )
+        paired = _price(candidates[-1], stock_currency) if candidates else None
+        age = (report.period_end - paired.date).days if paired else None
+        usable = age is not None and age <= MAX_PRICE_AGE_DAYS
+        selection["historical_price_pairings"].append(
+            {
+                "period_end": row["period_end"],
+                "price_date": paired.date.isoformat() if paired else None,
+                "age_calendar_days": age,
+                **_price_evidence(candidates[-1] if candidates else None),
+                "reason": None
+                if usable
+                else "historical price missing or older than seven calendar days",
+            }
+        )
+        if usable:
+            historical_raw.append(compute_raw_valuation(paired, report))
     pe_history = [item.pe for item in historical_raw if item.pe is not None and item.pe > 0]
     ev_ebit_history = [
         item.ev_ebit for item in historical_raw if item.ev_ebit is not None and item.ev_ebit > 0
@@ -267,31 +985,13 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     ).fetchone()
     dividend_yield = calculate_dividend_yield(
         cutoff,
-        latest_price.close,
-        price_rows[-1]["currency"],
+        latest_price.close if latest_price else None,
+        price_rows[-1]["currency"] if price_rows else None,
         [dict(row) for row in dividends],
         dict(coverage) if coverage else None,
     )
     current.dividend_yield = dividend_yield.value
     valuation = ValuationCalculator().calculate(current, historical, current_raw)
-
-    kpi_r12: dict[int, float] = {}
-    kpi_annual: dict[int, float] = {}
-    for row in conn.execute(
-        """
-        SELECT kpi_id, value, period_type FROM kpi_observations
-        WHERE company_id=? AND value IS NOT NULL
-          AND year <= ?
-          AND (observation_date IS NULL OR substr(observation_date, 1, 10) <= ?)
-        ORDER BY COALESCE(observation_date, printf('%04d-12-31', year)) ASC
-        """,
-        (company_id, cutoff.year, cutoff.isoformat()),
-    ).fetchall():
-        if row[2] == "r12":
-            kpi_r12[int(row[0])] = float(row[1])
-        else:
-            kpi_annual[int(row[0])] = float(row[1])
-    kpis: dict[int, float] = {**kpi_annual, **kpi_r12}
 
     if dcf_current_report is not None and dcf_current_report.net_debt is not None:
         current_net_debt = dcf_current_report.net_debt
@@ -308,14 +1008,15 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         net_debt_source = None
     reverse_dcf = {
         "status": "available" if dcf_raw.market_cap is not None else "unavailable",
-        "current_price": latest_price.close,
+        "current_price": latest_price.close if latest_price else None,
         "current_revenue": dcf_current_report.revenue if dcf_current_report is not None else None,
         "current_shares": dcf_current_report.shares_outstanding
         if dcf_current_report is not None
         else None,
         "current_net_debt": current_net_debt,
         "net_debt_source": net_debt_source,
-        "price_currency": latest_price.currency,
+        "price_currency": latest_price.currency if latest_price else stock_currency,
+        "selection": selection,
         "financial_currency": (
             dcf_current_report.currency if dcf_current_report is not None else None
         )
@@ -334,32 +1035,8 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     reverse_dcf_results: dict[str, Any] = {}
     # Build annual report history for DCF policy (needs year property)
     try:
-        annual_period_rows = [r for r in period_rows if r["period_type"] == "year"]
-        # Map annual rows to Reports in the same PIT-filtered, share-adjusted way
-        # as the full ranking input, but only for annuals.
-        annual_reports: list[Report] = []
-        for row in annual_period_rows:
-            raw_shares = _number(row["shares_outstanding"])
-            adjusted = raw_shares
-            if raw_shares is not None and split_events:
-                adjusted = adjust_historical_shares(
-                    raw_shares,
-                    str(row["period_end"])[:10],
-                    comparison_date,
-                    split_events,
-                )
-            annual_reports.append(_report(row, shares_override=adjusted))
-        if annual_reports:
-            latest_annual = annual_reports[-1]
-            historical_annuals = annual_reports[:-1]
-        else:
-            latest_annual = None
-            historical_annuals = []
-        # Branch for sector guard
-        branch_row = conn.execute(
-            "SELECT branch_id FROM companies WHERE id=?", (company_id,)
-        ).fetchone()
-        branch_id = int(branch_row[0]) if branch_row and branch_row[0] is not None else None
+        # Use the same validated annual chronology for policy; R12/current
+        # valuation remains distinct from the annual growth anchor.
         roic_for_dcf = kpis.get(37)  # KPI 37 = ROIC (now reliably persisted)
         # Börsdata ROIC is percent (e.g. 22.9 means 22.9%); DcfAssumptionPolicy
         # expects percent and divides by 100 internally, so pass raw percent.
@@ -387,7 +1064,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             roic=roic_for_dcf,
         )
         if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
-            if current_net_debt is None:
+            if price_missing:
+                reverse_dcf["status"] = "unavailable"
+            elif current_net_debt is None:
                 reverse_dcf["dcf_error"] = (
                     "net debt unavailable; DCF enterprise-to-equity bridge not valued"
                 )
@@ -557,6 +1236,15 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 else [],
             }
         reverse_dcf["status"] = "unavailable"
+    if price_missing:
+        reverse_dcf["status"] = "unavailable"
+        reverse_dcf["missing_information"] = price_missing
+        reverse_dcf["dcf"] = {
+            "available": False,
+            "policy_version": dcf_policy_decision.policy_version if dcf_policy_decision else None,
+            "missing_information": price_missing,
+            "warnings": [],
+        }
     # Provide DCF artefacts at top level so callers can export them without
     # reaching into candidate.full_results, and keep provenance separate from
     # the heuristic valuation_score.
@@ -566,20 +1254,17 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "implied": reverse_dcf_results,
         "reverse_dcf": reverse_dcf,
     }
+    selection["refusal_reasons"] = _selection_refusal_reasons(selection)
     candidate = SimpleNamespace(
         company_id=company_id,
         ticker="",
-        ranking_model="general",
-        research_evidence={
-            "documents": docs,
-            "evidence_packet": evidence_packet,
-            "evidence_manifest": selection_manifest.to_dict(),
-            "evidence_lane": bool(evidence_packet),
-        },
+        ranking_model=ranking_model_for_branch(branch_id),
+        research_evidence=research_evidence,
         full_results={
             "valuation": valuation,
             "reverse_dcf": reverse_dcf,
             "dcf": dcf_payload,
+            "selection": selection,
         },
     )
     return {
@@ -587,11 +1272,12 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         "valuation": valuation,
         "dividend_yield": {
             **dividend_yield.to_dict(),
-            "price_date": latest_price.date.isoformat(),
-            "close": latest_price.close,
+            "price_date": latest_price.date.isoformat() if latest_price else None,
+            "close": latest_price.close if latest_price else None,
         },
         "fundamental_kpis": kpis,
         "sector_kpis": {"current": kpis, "histories": {}},
+        "selection": selection,
         # Top-level research_evidence mirrors the missing-data early return above:
         # RankingEngine.rank reads results["research_evidence"], not candidate.
         "research_evidence": candidate.research_evidence,

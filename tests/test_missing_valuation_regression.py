@@ -87,6 +87,7 @@ def test_equity_and_net_debt_produce_roe_and_debt_to_equity():
                 "period_type": "year",
                 "period_end": "2024-12-31",
                 "report_Date": "2025-02-01",
+                "year": 2024,
                 "revenues": 1000,
                 "profit_To_Equity_Holders": 100,
                 "total_Equity": 500,
@@ -124,6 +125,7 @@ def test_ebitda_and_gross_debt_stay_explicitly_unavailable():
                 "period_type": "year",
                 "period_end": "2025-12-31",
                 "report_Date": "2026-02-01",
+                "year": 2025,
                 "revenues": 1000,
                 "net_Debt": 30,
                 "total_Equity": 200,
@@ -163,6 +165,7 @@ def test_kpi_37_and_42_persist_when_summary_omits_them():
                 "period_type": "year",
                 "period_end": "2025-12-31",
                 "report_Date": "2026-02-01",
+                "year": 2025,
                 "revenues": 1000,
                 "operating_Income": 100,
                 "profit_To_Equity_Holders": 50,
@@ -174,8 +177,15 @@ def test_kpi_37_and_42_persist_when_summary_omits_them():
     )
     upsert_prices(conn, cid, [{"d": "2026-02-02T00:00:00", "c": 20, "v": 100}], currency="SEK")
     results = load_results_for_company(conn, cid, "2026-02-03")
-    assert results["fundamental_kpis"][KpiIds.ROIC] == 15.0
-    assert results["fundamental_kpis"][KpiIds.NET_DEBT_EBITDA] == 0.5
+    # Persistence is not date assurance: retain undated provider history in
+    # rejection audit, but do not admit it as a selected numerical input by year alone.
+    assert conn.execute("SELECT count(*) FROM kpi_observations").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM market_input_rejections").fetchone()[0] == 4
+    assert KpiIds.ROIC not in results["fundamental_kpis"]
+    assert KpiIds.NET_DEBT_EBITDA not in results["fundamental_kpis"]
+    assert {item["reason"] for item in results["selection"]["rejected_kpis"]} == {
+        "KPI observation date unavailable"
+    }
 
 
 def test_dcf_wired_and_distinguished_from_heuristic_score():
@@ -229,7 +239,7 @@ def test_dcf_wired_and_distinguished_from_heuristic_score():
     rd = results["reverse_dcf"]
     assert "dcf" in rd, f"reverse_dcf missing dcf key: {rd}"
     assert rd["dcf"]["available"] is True, f"dcf not available: {rd.get('dcf')}"
-    assert rd["dcf"]["policy_version"] == "reverse-dcf-v11-market-cap-hurdle"
+    assert rd["dcf"]["policy_version"] == "reverse-dcf-v12-consecutive-annual-growth"
     assert rd["dcf"]["assumptions"]["discount_rate"] is not None
     assert rd["dcf"]["assumptions"]["terminal_growth"] == 0.02
     assert len(rd["dcf"]["projected_cash_flows"]) == 5
@@ -257,6 +267,7 @@ def test_dcf_unavailable_is_surfaced_not_silent():
                 "period_type": "year",
                 "period_end": "2025-12-31",
                 "report_Date": "2026-02-01",
+                "year": 2025,
                 "revenues": 0,
                 "number_Of_Shares": 10,
                 "currency": "SEK",
@@ -345,6 +356,7 @@ def test_kpi_observation_date_is_persisted_and_pit_filtered():
                 "period_type": "year",
                 "period_end": "2025-12-31",
                 "report_Date": "2026-01-05T00:00:00",
+                "year": 2025,
                 "revenues": 1000,
                 "operating_Income": 100,
                 "profit_To_Equity_Holders": 50,

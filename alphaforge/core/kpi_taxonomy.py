@@ -6,6 +6,9 @@ imports raw keys.
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from typing import Any
+
 # Börsdata report fields (GET /v1/instruments/reports) — raw → canonical
 REPORT_FIELD_MAP: dict[str, str] = {
     "revenues": "revenue",
@@ -47,6 +50,7 @@ REPORT_FIELD_MAP: dict[str, str] = {
     "currencyRatio": "currency_ratio",
     "report_Date": "report_date",
     "reportDate": "report_date",
+    "ReportDate": "report_date",
     "periodEnd": "period_end",
     "period_End": "period_end",
     "reportEndDate": "period_end",
@@ -55,6 +59,7 @@ REPORT_FIELD_MAP: dict[str, str] = {
     "currency_ratio": "currency_ratio",
     "year": "report_year",
     "period": "report_period",
+    "period_Start": "period_start",
     "broken_Fiscal_Year": "broken_fiscal_year",
 }
 
@@ -79,6 +84,11 @@ KNOWN_KPI_IDS: dict[int, str] = {
 }
 
 # Report property metadata canonical names
+PRICE_DATE_ALIASES = ("price_Date", "price_date", "d", "date")
+KPI_DATE_ALIASES = ("observationDate", "observation_date", "date")
+KPI_YEAR_ALIASES = ("year", "y")
+KPI_REPORT_PERIOD_ALIASES = ("reportPeriod", "report_period", "p")
+
 REPORT_PROPERTY_MAP: dict[str, str] = {
     "revenues": "revenue",
     "gross_Income": "gross_income",
@@ -91,6 +101,89 @@ REPORT_PROPERTY_MAP: dict[str, str] = {
 
 def canonical_report_field(raw_key: str) -> str | None:
     return REPORT_FIELD_MAP.get(raw_key)
+
+
+def report_alias_values(payload: dict[str, Any], canonical_field: str) -> tuple[Any, ...]:
+    return tuple(
+        value
+        for key, value in payload.items()
+        if value is not None
+        and (key == canonical_field or REPORT_FIELD_MAP.get(key) == canonical_field)
+    )
+
+
+def parse_iso_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
+
+
+def aliased_iso_date(
+    payload: dict[str, Any], aliases: tuple[str, ...]
+) -> tuple[date | None, str | None]:
+    values = [payload[key] for key in aliases if key in payload and payload[key] is not None]
+    if not values:
+        return None, "unavailable"
+    parsed = [parse_iso_date(value) for value in values]
+    if any(value is None for value in parsed):
+        return None, "invalid"
+    days = {value for value in parsed if value is not None}
+    if len(days) != 1:
+        return None, "aliases conflict"
+    return next(iter(days)), None
+
+
+def report_date_aliases(
+    payload: dict[str, Any], canonical_field: str
+) -> tuple[frozenset[date], bool]:
+    parsed = set()
+    malformed = False
+    for value in report_alias_values(payload, canonical_field):
+        parsed_value = parse_iso_date(value)
+        if parsed_value is None:
+            malformed = True
+        else:
+            parsed.add(parsed_value)
+    return frozenset(parsed), malformed
+
+
+def _integer_values(values: tuple[Any, ...]) -> tuple[frozenset[int], bool]:
+    parsed = set()
+    malformed = False
+    for value in values:
+        if isinstance(value, bool):
+            malformed = True
+        elif isinstance(value, int):
+            parsed.add(value)
+        elif isinstance(value, str) and value.strip().isdigit():
+            parsed.add(int(value.strip()))
+        else:
+            malformed = True
+    return frozenset(parsed), malformed
+
+
+def integer_aliases(
+    payload: dict[str, Any], aliases: tuple[str, ...]
+) -> tuple[frozenset[int], bool]:
+    values = tuple(payload[key] for key in aliases if key in payload and payload[key] is not None)
+    return _integer_values(values)
+
+
+def report_integer_aliases(
+    payload: dict[str, Any], canonical_field: str
+) -> tuple[frozenset[int], bool]:
+    return _integer_values(report_alias_values(payload, canonical_field))
 
 
 def is_known_kpi(kpi_id: int) -> bool:
