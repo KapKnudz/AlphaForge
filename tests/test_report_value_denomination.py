@@ -266,3 +266,73 @@ def test_legacy_report_remains_unverifiable_after_company_currency_changes():
     assert conn.execute(
         "SELECT currency, values_currency FROM financial_periods WHERE company_id=?", (cid,)
     ).fetchone()[:] == ("SEK", None)
+
+
+@pytest.mark.parametrize(
+    "persisted_currency,refusal",
+    [
+        (None, "currencies are not both verified"),
+        ("USD", "conflicts with stock price currency USD"),
+    ],
+)
+def test_unverified_or_conflicting_price_currency_blocks_current_valuation_and_dcf(
+    persisted_currency, refusal
+):
+    conn, cid = setup_company("SEK")
+    acquire(conn, cid, target="SEK", report=make_report("USD", 10.0))
+    conn.execute(
+        "UPDATE prices SET currency=?, raw_payload=? WHERE company_id=?",
+        (persisted_currency, json.dumps({"d": AS_OF, "c": 10, "v": 100}), cid),
+    )
+    conn.execute("UPDATE companies SET stock_price_currency='USD' WHERE id=?", (cid,))
+    conn.commit()
+
+    before = load_results_for_company(conn, cid, AS_OF)
+    conn.execute("UPDATE companies SET stock_price_currency='SEK' WHERE id=?", (cid,))
+    conn.commit()
+    after = load_results_for_company(conn, cid, AS_OF)
+
+    for loaded in (before, after):
+        assert loaded["financial"] is not None
+        assert loaded["valuation"].raw_market_cap is None
+        assert loaded["reverse_dcf"]["market_cap"] is None
+        assert loaded["reverse_dcf"]["status"] == "unavailable"
+        assert refusal in " ".join(loaded["selection"]["valuation_refusals"])
+        assert refusal in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
+
+
+def test_unverified_historical_price_currency_blocks_historical_multiples():
+    conn, cid = setup_company("SEK")
+    acquire(
+        conn,
+        cid,
+        target="SEK",
+        report=make_report(
+            "USD",
+            10.0,
+            period_end="2024-12-31",
+            report_Date="2025-02-01",
+            year=2024,
+        ),
+    )
+    acquire(conn, cid, target="SEK", report=make_report("USD", 10.0))
+    upsert_prices(
+        conn,
+        cid,
+        [{"d": "2024-12-31", "c": 10, "v": 100}],
+        currency="SEK",
+    )
+    conn.execute(
+        "UPDATE prices SET currency=NULL WHERE company_id=? AND price_date='2024-12-31'",
+        (cid,),
+    )
+    conn.execute("UPDATE companies SET stock_price_currency='SEK' WHERE id=?", (cid,))
+    conn.commit()
+
+    loaded = load_results_for_company(conn, cid, AS_OF)
+
+    assert loaded["valuation"].raw_market_cap == 100
+    assert loaded["valuation"].ev_ebit_history_count == 0
+    assert loaded["selection"]["historical_price_pairings"][0]["reason"] == (
+        "historical report and stock price currencies are not both verified"
+    )

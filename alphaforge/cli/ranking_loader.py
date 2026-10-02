@@ -642,7 +642,7 @@ def _report(row, *, shares_override: float | None = None) -> Report:
     )
 
 
-def _price(row, fallback_currency: str | None) -> StockPrice:
+def _price(row) -> StockPrice:
     price_date = _date(row["price_date"])
     if price_date is None:
         raise ValueError("stock price date unverified")
@@ -650,8 +650,27 @@ def _price(row, fallback_currency: str | None) -> StockPrice:
         date=price_date,
         close=float(row["close"]),
         volume=int(row["volume"]) if row["volume"] is not None else None,
-        currency=row["currency"] or fallback_currency,
+        currency=_currency_code(row["currency"]),
     )
+
+
+def _valuation_currency_refusal(
+    stock_price: StockPrice | None,
+    report: Report | None,
+    label: str,
+) -> str | None:
+    if report is None:
+        return None
+    report_currency = _currency_code(report.currency)
+    price_currency = _currency_code(stock_price.currency) if stock_price else None
+    if report_currency is None or price_currency is None:
+        return f"{label} and stock price currencies are not both verified"
+    if report_currency != price_currency:
+        return (
+            f"{label} values currency {report_currency} conflicts with "
+            f"stock price currency {price_currency}"
+        )
+    return None
 
 
 def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any]:
@@ -671,11 +690,10 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         if row.get("published_at") and str(row["published_at"])[:10] <= as_of[:10]
     ]
     company = conn.execute(
-        "SELECT stock_price_currency, report_currency, branch_id FROM companies WHERE id=?",
+        "SELECT branch_id FROM companies WHERE id=?",
         (company_id,),
     ).fetchone()
-    stock_currency = company[0] if company else None
-    branch_id = int(company[2]) if company and company[2] is not None else None
+    branch_id = int(company[0]) if company and company[0] is not None else None
     research_evidence = {
         "documents": docs,
         "evidence_packet": evidence_packet,
@@ -872,7 +890,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     for item in selection["rejected_prices"]:
         item["current_refusal"] = _price_rejection_is_current(item, cutoff, price_rows)
 
-    candidate_price = _price(price_rows[-1], stock_currency) if price_rows else None
+    candidate_price = _price(price_rows[-1]) if price_rows else None
     current_price_rejections = [
         item for item in selection["rejected_prices"] if item["current_refusal"]
     ]
@@ -998,42 +1016,47 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         growth_current=financial_mapper.to_current(latest_annual) if latest_annual else None,
         growth_available=len(annual_reports) >= 2,
     )
-    current_raw = compute_raw_valuation(latest_price, current_report)
-    dcf_raw = compute_raw_valuation(latest_price, dcf_current_report)
-    for label, report in (("current report", current_report), ("DCF report", dcf_current_report)):
-        if report is None:
-            continue
-        report_currency = _currency_code(report.currency)
-        price_currency = _currency_code(latest_price.currency) if latest_price else None
-        if report_currency is None or price_currency is None:
-            selection["valuation_refusals"].append(
-                f"{label} and stock price currencies are not both verified"
-            )
-        elif report_currency != price_currency:
-            selection["valuation_refusals"].append(
-                f"{label} values currency {report_currency} conflicts with stock price currency {price_currency}"
-            )
+    current_currency_refusal = _valuation_currency_refusal(
+        latest_price, current_report, "current report"
+    )
+    dcf_currency_refusal = _valuation_currency_refusal(
+        latest_price, dcf_current_report, "DCF report"
+    )
+    for refusal in (current_currency_refusal, dcf_currency_refusal):
+        if refusal is not None:
+            selection["valuation_refusals"].append(refusal)
+    current_raw = compute_raw_valuation(
+        latest_price if current_currency_refusal is None else None,
+        current_report,
+    )
+    dcf_raw = compute_raw_valuation(
+        latest_price if dcf_currency_refusal is None else None,
+        dcf_current_report,
+    )
 
     historical_raw: list[RawValuation] = []
     for row, report in zip(period_rows[:-1], historical_reports, strict=False):
         candidates = [
             p for p in price_rows if str(p["price_date"])[:10] <= str(row["period_end"])[:10]
         ]
-        paired = _price(candidates[-1], stock_currency) if candidates else None
+        paired = _price(candidates[-1]) if candidates else None
         age = (report.period_end - paired.date).days if paired else None
-        usable = age is not None and age <= MAX_PRICE_AGE_DAYS
+        if age is None or age > MAX_PRICE_AGE_DAYS:
+            pairing_reason = "historical price missing or older than seven calendar days"
+        else:
+            pairing_reason = _valuation_currency_refusal(
+                paired, report, "historical report"
+            )
         selection["historical_price_pairings"].append(
             {
                 "period_end": row["period_end"],
                 "price_date": paired.date.isoformat() if paired else None,
                 "age_calendar_days": age,
                 **_price_evidence(candidates[-1] if candidates else None),
-                "reason": None
-                if usable
-                else "historical price missing or older than seven calendar days",
+                "reason": pairing_reason,
             }
         )
-        if usable:
+        if pairing_reason is None:
             historical_raw.append(compute_raw_valuation(paired, report))
     pe_history = [item.pe for item in historical_raw if item.pe is not None and item.pe > 0]
     ev_ebit_history = [
@@ -1083,7 +1106,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
     dividend_yield = calculate_dividend_yield(
         cutoff,
         latest_price.close if latest_price else None,
-        price_rows[-1]["currency"] if price_rows else None,
+        latest_price.currency if latest_price else None,
         [dict(row) for row in dividends],
         dict(coverage) if coverage else None,
     )
@@ -1112,7 +1135,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         else None,
         "current_net_debt": current_net_debt,
         "net_debt_source": net_debt_source,
-        "price_currency": latest_price.currency if latest_price else stock_currency,
+        "price_currency": latest_price.currency if latest_price else None,
         "selection": selection,
         "financial_currency": dcf_current_report.currency
         if dcf_current_report is not None
@@ -1159,7 +1182,16 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             # Heuristic: shares are in millions (63.45 = 63M), so market cap in MSEK.
             # Convert to SEK for bucket selection.
             market_cap_for_hurdle = float(dcf_raw.market_cap) * 1_000_000
-        if (
+        if dcf_currency_refusal is not None:
+            dcf_policy_decision = DcfPolicyDecision(
+                available=False,
+                policy_version=policy.VERSION,
+                assumptions=None,
+                solve_bounds=dict(policy.SOLVE_BOUNDS),
+                assumption_sources={},
+                missing_information=(dcf_currency_refusal,),
+            )
+        elif (
             dcf_current_report is not None
             and latest_annual is not None
             and dcf_current_report.currency != latest_annual.currency
@@ -1180,9 +1212,9 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 latest_annual,
                 historical_annuals,
                 as_of=cutoff,
-                currency=(dcf_current_report.currency if dcf_current_report is not None else None)
-                or stock_currency
-                or "SEK",
+                currency=(
+                    dcf_current_report.currency if dcf_current_report is not None else None
+                ),
                 market_cap=market_cap_for_hurdle,
                 roic=roic_for_dcf,
             )
