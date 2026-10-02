@@ -1646,6 +1646,87 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
 
 
 @pytest.mark.parametrize(
+    "legacy_payload",
+    [None, "[]", '"legacy"'],
+    ids=["null", "array", "string"],
+)
+def test_legacy_nonobject_same_slot_allows_valid_correction_and_exports(
+    legacy_payload, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    conn.execute(
+        "UPDATE financial_periods SET raw_payload=? WHERE period_type='year' AND period_end=?",
+        (legacy_payload, "2026-03-31"),
+    )
+    correction = annual(2026, 200)
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    stored = conn.execute(
+        "SELECT raw_payload FROM financial_periods WHERE period_type='year' AND period_end=?",
+        ("2026-03-31",),
+    ).fetchone()
+    assert json.loads(stored["raw_payload"]) == correction
+    assert conn.execute("SELECT count(*) FROM financial_period_rejections").fetchone()[0] == 0
+
+    packet(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["reverse_dcf"]["current_revenue"] == 200
+    assert loaded["financial"].revenue_growth is not None
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_growth"] == pytest.approx(loaded["financial"].revenue_growth)
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert dcf[str(cid)]["current_revenue"] == 200
+
+
+@pytest.mark.parametrize("legacy_payload", [None, "[]"], ids=["null", "array"])
+def test_legacy_nonobject_annual_peer_is_excluded_from_contextual_audit(
+    legacy_payload, monkeypatch, tmp_path
+):
+    cutoff = "2028-06-01"
+    duplicate = annual(
+        2026,
+        121,
+        period_end="2027-03-31",
+        report_Date="2027-05-01",
+    )
+    conn, cid = setup(
+        periods=[annual(2025, 100), annual(2026, 110), duplicate],
+        price_date=cutoff,
+    )
+    conn.execute(
+        "UPDATE financial_periods SET raw_payload=? WHERE period_type='year' AND period_end=?",
+        (legacy_payload, "2025-03-31"),
+    )
+    correction = annual(2027, 121)
+
+    assert upsert_financial_periods(conn, cid, [correction]) == 1
+    archived = conn.execute(
+        "SELECT reason, raw_payload FROM financial_period_rejections"
+    ).fetchall()
+    assert len(archived) == 1
+    assert archived[0]["reason"] == "duplicate annual fiscal slot"
+    assert json.loads(archived[0]["raw_payload"]) == duplicate
+
+    packet(conn, cid, cutoff)
+    loaded = load_results_for_company(conn, cid, cutoff)
+    assert loaded["reverse_dcf"]["current_revenue"] == 121
+    assert loaded["financial"].revenue_growth is None
+    rawless = next(
+        item
+        for item in loaded["selection"]["rejected_reports"]
+        if item["source"] == "financial_periods"
+    )
+    assert rawless["raw_payload"] == {}
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path, cutoff)
+    assert score["revenue_growth"] is None
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert dcf[str(cid)]["current_revenue"] == 121
+
+
+@pytest.mark.parametrize(
     "defect,expected_reason,expected_dcf_status",
     [
         ("currency", "annual currency comparability unverified", "unavailable"),

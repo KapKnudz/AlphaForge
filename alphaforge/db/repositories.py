@@ -170,8 +170,24 @@ def _record_financial_period_rejection(
     )
 
 
+def _financial_period_payload(row: Any) -> dict[str, Any] | None:
+    try:
+        value = row["raw_payload"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(value) if value else None
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
 def _intrinsic_period_rejection_reason(row: Any) -> str | None:
-    raw = json.loads(row["raw_payload"])
+    raw = _financial_period_payload(row)
+    if raw is None:
+        return None
     ends, malformed_end = report_date_aliases(raw, "period_end")
     publications, malformed_publication = report_date_aliases(raw, "report_date")
     years, malformed_year = report_integer_aliases(raw, "report_year")
@@ -243,7 +259,12 @@ def _contextual_annual_rejection_reason(conn: Any, company_id: int, target: Any)
         """,
         (company_id,),
     ).fetchall()
-    annuals = [row for row in rows if _intrinsic_period_rejection_reason(row) is None]
+    annuals = [
+        row
+        for row in rows
+        if _financial_period_payload(row) is not None
+        and _intrinsic_period_rejection_reason(row) is None
+    ]
     target_index = next(
         (index for index, row in enumerate(annuals) if row["id"] == target["id"]),
         None,
@@ -386,7 +407,8 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
             """,
             (company_id, period_type, period_end),
         ).fetchone()
-        if existing is not None and json.loads(existing["raw_payload"]) != p:
+        existing_payload = _financial_period_payload(existing) if existing is not None else None
+        if existing_payload is not None and existing_payload != p:
             reason = _intrinsic_period_rejection_reason(existing)
             if reason is None:
                 reason = _contextual_annual_rejection_reason(conn, company_id, existing)
