@@ -102,9 +102,13 @@ are described in [valuation.md](valuation.md); current cross-currency wiring
 limits are noted below. Ratios are never FX-converted by the ranking loader.
 
 Missing fundamentals remain `NULL`/`None`; zero is a value, not missing.
-Zero-revenue/unpublished stubs are quarantined as `is_placeholder=1`; other
-unpublished reports also fail loader filtering. Absent live EBITDA and gross
-debt are not invented from net debt. Missing score inputs produce diagnostics
+Current ingestion retains zero-revenue/unpublished stubs in
+`financial_period_rejections` with their original payload and a `placeholder`
+reason before any numerical upsert. Other reports without a verified publication
+date are retained there with their refusal reason. Preserved legacy
+`financial_periods` rows marked `is_placeholder=1` remain excluded by the loader;
+verified published zero fundamentals remain valid values. Absent live EBITDA and
+gross debt are not invented from net debt. Missing score inputs produce diagnostics
 (`missing_data`, `data_quality`, availability and eligibility), not zero-valued
 fundamentals. A numeric diagnostic score can still be emitted for an ineligible
 company. Yield availability/window/currency/coverage facts are returned by the
