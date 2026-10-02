@@ -383,8 +383,6 @@ def _rejection_is_current(
     )
 
     future_checks = []
-    if years:
-        future_checks.append(all(value > cutoff.year for value in years))
     if ends:
         future_checks.append(all(value > cutoff for value in ends))
     if publications:
@@ -651,11 +649,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
             reason = "report period metadata unverified"
         elif malformed_start or len(starts) > 1:
             reason = "fiscal start metadata unverified"
-        elif (
-            end > cutoff
-            or publication > cutoff
-            or (fiscal_year is not None and fiscal_year > cutoff.year)
-        ):
+        elif end > cutoff or publication > cutoff:
             reason = "after cutoff"
         elif publication < end:
             reason = "publication precedes fiscal end"

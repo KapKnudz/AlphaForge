@@ -1505,11 +1505,14 @@ def test_future_publication_is_audit_only_without_hiding_alias_conflicts(
     )
 
 
-def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch, tmp_path):
+@pytest.mark.parametrize("report_year", [2026, 2027])
+def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
+    report_year, monkeypatch, tmp_path
+):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
     transition = annual(
-        2026,
+        report_year,
         140,
         period_end="2026-04-30",
         report_Date=None,
@@ -1524,7 +1527,7 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(monkeypatch
         if item["source"] == "ingestion_rejection"
         and item["raw_payload"]["period_end"] == "2026-04-30"
     )
-    assert int(transition_rejection["report_year"]) == 2026
+    assert int(transition_rejection["report_year"]) == report_year
     assert transition_rejection["current_refusal"]
     assert loaded["selection"]["annual_history"]["period_ends"] == []
     assert loaded["financial"].revenue_growth is None
@@ -1731,6 +1734,11 @@ def test_legacy_nonobject_annual_peer_is_excluded_from_contextual_audit(
     [
         ("currency", "annual currency comparability unverified", "unavailable"),
         ("duplicate_year", "duplicate annual fiscal slot", "available"),
+        (
+            "future_year",
+            "annual periods are not consecutive fiscal anniversaries",
+            "available",
+        ),
     ],
 )
 def test_contextually_incompatible_same_slot_correction_remains_authoritative(
@@ -1742,8 +1750,10 @@ def test_contextually_incompatible_same_slot_correction_remains_authoritative(
     correction = annual(2026, 200)
     if defect == "currency":
         correction["currency"] = "USD"
-    else:
+    elif defect == "duplicate_year":
         correction["year"] = 2025
+    else:
+        correction["year"] = 2027
 
     assert upsert_financial_periods(conn, cid, [correction]) == 1
     stored = conn.execute(
@@ -1809,7 +1819,12 @@ def test_intrinsically_valid_same_slot_correction_remains_cutoff_filtered(monkey
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
     packet(conn, cid)
-    correction = annual(2026, 200, report_Date="2026-06-02")
+    correction = annual(
+        2027,
+        200,
+        period_end="2026-03-31",
+        report_Date="2026-06-02",
+    )
 
     assert upsert_financial_periods(conn, cid, [correction]) == 1
     before = load_results_for_company(conn, cid, CUTOFF)
@@ -1833,7 +1848,8 @@ def test_intrinsically_valid_same_slot_correction_remains_cutoff_filtered(monkey
 
     after = load_results_for_company(conn, cid, "2026-06-03")
     assert after["reverse_dcf"]["current_revenue"] == 200
-    assert after["selection"]["annual_history"]["period_ends"][-1] == "2026-03-31"
+    assert after["financial"].revenue_growth is None
+    assert after["selection"]["annual_history"]["period_ends"] == ["2026-03-31"]
 
 
 def test_conflicting_alias_original_is_retained_once_across_repeated_replacement():
@@ -2168,6 +2184,51 @@ def test_exact_end_replacement_supersedes_mismatched_nonannual_labels(
     assert not any(audit["reason"] in item for item in score["missing_data"])
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
+
+
+@pytest.mark.parametrize("period_type", ["r12", "quarter"])
+@pytest.mark.parametrize("batched", [False, True])
+def test_future_fiscal_label_nonannual_correction_uses_evidence_dates(
+    period_type, batched, monkeypatch, tmp_path
+):
+    rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+    conn, cid = setup(periods=rows)
+    original = annual(
+        2026,
+        140,
+        period_type=period_type,
+        period=2,
+        period_end="2026-05-31",
+        report_Date=CUTOFF,
+        operating_Income=28,
+    )
+    correction = {
+        **original,
+        "year": 2027,
+        "revenues": 150,
+        "operating_Income": 45,
+    }
+    if batched:
+        correction = dict(reversed(tuple(correction.items())))
+        assert upsert_financial_periods(conn, cid, [original, correction]) == 2
+    else:
+        assert upsert_financial_periods(conn, cid, [original]) == 1
+        assert upsert_financial_periods(conn, cid, [correction]) == 1
+    packet(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    assert loaded["financial"].operating_margin == pytest.approx(0.3)
+    assert loaded["financial"].revenue_growth == pytest.approx(0.1)
+    assert not loaded["selection"]["rejected_reports"]
+    expected_dcf_revenue = 150 if period_type == "r12" else 133.1
+    assert loaded["reverse_dcf"]["current_revenue"] == pytest.approx(expected_dcf_revenue)
+
+    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    assert score["revenue_growth"] == pytest.approx(0.1)
+    assert not score["input_selection"]["rejected_reports"]
+    assert json.loads(row["input_selection"]) == score["input_selection"]
+    assert dcf[str(cid)]["selection"] == score["input_selection"]
+    assert dcf[str(cid)]["current_revenue"] == pytest.approx(expected_dcf_revenue)
 
 
 @pytest.mark.parametrize("period_type", ["r12", "quarter"])
