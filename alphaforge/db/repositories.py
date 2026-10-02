@@ -22,6 +22,8 @@ from alphaforge.core.kpi_taxonomy import (
 )
 from alphaforge.core.valuation.dividend_yield import is_known_currency
 
+_PRICE_CURRENCY_UNSET = object()
+
 
 def upsert_company(conn: Any, borsdata_ins: dict[str, Any]) -> int:
     """Upsert companies row; return company id."""
@@ -350,17 +352,20 @@ def upsert_financial_periods(conn: Any, company_id: int, periods: list[dict[str,
         values_currency = p.get("values_currency")
         conversion_mode = p.get("conversion_mode")
         conversion_target_currency = p.get("conversion_target_currency")
-        if "currency_Ratio" in p:
-            raw_currency_ratio = p.get("currency_Ratio")
-        elif "currency_ratio" in p:
-            raw_currency_ratio = p.get("currency_ratio")
-        else:
-            raw_currency_ratio = p.get("currencyRatio")
+        raw_currency_ratios = [
+            p[key]
+            for key in ("currency_Ratio", "currency_ratio", "currencyRatio")
+            if key in p and p[key] is not None
+        ]
         currency_ratio = None
         try:
-            parsed_ratio = float(raw_currency_ratio) if raw_currency_ratio is not None else None
-            if parsed_ratio is not None and isfinite(parsed_ratio) and parsed_ratio > 0:
-                currency_ratio = parsed_ratio
+            parsed_ratios = [float(value) for value in raw_currency_ratios]
+            if (
+                parsed_ratios
+                and all(isfinite(value) and value > 0 for value in parsed_ratios)
+                and len(set(parsed_ratios)) == 1
+            ):
+                currency_ratio = parsed_ratios[0]
         except (TypeError, ValueError):
             pass
         target_code = (
@@ -596,7 +601,7 @@ def upsert_prices(
     company_id: int,
     rows: list[dict[str, Any]],
     *,
-    currency: str | None = None,
+    currency: str | None | object = _PRICE_CURRENCY_UNSET,
 ) -> int:
     count = 0
     for r in rows:
@@ -631,7 +636,9 @@ def upsert_prices(
             _record_market_input_rejection(conn, company_id, "price", reason, r)
             continue
         price_date = parsed_price_date.isoformat()
-        cur_currency = r.get("currency") or currency
+        cur_currency = (
+            r.get("currency") if currency is _PRICE_CURRENCY_UNSET else currency
+        )
         conn.execute(
             """
             INSERT INTO prices (company_id, price_date, close, volume, currency, raw_payload)

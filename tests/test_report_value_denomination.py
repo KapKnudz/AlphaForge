@@ -170,6 +170,61 @@ def test_same_currency_nonunit_ratio_refuses_without_sek_fx_provenance():
     assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
 
 
+def test_matching_ratio_aliases_canonicalize_without_conversion():
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("USD", 10.0),
+        "currency_ratio": "10",
+        "currencyRatio": 10.0,
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored) == (10.0, 10.0)
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["valuation"].raw_market_cap == 100
+
+
+@pytest.mark.parametrize(
+    "alias_value,reason",
+    [
+        (20.0, "report currency ratio aliases conflict"),
+        (-20.0, "report currency ratio is invalid"),
+        ("invalid", "report currency ratio is invalid"),
+    ],
+)
+def test_conflicting_or_invalid_ratio_alias_refuses(alias_value, reason):
+    conn, cid = setup_company("SEK")
+    report = {
+        **make_report("USD", 10.0),
+        "currencyRatio": alias_value,
+        "conversion_mode": "converted",
+        "conversion_target_currency": "SEK",
+        "values_currency": "SEK",
+    }
+
+    upsert_financial_periods(conn, cid, [report])
+
+    stored = conn.execute(
+        "SELECT currency_ratio, fx_rate_to_sek, fx_source, raw_payload "
+        "FROM financial_periods WHERE company_id=?",
+        (cid,),
+    ).fetchone()
+    assert tuple(stored[:3]) == (None, None, None)
+    assert json.loads(stored["raw_payload"])["currencyRatio"] == alias_value
+    loaded = load_results_for_company(conn, cid, AS_OF)
+    assert loaded["financial"] is None
+    assert any(reason in refusal for refusal in loaded["selection"]["refusal_reasons"])
+    assert loaded["selection"]["rejected_reports"][0]["reason"] == reason
+
+
 def test_verified_eur_values_allow_raw_multiples_but_not_sek_hurdle(monkeypatch, tmp_path):
     conn, cid = setup_company("EUR")
     acquire(conn, cid, target="EUR", report=make_report("USD", 0.9))
@@ -327,16 +382,25 @@ def test_unverified_or_conflicting_price_currency_blocks_current_valuation_and_d
         assert refusal in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
 
 
-@pytest.mark.parametrize("instrument_case", ["fetch_failure", "conflicting_targets"])
-def test_price_sync_never_uses_stored_company_currency(instrument_case):
+@pytest.mark.parametrize(
+    "instrument_case,stored_company_currency,expected_price_currency",
+    [
+        ("fetch_failure", "SEK", None),
+        ("conflicting_targets", "USD", None),
+        ("verified_target", "SEK", "SEK"),
+    ],
+)
+def test_price_sync_uses_only_invocation_instrument_currency(
+    instrument_case, stored_company_currency, expected_price_currency
+):
     conn, cid = setup_company("SEK")
     conn.execute("DELETE FROM prices WHERE company_id=?", (cid,))
     conn.commit()
     adapter = Mock(spec=BorsdataAdapter)
     if instrument_case == "fetch_failure":
         adapter.get_instruments.side_effect = RuntimeError("synthetic instrument failure")
-        stored_company_currency = "SEK"
     else:
+        currencies = ("SEK", "USD") if instrument_case == "conflicting_targets" else ("SEK",)
         adapter.get_instruments.return_value = [
             {
                 "insId": 101,
@@ -344,9 +408,8 @@ def test_price_sync_never_uses_stored_company_currency(instrument_case):
                 "ticker": "DEN",
                 "stockPriceCurrency": currency,
             }
-            for currency in ("SEK", "USD")
+            for currency in currencies
         ]
-        stored_company_currency = "USD"
     for name in (
         "get_sectors",
         "get_branches",
@@ -361,7 +424,9 @@ def test_price_sync_never_uses_stored_company_currency(instrument_case):
         "get_shorts",
     ):
         getattr(adapter, name).return_value = []
-    adapter.get_stock_prices.return_value = [{"d": AS_OF, "c": 10, "v": 100}]
+    adapter.get_stock_prices.return_value = [
+        {"d": AS_OF, "c": 10, "v": 100, "currency": "USD"}
+    ]
     adapter.get_kpi_summary.return_value = {"kpis": []}
     adapter.get_kpi_history.return_value = []
     args = argparse.Namespace(
@@ -381,9 +446,11 @@ def test_price_sync_never_uses_stored_company_currency(instrument_case):
     assert conn.execute(
         "SELECT stock_price_currency FROM companies WHERE id=?", (cid,)
     ).fetchone()[0] == stored_company_currency
-    assert conn.execute(
-        "SELECT currency FROM prices WHERE company_id=?", (cid,)
-    ).fetchone()[0] is None
+    price = conn.execute(
+        "SELECT currency, raw_payload FROM prices WHERE company_id=?", (cid,)
+    ).fetchone()
+    assert price["currency"] == expected_price_currency
+    assert json.loads(price["raw_payload"])["currency"] == "USD"
 
 
 def test_unverified_historical_price_currency_blocks_historical_multiples():

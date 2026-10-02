@@ -108,15 +108,20 @@ def _report_denomination(row) -> tuple[dict[str, Any], str | None]:
             return result, "report currency ratio is invalid"
         if original == target and float(ratio) != 1.0:
             return result, "report currency ratio conflicts with same-currency acquisition"
-    raw_ratio = next(
-        (raw[key] for key in ("currency_Ratio", "currency_ratio", "currencyRatio") if key in raw),
-        None,
-    )
-    if raw_ratio is not None:
+    raw_ratios = [
+        raw[key]
+        for key in ("currency_Ratio", "currency_ratio", "currencyRatio")
+        if key in raw and raw[key] is not None
+    ]
+    if raw_ratios:
         try:
-            if not isfinite(float(raw_ratio)) or float(raw_ratio) <= 0:
+            parsed_ratios = [float(value) for value in raw_ratios]
+            if any(not isfinite(value) or value <= 0 for value in parsed_ratios):
                 return result, "report currency ratio is invalid"
-            if ratio is None or float(ratio) != float(raw_ratio):
+            if len(set(parsed_ratios)) != 1:
+                return result, "report currency ratio aliases conflict"
+            raw_ratio = parsed_ratios[0]
+            if ratio is None or float(ratio) != raw_ratio:
                 return result, "report currency ratio conflicts with stored provenance"
             if target == "SEK" and row["fx_rate_to_sek"] == ratio:
                 result["fx_rate_to_sek"] = ratio
