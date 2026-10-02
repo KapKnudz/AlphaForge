@@ -486,9 +486,7 @@ def test_price_sync_uses_only_invocation_instrument_currency(
         "get_shorts",
     ):
         getattr(adapter, name).return_value = []
-    adapter.get_stock_prices.return_value = [
-        {"d": AS_OF, "c": 10, "v": 100, "currency": "USD"}
-    ]
+    adapter.get_stock_prices.return_value = [{"d": AS_OF, "c": 10, "v": 100, "currency": "USD"}]
     adapter.get_kpi_summary.return_value = {"kpis": []}
     adapter.get_kpi_history.return_value = []
     args = argparse.Namespace(
@@ -505,9 +503,10 @@ def test_price_sync_uses_only_invocation_instrument_currency(
     ):
         assert cmd_sync(args) == 1
 
-    assert conn.execute(
-        "SELECT stock_price_currency FROM companies WHERE id=?", (cid,)
-    ).fetchone()[0] == stored_company_currency
+    assert (
+        conn.execute("SELECT stock_price_currency FROM companies WHERE id=?", (cid,)).fetchone()[0]
+        == stored_company_currency
+    )
     price = conn.execute(
         "SELECT currency, raw_payload FROM prices WHERE company_id=?", (cid,)
     ).fetchone()

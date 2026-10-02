@@ -1053,9 +1053,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
         if age is None or age > MAX_PRICE_AGE_DAYS:
             pairing_reason = "historical price missing or older than seven calendar days"
         else:
-            pairing_reason = _valuation_currency_refusal(
-                paired, report, "historical report"
-            )
+            pairing_reason = _valuation_currency_refusal(paired, report, "historical report")
         selection["historical_price_pairings"].append(
             {
                 "period_end": row["period_end"],
@@ -1221,9 +1219,7 @@ def load_results_for_company(conn, company_id: int, as_of: str) -> dict[str, Any
                 latest_annual,
                 historical_annuals,
                 as_of=cutoff,
-                currency=(
-                    dcf_current_report.currency if dcf_current_report is not None else None
-                ),
+                currency=(dcf_current_report.currency if dcf_current_report is not None else None),
                 market_cap=market_cap_for_hurdle,
                 roic=roic_for_dcf,
             )

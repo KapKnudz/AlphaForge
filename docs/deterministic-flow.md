@@ -73,7 +73,7 @@ unverified, with no mutable-company-currency backfill.
 | Company / watchlist | `companies.id` joins both paths; unique `borsdata_id` anchors provider identity. Watchlist retains `(source_file, source_row_hash)`, `matched_via` and a unique linked `company_id`; ticker is not the financial-row key. |
 | Financial report | `(company_id, period_type, period_end)` with `year/r12/quarter`; `report_date`, `report_year/report_period`, original currency, values currency, acquisition conversion mode/target, ratio provenance, `is_placeholder` and `raw_payload` accompany canonical fields. Inputs without a valid explicit fiscal end are retained with their raw payload and refusal reason in `financial_period_rejections`, never keyed by publication date. |
 | KPI | Company, KPI ID, period/price type, then observation date for `last`, or year/report period for `year/r12`. Stored observations retain `raw_payload`; malformed or undated inputs are retained in `market_input_rejections`. The writer handles missing report-period keys explicitly for idempotence. |
-| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. Malformed or undated inputs are retained in `market_input_rejections`. |
+| Price | `(company_id, price_date)`: positive close, nullable nonnegative volume, currency and `raw_payload`; no OHLC history. CLI sync persists currency only from that invocation's unambiguous instrument target, never from a price-row tag or mutable company metadata; an unavailable target remains NULL. Malformed or undated inputs are retained in `market_input_rejections`. |
 | Dividend | `(company_id, ex_date, dividend_type, amount)`; ex-date is parsed and stored as a canonical ISO calendar date, and currency, its verification/conflict bits and distribution frequency are retained. Types `0/1/2/4` accepted; dated zeros are preserved, while missing amounts/dates and undated zero markers are ignored. Missing or unusable currency starts unverified, never assumed SEK, and the first authoritative supported observation replaces unverified conflict-free provenance, including valid-looking legacy tags. [Valuation](valuation.md#heuristic-valuation_score-ranking) owns the explicit MVP denomination allowlist. Legacy rows start unverified. Only differing verified supported currencies at an existing identity establish a sticky conflict, and repeat upserts cannot heal it. A missing/unusable fresh tag does not erase an already verified denomination; it also cannot verify a previously unknown row or establish coverage. |
 | Dividend coverage | `dividend_window_coverage(company_id, window_start, window_end)` stores exact `(start,end]` status (`unknown/partial/complete`), source, independent assurance and verification time. Complete requires a nonempty assurance and verification time. Legacy `dividend_coverage` extrema are retained but never consumed as proof. |
 | Split / calendar | `(borsdata_id, split_date)` / `(borsdata_id, release_date)`, with a company link when available. Ratios and calendar report types are retained, not inferred model inputs. |
@@ -121,10 +121,12 @@ Stockprice-currency then this is 1.” This documents
 general provider semantics, not a particular stored row's acquisition target or
 mode; each row therefore retains those facts from its own acquisition. The
 `fx_rate_to_sek` column is populated on new rows only when the acquired target is
-verified SEK and the positive ratio is valid; ratios are not themselves
-currency-converted or applied to monetary values by the ranking loader. The raw
-valuation currency guard and SEK-only hurdle remain as described in
-[valuation.md](valuation.md).
+verified SEK and the ratio evidence is valid. Every populated ratio alias must
+be numeric, finite, positive and equal to the others (JSON booleans are not
+numbers here); a same-currency original/target pair requires ratio `1`. Ratios
+are not themselves currency-converted or applied to monetary values by the
+ranking loader. The raw valuation currency guard and SEK-only hurdle remain as
+described in [valuation.md](valuation.md).
 
 Missing fundamentals remain `NULL`/`None`; zero is a value, not missing.
 Current ingestion retains zero-revenue/unpublished stubs in
@@ -171,9 +173,13 @@ network fetch. Its effective date predicates are:
   eligible close must be **at most seven calendar days old**, inclusive.
   Historical valuation pairs each report with the last close at/before its
   verified fiscal end, also with an inclusive seven-calendar-day maximum gap.
-  Older/missing pairs do not contribute to historical valuation anchors. Current
-  and historical pairing diagnostics retain the candidate close, raw payload and
-  every original date fact even when the seven-day guard refuses the price.
+  Current and historical raw valuation additionally require the persisted price
+  currency to be verified and to match the report's verified values currency;
+  missing or conflicting denominations are refused without a company-currency
+  fallback. Older/missing/refused pairs do not contribute to historical
+  valuation anchors. Current and historical pairing diagnostics retain the
+  candidate close, raw payload and every original date fact even when a guard
+  refuses the price.
 - KPIs: non-null value, `year <= cutoff.year`, and a verified non-null
   `observation_date <= as_of`. Every populated observation-date alias must
   parse completely and agree. Invalid input is retained in rejection audit
@@ -346,6 +352,9 @@ Executable cross-boundary coverage lives in
 (verified/unknown/partial windows, foreign-yield refusal, zero versus missing,
 calendar/leap ex-date boundaries and actual ranking/export provenance), and
 [`test_phase2_exit_gate.py`](../tests/test_phase2_exit_gate.py)
-(packet provenance/export, sorting, ADTV and direct readiness).
-These cover particular behaviors, not a complete semantic or live-model audit.
+(packet provenance/export, sorting, ADTV and direct readiness), and
+[`test_report_value_denomination.py`](../tests/test_report_value_denomination.py)
+(acquisition denomination persistence, refusal controls and ranking/export
+propagation). These cover particular behaviors, not a complete semantic or
+live-model audit.
 Use the checks in [CONTRIBUTING.md](../CONTRIBUTING.md#checks).

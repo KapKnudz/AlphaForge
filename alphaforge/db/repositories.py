@@ -640,9 +640,7 @@ def upsert_prices(
             _record_market_input_rejection(conn, company_id, "price", reason, r)
             continue
         price_date = parsed_price_date.isoformat()
-        cur_currency = (
-            r.get("currency") if currency is _PRICE_CURRENCY_UNSET else currency
-        )
+        cur_currency = r.get("currency") if currency is _PRICE_CURRENCY_UNSET else currency
         conn.execute(
             """
             INSERT INTO prices (company_id, price_date, close, volume, currency, raw_payload)
