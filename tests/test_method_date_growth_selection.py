@@ -1616,9 +1616,7 @@ def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
     assert left_root["implied_assumption"] < 0.0 < right_root["implied_assumption"]
 
 
-def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(
-    monkeypatch, tmp_path
-):
+def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121, number_Of_Shares=10_000_000)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 1.257757952557623e-05}], currency="SEK")
@@ -1645,9 +1643,7 @@ def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(
     assert region["associated_sign_change_bracket_count"] == 1
 
 
-def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(
-    monkeypatch, tmp_path
-):
+def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3.171574253715503}], currency="SEK")

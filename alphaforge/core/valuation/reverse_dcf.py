@@ -294,14 +294,16 @@ class ReverseDcfEngine:
             raise ValueError("reverse DCF range diagnostic produced a non-finite price")
         differences = tuple(price - inputs.current_price for price in prices)
         matches = tuple(abs(difference) <= price_tolerance for difference in differences)
-        nonzero_residual_indexes = [
-            index for index, difference in enumerate(differences) if difference != 0.0
+        signed_residual_indexes = [
+            index
+            for index, difference in enumerate(differences)
+            if abs(difference) > 1e-12 * max(1.0, abs(prices[index]), abs(inputs.current_price))
         ]
         brackets = [
             (points[left], points[right])
             for left, right in zip(
-                nonzero_residual_indexes,
-                nonzero_residual_indexes[1:],
+                signed_residual_indexes,
+                signed_residual_indexes[1:],
                 strict=False,
             )
             if differences[left] * differences[right] < 0
@@ -325,8 +327,7 @@ class ReverseDcfEngine:
                         "upper_sample_assumption": points[end],
                         "sample_count": end - start + 1,
                         "maximum_absolute_price_difference": max(
-                            abs(differences[match_index])
-                            for match_index in range(start, end + 1)
+                            abs(differences[match_index]) for match_index in range(start, end + 1)
                         ),
                         "qualification": (
                             "contiguous grid samples match within price tolerance; "
@@ -349,9 +350,7 @@ class ReverseDcfEngine:
                     }
                 )
             else:
-                sign_change = any(
-                    lower <= points[start] <= upper for lower, upper in brackets
-                )
+                sign_change = any(lower <= points[start] <= upper for lower, upper in brackets)
                 sampled_match_points.append(
                     {
                         "classification": (
@@ -561,10 +560,7 @@ class ReverseDcfEngine:
             raise ValueError("reinvestment_return must be positive when supplied")
         if assumptions.reinvestment_return is not None and (
             assumptions.ebit_margin < 0.0
-            or (
-                assumptions.ebit_margin_start is not None
-                and assumptions.ebit_margin_start < 0.0
-            )
+            or (assumptions.ebit_margin_start is not None and assumptions.ebit_margin_start < 0.0)
         ):
             raise UnsupportedValuationModel(
                 "ROIC-based reinvestment is unsupported for negative NOPAT"

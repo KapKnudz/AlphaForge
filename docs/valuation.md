@@ -83,15 +83,18 @@ ranking never masquerades as a discounted-cash-flow.
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,
-  `projected_cash_flows`, plus `implied` solves for
+  `projected_cash_flows`, plus `implied` diagnostics for
   `revenue_growth / ebit_margin / terminal_growth` within
   `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`. Exports include the operative
-  growth-fade endpoint and label each implied result as a conditional one-variable
-  solve. Endpoint prices, deterministic sampled ranges, above/below direction,
-  target-denominated boundary gaps, and sampled monotonicity/interior extrema are
-  reported without claiming that a finite scan proves the full range. Near-bound
-  terminal-growth roots and discounted-terminal-value dependence are qualifications,
-  not economic conclusions.
+  growth-fade endpoint and label each candidate as a conditional one-variable
+  solve. Sign-changing brackets remain distinct from isolated tolerance matches
+  and contiguous tolerance-match regions; a sampled region is neither a finite
+  root list nor proof of a continuous equivalence interval. Endpoint prices,
+  deterministic sampled ranges, above/below direction, target-denominated boundary
+  gaps, and sampled monotonicity/interior extrema are reported without claiming
+  that a finite scan proves the full range or analytical exactness. Terminal-growth
+  candidates near the upper cap and discounted-terminal-value dependence are
+  qualifications, not economic conclusions.
 * **Export:** `alphaforge rank` retains original outputs, then writes
   `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)

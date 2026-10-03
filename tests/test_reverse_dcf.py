@@ -101,9 +101,7 @@ def test_range_diagnostics_classify_no_sign_change_match_without_crossing():
     assert len(matches) == 1
     assert matches[0]["classification"] == "sampled_no_sign_change_match"
     assert matches[0]["associated_sign_change_bracket_count"] == 0
-    assert "tangency or analytical exactness is not established" in matches[0][
-        "qualification"
-    ]
+    assert "tangency or analytical exactness is not established" in matches[0]["qualification"]
     assert diagnostics["sign_change_bracket_count"] == 0
 
 
@@ -188,3 +186,29 @@ def test_range_diagnostics_classify_contiguous_plateau_samples_as_region():
     assert region["sample_count"] > 1
     assert region["associated_sign_change_bracket_count"] == 0
     assert "continuous equivalence interval is not established" in region["qualification"]
+
+
+def test_range_diagnostics_do_not_turn_plateau_roundoff_into_a_crossing():
+    assumptions = replace(
+        _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02).assumptions,
+        ebit_margin=24.2 / 121.0,
+        ebit_margin_start=24.2 / 121.0,
+    )
+    inputs = replace(
+        _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02),
+        current_price=3.171574253715503,
+        current_revenue=121.0,
+        assumptions=assumptions,
+    )
+
+    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+        inputs,
+        "terminal_growth",
+        -0.01,
+        0.04,
+    )
+
+    assert brackets == ()
+    assert matches == ()
+    assert len(diagnostics["sampled_match_regions"]) == 1
+    assert diagnostics["sampled_match_regions"][0]["associated_sign_change_bracket_count"] == 0

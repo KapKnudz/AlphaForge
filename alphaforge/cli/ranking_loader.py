@@ -1372,10 +1372,8 @@ def load_results_for_company(
                         if _bounds is None:
                             continue
                         try:
-                            _diagnostics, _brackets, _sample_matches = (
-                                engine.diagnose_solve_range(
-                                    dcf_inputs, _assump, _bounds[0], _bounds[1]
-                                )
+                            _diagnostics, _brackets, _sample_matches = engine.diagnose_solve_range(
+                                dcf_inputs, _assump, _bounds[0], _bounds[1]
                             )
                             _roots = []
                             for _lower, _upper in _brackets:
@@ -1478,9 +1476,7 @@ def load_results_for_company(
                                         ),
                                         **_equity_qualification(_valuation.equity_value),
                                         "near_bound": _root_near_bound,
-                                        "near_bound_side": (
-                                            "upper" if _root_near_bound else None
-                                        ),
+                                        "near_bound_side": ("upper" if _root_near_bound else None),
                                         "interpretation": (
                                             "near-bound terminal-growth equivalence is conditional and "
                                             "assumption-sensitive, not an economic conclusion"
@@ -1500,9 +1496,7 @@ def load_results_for_company(
                                 _root["solution_evidence"] == "sign_change_bracket"
                                 for _root in _root_summaries
                             )
-                            _sample_match_candidate_count = (
-                                len(_root_summaries) - _crossing_count
-                            )
+                            _sample_match_candidate_count = len(_root_summaries) - _crossing_count
                             reverse_dcf_results[_assump] = {
                                 **_diagnostics,
                                 "implied_assumption": _chosen["implied_assumption"],
