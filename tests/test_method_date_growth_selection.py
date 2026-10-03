@@ -1499,8 +1499,10 @@ def test_measured_roic_exports_fade_and_nonmonotonic_reverse_diagnostics(monkeyp
     assert growth["solve_scope"] == (
         "one-variable conditional solve; all other assumptions held fixed"
     )
-    assert growth["root_count_on_grid"] == 1
-    assert growth["root_uniqueness"].startswith("one crossing observed")
+    assert growth["candidate_solution_count"] == 1
+    assert growth["crossing_count_on_grid"] == 1
+    assert growth["sample_match_candidate_count"] == 0
+    assert "conditional numerical evidence only" in growth["solution_qualification"]
 
     terminal = result["implied"]["terminal_growth"]
     assert terminal["error"]
@@ -1565,7 +1567,8 @@ def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
     terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["root_count_on_grid"] == 2
+    assert terminal["candidate_solution_count"] == 2
+    assert terminal["crossing_count_on_grid"] == 2
     assert terminal["implied_assumption"] == pytest.approx(-0.00714154, abs=1e-6)
     assert terminal["near_bound"] is False
     assert terminal["near_bound_side"] is None
@@ -1578,6 +1581,36 @@ def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
     assert upper_root["near_bound"] is True
     assert upper_root["near_bound_side"] == "upper"
     assert "conditional and assumption-sensitive" in upper_root["interpretation"]
+
+
+def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3.171574253715503}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 2.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["solution_status"] == "sampled_match_region"
+    assert terminal["candidate_roots"] == []
+    assert terminal["candidate_solution_count"] == 0
+    assert terminal["sign_change_bracket_count"] == 0
+    assert "no finite root list" in terminal["solution_evidence"]
+    assert "implied_assumption" not in terminal
+    assert len(terminal["sampled_match_regions"]) == 1
+    region = terminal["sampled_match_regions"][0]
+    assert region["lower_sample_assumption"] == pytest.approx(0.02)
+    assert region["upper_sample_assumption"] == pytest.approx(0.04)
+    assert "not established" in region["qualification"]
 
 
 def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp_path):

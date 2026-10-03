@@ -266,7 +266,7 @@ class ReverseDcfEngine:
         *,
         sample_intervals: int = 200,
         price_tolerance: float = 1e-6,
-    ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[float, ...]]:
+    ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
         if assumption not in _SUPPORTED_ASSUMPTIONS:
             raise ValueError(f"unsupported implied assumption: {assumption}")
@@ -285,16 +285,76 @@ class ReverseDcfEngine:
         if not all(isfinite(price) for price in prices):
             raise ValueError("reverse DCF range diagnostic produced a non-finite price")
         differences = tuple(price - inputs.current_price for price in prices)
-        brackets = tuple(
+        matches = tuple(abs(difference) <= price_tolerance for difference in differences)
+        brackets: list[tuple[float, float]] = []
+        sampled_match_points = []
+        sampled_match_regions = []
+        index = 0
+        while index <= sample_intervals:
+            if not matches[index]:
+                index += 1
+                continue
+            start = index
+            while index < sample_intervals and matches[index + 1]:
+                index += 1
+            end = index
+            if start != end:
+                sampled_match_regions.append(
+                    {
+                        "classification": "contiguous_samples_within_tolerance",
+                        "lower_sample_assumption": points[start],
+                        "upper_sample_assumption": points[end],
+                        "sample_count": end - start + 1,
+                        "maximum_absolute_price_difference": max(
+                            abs(differences[match_index])
+                            for match_index in range(start, end + 1)
+                        ),
+                        "qualification": (
+                            "contiguous grid samples match within price tolerance; "
+                            "a continuous equivalence interval is not established"
+                        ),
+                    }
+                )
+            elif start == 0 or start == sample_intervals:
+                sampled_match_points.append(
+                    {
+                        "classification": "sampled_endpoint_match",
+                        "location": "lower_endpoint" if start == 0 else "upper_endpoint",
+                        "assumption": points[start],
+                        "modeled_price": prices[start],
+                        "price_difference": differences[start],
+                        "qualification": (
+                            "endpoint sample matches within price tolerance; "
+                            "analytical exactness is not established"
+                        ),
+                    }
+                )
+            elif differences[start - 1] * differences[start + 1] < 0:
+                brackets.append((points[start - 1], points[start + 1]))
+            else:
+                sampled_match_points.append(
+                    {
+                        "classification": "sampled_no_sign_change_match",
+                        "location": "interior",
+                        "assumption": points[start],
+                        "modeled_price": prices[start],
+                        "price_difference": differences[start],
+                        "qualification": (
+                            "isolated sample matches within price tolerance without a sampled "
+                            "sign change; tangency or analytical exactness is not established"
+                        ),
+                    }
+                )
+            index += 1
+
+        brackets.extend(
             (points[index], points[index + 1])
             for index in range(sample_intervals)
-            if differences[index] * differences[index + 1] < 0
+            if not matches[index]
+            and not matches[index + 1]
+            and differences[index] * differences[index + 1] < 0
         )
-        exact_points = tuple(
-            point
-            for point, difference in zip(points, differences, strict=True)
-            if abs(difference) <= price_tolerance
-        )
+        brackets.sort()
 
         changes = []
         for left, right in zip(prices, prices[1:], strict=False):
@@ -368,11 +428,16 @@ class ReverseDcfEngine:
             "monotonicity": monotonicity,
             "interior_extrema": extrema,
             "diagnostic_grid_points": sample_intervals + 1,
+            "price_tolerance": price_tolerance,
+            "sign_change_bracket_count": len(brackets),
+            "sampled_match_point_count": len(sampled_match_points),
+            "sampled_match_points": sampled_match_points,
+            "sampled_match_regions": sampled_match_regions,
             "range_qualification": (
                 "sampled range only; extrema or roots between grid points are not excluded"
             ),
         }
-        return diagnostics, brackets, exact_points
+        return diagnostics, tuple(brackets), tuple(sampled_match_points)
 
     def _value_with(
         self,

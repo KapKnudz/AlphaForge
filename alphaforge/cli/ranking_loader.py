@@ -1372,8 +1372,10 @@ def load_results_for_company(
                         if _bounds is None:
                             continue
                         try:
-                            _diagnostics, _brackets, _exact_points = engine.diagnose_solve_range(
-                                dcf_inputs, _assump, _bounds[0], _bounds[1]
+                            _diagnostics, _brackets, _sample_matches = (
+                                engine.diagnose_solve_range(
+                                    dcf_inputs, _assump, _bounds[0], _bounds[1]
+                                )
                             )
                             _roots = []
                             for _lower, _upper in _brackets:
@@ -1385,33 +1387,34 @@ def load_results_for_company(
                                         "price_difference": _res.price_difference,
                                         "iterations": _res.iterations,
                                         "root_bracket": [_lower, _upper],
+                                        "solution_evidence": "sign_change_bracket",
+                                        "solution_evidence_qualification": (
+                                            "opposite-signed sampled residuals bracket a conditional "
+                                            "numerical solution"
+                                        ),
                                         "valuation": _res.valuation,
                                     }
                                 )
-                            for _point in _exact_points:
-                                if any(
-                                    abs(_root["implied_assumption"] - _point)
-                                    <= (_bounds[1] - _bounds[0])
-                                    / (_diagnostics["diagnostic_grid_points"] - 1)
-                                    for _root in _roots
-                                ):
-                                    continue
+                            for _match in _sample_matches:
                                 _point_inputs = replace(
                                     dcf_inputs,
                                     assumptions=replace(
-                                        dcf_inputs.assumptions, **{_assump: _point}
+                                        dcf_inputs.assumptions,
+                                        **{_assump: _match["assumption"]},
                                     ),
                                 )
                                 _point_value = engine.value(_point_inputs)
                                 _roots.append(
                                     {
-                                        "implied_assumption": _point,
+                                        "implied_assumption": _match["assumption"],
                                         "modeled_price": _point_value.value_per_share,
                                         "price_difference": (
                                             _point_value.value_per_share - dcf_inputs.current_price
                                         ),
                                         "iterations": 0,
-                                        "root_bracket": [_point, _point],
+                                        "root_bracket": None,
+                                        "solution_evidence": _match["classification"],
+                                        "solution_evidence_qualification": _match["qualification"],
                                         "valuation": _point_value,
                                     }
                                 )
@@ -1420,6 +1423,20 @@ def load_results_for_company(
                                 "one-variable conditional solve; all other assumptions held fixed"
                             )
                             if not _roots:
+                                if _diagnostics["sampled_match_regions"]:
+                                    reverse_dcf_results[_assump] = {
+                                        **_diagnostics,
+                                        "solution_status": "sampled_match_region",
+                                        "solve_scope": _conditional_scope,
+                                        "candidate_roots": [],
+                                        "candidate_solution_count": 0,
+                                        "solution_evidence": (
+                                            "contiguous sampled assumptions match within price "
+                                            "tolerance; no finite root list or continuous "
+                                            "equivalence interval is established"
+                                        ),
+                                    }
+                                    continue
                                 _direction = _diagnostics["no_solution_direction"]
                                 _error = (
                                     f"target price is {_direction} the sampled attainable range"
@@ -1429,8 +1446,10 @@ def load_results_for_company(
                                 reverse_dcf_results[_assump] = {
                                     **_diagnostics,
                                     "error": _error,
+                                    "solution_status": "no_candidate_solution",
                                     "solve_scope": _conditional_scope,
                                     "candidate_roots": [],
+                                    "candidate_solution_count": 0,
                                 }
                                 continue
 
@@ -1475,6 +1494,13 @@ def load_results_for_company(
                             _near_cap_candidate_present = any(
                                 _root["near_bound"] for _root in _root_summaries
                             )
+                            _crossing_count = sum(
+                                _root["solution_evidence"] == "sign_change_bracket"
+                                for _root in _root_summaries
+                            )
+                            _sample_match_candidate_count = (
+                                len(_root_summaries) - _crossing_count
+                            )
                             reverse_dcf_results[_assump] = {
                                 **_diagnostics,
                                 "implied_assumption": _chosen["implied_assumption"],
@@ -1489,12 +1515,24 @@ def load_results_for_company(
                                 "equity_value": _chosen_value.equity_value,
                                 **_equity_qualification(_chosen_value.equity_value),
                                 "root_bracket": _chosen["root_bracket"],
+                                "selected_solution_evidence": _chosen["solution_evidence"],
+                                "selected_solution_evidence_qualification": _chosen[
+                                    "solution_evidence_qualification"
+                                ],
                                 "candidate_roots": _root_summaries,
-                                "root_count_on_grid": len(_root_summaries),
-                                "root_uniqueness": (
-                                    "multiple crossings observed on the diagnostic grid"
-                                    if len(_root_summaries) > 1
-                                    else "one crossing observed; additional roots between grid points are not excluded"
+                                "candidate_solution_count": len(_root_summaries),
+                                "crossing_count_on_grid": _crossing_count,
+                                "sample_match_candidate_count": _sample_match_candidate_count,
+                                "solution_status": "candidate_solutions",
+                                "solution_evidence": (
+                                    f"{_crossing_count} sampled sign-change bracket(s); "
+                                    f"{_sample_match_candidate_count} isolated tolerance-match "
+                                    f"candidate(s); {len(_diagnostics['sampled_match_regions'])} "
+                                    "contiguous tolerance-match region(s)"
+                                ),
+                                "solution_qualification": (
+                                    "conditional numerical evidence only; additional roots or "
+                                    "extrema between grid points are not excluded"
                                 ),
                                 "solve_scope": _conditional_scope,
                                 "terminal_value_share_of_enterprise_value": (
