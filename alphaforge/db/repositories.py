@@ -1482,6 +1482,19 @@ def load_evidence_selection_manifest(
     )
 
     if has_manifest_v2_observations(conn, company_id=company_id, as_of=as_of):
+        if source_input_fingerprint is None:
+            # The latest immutable batch in this company/as-of/rules scope
+            # owns the normalized feed identity. Do not inherit it from an
+            # older persisted manifest; changed and incomplete attempts must
+            # use their own batch provenance. Explicit values remain authoritative.
+            source_batch = conn.execute(
+                """SELECT source_input_fingerprint FROM evidence_observation_batches
+                   WHERE company_id=? AND as_of=? AND report_rules_fingerprint=?
+                   ORDER BY effective_at DESC, batch_id DESC LIMIT 1""",
+                (company_id, as_of[:10], str(report_rules.get("fingerprint") or "")),
+            ).fetchone()
+            if source_batch is not None:
+                source_input_fingerprint = str(source_batch[0])
         immutable_candidates, immutable_packet_rows = manifest_v2_projection(
             conn,
             company_id=company_id,

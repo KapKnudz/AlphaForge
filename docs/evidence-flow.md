@@ -301,10 +301,14 @@ inadmissible on first run; unchanged reruns skip feed entries that already
 have complete current-fingerprint documents and rebuild the manifest with
 prior considered candidates and typed dispositions when the persisted feed
 fingerprint matches and the candidate remains in that feed. The normalized feed
-fingerprint is part of the manifest identity. A refetched detail that disappears
-cannot erase a previously blocked candidate; changed feed inputs do not inherit
-prior dispositions. The shared ranking/readiness view reconstructs candidate
-accounting from that persisted manifest. Manifest JSON is immutable: recording
+fingerprint is part of the manifest identity. When the repository reconstructs a
+V2 manifest without an explicit fingerprint, the newest immutable batch matching
+the exact company, cutoff, and report-rule fingerprint supplies it; an older
+persisted manifest never supplies provenance for a changed or incomplete batch.
+A caller-supplied fingerprint remains authoritative. A refetched detail that
+disappears cannot erase a previously blocked candidate; changed feed inputs do
+not inherit prior dispositions. The shared ranking/readiness view reconstructs
+candidate accounting from that persisted manifest. Manifest JSON is immutable: recording
 the same identity verifies identical content and may bind its packet hash once,
 but does not delete and reinsert history. For new V2 evidence, Swedish and English release URLs are independent candidate
 identities with independently retained artifacts and extractions. An append-only
@@ -447,7 +451,8 @@ admission/windowing, fallback/detail terminal-state collision and genuine
 revocation, covered periods versus forecasts/comparators, ambiguous and
 non-calendar identity, full quarter slots, independent bilingual offline reuse,
 withdrawals/revisions, unavailable suppressed artifacts, configuration refresh,
-and old nonnull fiscal correction without historical mutation. These behavioral
+old nonnull fiscal correction without historical mutation, loader/export replay
+identity, and current-feed provenance after an incomplete batch. These behavioral
 regressions complement the structural manifest checker: a green checker alone
 is not evidence that the runtime contract holds. `tests/test_greptile_fiscal_context.py`
 pins covered/comparator title ordering, sentence-scoped and inside-heading
