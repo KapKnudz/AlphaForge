@@ -221,10 +221,21 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     assert main(["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]) == 0
     old_replay = json.loads(capsys.readouterr().out)
     old_summary = json.loads(old_run["inputs_summary"])
-    old_text_hash = conn.execute(
-        "SELECT textual_context_hash FROM executed_numerical_runs WHERE run_id=?",
-        (old_run["id"],),
-    ).fetchone()[0]
+    old_input_body = tuple(
+        conn.execute(
+            "SELECT financial_inputs_hash,body,rules FROM numerical_input_bodies "
+            "WHERE numerical_identity=?",
+            (old_summary["numerical_identity"],),
+        ).fetchone()
+    )
+    old_output_body = tuple(
+        conn.execute(
+            "SELECT numerical_identity,textual_context,textual_context_hash,outputs,outputs_hash "
+            "FROM executed_numerical_runs WHERE run_id=?",
+            (old_run["id"],),
+        ).fetchone()
+    )
+    old_text_hash = old_output_body[2]
     assert old_replay["outputs"]["dcf"][str(company_id)]["dcf"]["available"] is True
     manifests = list(
         conn.execute("SELECT manifest_id, manifest_json FROM evidence_selection_manifests")
@@ -239,6 +250,11 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     assert current["report_rules_fingerprint"] != old["report_rules_fingerprint"]
     assert current["extraction_id"] == old["extraction_id"]
     assert load_evidence_packet(conn, company_id, AS_OF)["packet_hash"] != old_hash
+    # Acquisition above uses synthetic HTTP, but this is the native retained-run
+    # replay command: it must consume the original immutable bodies after upgrade.
+    assert main(["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]) == 0
+    post_upgrade_old_replay = json.loads(capsys.readouterr().out)
+    assert post_upgrade_old_replay["outputs"] == old_replay["outputs"]
     assert main(["--dsn", dsn, "rank", "--as-of", AS_OF]) == 0
     capsys.readouterr()
     repaired_run = conn.execute(
@@ -261,6 +277,26 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     assert (
         repaired_outputs["scores"][0]["input_selection"]
         == old_outputs["scores"][0]["input_selection"]
+    )
+    assert (
+        tuple(
+            conn.execute(
+                "SELECT financial_inputs_hash,body,rules FROM numerical_input_bodies "
+                "WHERE numerical_identity=?",
+                (old_summary["numerical_identity"],),
+            ).fetchone()
+        )
+        == old_input_body
+    )
+    assert (
+        tuple(
+            conn.execute(
+                "SELECT numerical_identity,textual_context,textual_context_hash,outputs,outputs_hash "
+                "FROM executed_numerical_runs WHERE run_id=?",
+                (old_run["id"],),
+            ).fetchone()
+        )
+        == old_output_body
     )
     assert (
         list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
