@@ -16,7 +16,6 @@ from test_method_date_growth_selection import annual, upsert_financial_periods
 from test_post26_evidence_repairs import pdf
 
 from alphaforge.cli.main import main
-from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.db.connection import get_connection
 from alphaforge.db.evidence_repository import current_candidate_observations
@@ -38,6 +37,10 @@ def cli_lane(tmp_path, monkeypatch, capsys):
     dsn = f"sqlite:///{tmp_path / 'live.db'}"
     conn = get_connection(Settings.from_env(dsn=dsn))
     migrate(conn)
+
+    from alphaforge.providers.mfn.scraper import MfnScraper
+
+    scrape_details = MfnScraper.scrape_details
 
     def run(row, *, allow_pdf=True):
         ticker = row["ticker"]
@@ -76,7 +79,7 @@ def cli_lane(tmp_path, monkeypatch, capsys):
         conn.commit()
         entry = {
             "url": row["source_url"],
-            "properties": {"lang": "en", "tags": None},
+            "properties": {"lang": "en", "tags": row.get("feed_tags")},
             "content": {"title": row["input"]["title"], "publish_date": row["published_at"]},
         }
         path = urlsplit(row["source_url"]).path.split("/a/", 1)[1]
@@ -107,13 +110,32 @@ def cli_lane(tmp_path, monkeypatch, capsys):
         def unexpected_network(*_args, **_kwargs):
             pytest.fail("unexpected issuer discovery or paid-model network request")
 
-        monkeypatch.setattr("requests.sessions.Session.request", unexpected_network)
-        monkeypatch.setattr("alphaforge.providers.mfn.scraper.request_with_retry", transport)
-        monkeypatch.setattr("alphaforge.providers.mfn.scraper.time.sleep", lambda *_: None)
-        monkeypatch.setattr("alphaforge.evidence.flow.request_with_retry", download)
-        exit_code = main(
-            ["--dsn", dsn, "evidence", "--ticker", ticker, "--as-of", AS_OF, "--diagnostic"]
-        )
+        with monkeypatch.context() as acquisition:
+            acquisition.setattr("requests.sessions.Session.request", unexpected_network)
+            acquisition.setattr("alphaforge.providers.mfn.scraper.request_with_retry", transport)
+            if row["input"].get("fiscal_period"):
+
+                def with_provider_fiscal_period(scraper, *args, **kwargs):
+                    return [
+                        {**article, "fiscal_period": row["input"]["fiscal_period"]}
+                        for article in scrape_details(scraper, *args, **kwargs)
+                    ]
+
+                acquisition.setattr(MfnScraper, "scrape_details", with_provider_fiscal_period)
+            acquisition.setattr("alphaforge.providers.mfn.scraper.time.sleep", lambda *_: None)
+            acquisition.setattr("alphaforge.evidence.flow.request_with_retry", download)
+            exit_code = main(
+                [
+                    "--dsn",
+                    dsn,
+                    "evidence",
+                    "--ticker",
+                    ticker,
+                    "--as-of",
+                    AS_OF,
+                    "--diagnostic",
+                ]
+            )
         diagnostic = json.loads(capsys.readouterr().out)
         return exit_code, diagnostic, company_id
 
@@ -148,8 +170,11 @@ def test_actual_swedish_reproductions_through_public_cli(cli_lane, row):
 @pytest.mark.parametrize(
     "row", [row for row in FIXTURE["fiscal"] if row["old_period"] != row["expected"]]
 )
-def test_actual_fiscal_change_appends_new_interpretation_not_restamp(cli_lane, monkeypatch, row):
+def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
+    cli_lane, monkeypatch, capsys, row
+):
     conn, run = cli_lane
+    dsn = f"sqlite:///{conn.execute('PRAGMA database_list').fetchone()[2]}"
     # Pin the scout's old resolver output, not the new code with an old stamp.
     # All persistence, extraction, CLI and manifest code remains real.
     with monkeypatch.context() as historical:
@@ -165,11 +190,29 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(cli_lane, m
         )
         _, old_diagnostic, company_id = run(row)
         old_hash = load_evidence_packet(conn, company_id, AS_OF)["packet_hash"]
-        old_numbers = load_results_for_company(conn, company_id, AS_OF)
-        old_dcf = old_numbers["reverse_dcf"]
-        assert old_dcf["dcf"]["available"] is True
     assert old_diagnostic["status"] == "complete"
     old = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[0]
+    assert old["fiscal_period"] == row["old_period"]
+    conn.execute(
+        "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) VALUES (?,?,?,?)",
+        (company_id, row["ticker"], "fiscal-repair", "retained-financial-inputs"),
+    )
+    conn.commit()
+    assert main(["--dsn", dsn, "rank", "--as-of", AS_OF]) == 0
+    capsys.readouterr()
+    old_run = conn.execute(
+        "SELECT id,inputs_summary FROM ranking_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert main(
+        ["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]
+    ) == 0
+    old_replay = json.loads(capsys.readouterr().out)
+    old_summary = json.loads(old_run["inputs_summary"])
+    old_text_hash = conn.execute(
+        "SELECT textual_context_hash FROM executed_numerical_runs WHERE run_id=?",
+        (old_run["id"],),
+    ).fetchone()[0]
+    assert old_replay["outputs"]["dcf"][str(company_id)]["dcf"]["available"] is True
     manifests = list(
         conn.execute("SELECT manifest_id, manifest_json FROM evidence_selection_manifests")
     )
@@ -183,10 +226,31 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(cli_lane, m
     assert current["report_rules_fingerprint"] != old["report_rules_fingerprint"]
     assert current["extraction_id"] == old["extraction_id"]
     assert load_evidence_packet(conn, company_id, AS_OF)["packet_hash"] != old_hash
-    repaired_numbers = load_results_for_company(conn, company_id, AS_OF)
-    assert repaired_numbers["reverse_dcf"] == old_dcf
-    assert repaired_numbers["selection"] == old_numbers["selection"]
-    assert repaired_numbers["financial"] == old_numbers["financial"]
+    assert main(["--dsn", dsn, "rank", "--as-of", AS_OF]) == 0
+    capsys.readouterr()
+    repaired_run = conn.execute(
+        "SELECT id,inputs_summary FROM ranking_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert main(
+        ["--dsn", dsn, "replay", "--run-id", str(repaired_run["id"])]
+    ) == 0
+    repaired_replay = json.loads(capsys.readouterr().out)
+    repaired_summary = json.loads(repaired_run["inputs_summary"])
+    repaired_text_hash = conn.execute(
+        "SELECT textual_context_hash FROM executed_numerical_runs WHERE run_id=?",
+        (repaired_run["id"],),
+    ).fetchone()[0]
+    old_outputs = old_replay["outputs"]
+    repaired_outputs = repaired_replay["outputs"]
+    assert repaired_text_hash != old_text_hash
+    assert repaired_summary["financial_inputs_hash"] == old_summary["financial_inputs_hash"]
+    assert repaired_summary["numerical_identity"] == old_summary["numerical_identity"]
+    assert repaired_outputs["dcf"] == old_outputs["dcf"]
+    assert repaired_outputs["metrics"] == old_outputs["metrics"]
+    assert (
+        repaired_outputs["scores"][0]["input_selection"]
+        == old_outputs["scores"][0]["input_selection"]
+    )
     assert (
         list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
             : len(old_rows)
@@ -204,49 +268,114 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(cli_lane, m
 
 
 @pytest.mark.parametrize(
-    "doc,expected",
+    "case,title,body,feed_tags,provider_period,expected,basis,limitation",
     [
         (
-            {
-                "title": "Annual and Sustainability Report 2025 compared with 2024",
-                "report_kind": "annual",
-            },
-            "2025",
-        ),
-        (
-            {"title": "Annual and Sustainability Report forecast 2027", "report_kind": "annual"},
+            "comparator",
+            "Annual and Sustainability Report 2025 compared with 2024",
+            "The report covers financial year 2025.",
+            ["sub:report", "sub:report:annual"],
             None,
-        ),
-        ({"title": "Annual and Sustainability Report 2025", "fiscal_period": "2024"}, None),
-        (
-            {
-                "title": "Report publication",
-                "body": "Annual and Sustainability Report 2025. Annual and Sustainability Report 2024.",
-                "report_kind": "annual",
-            },
+            "2025",
+            "report_title",
             None,
         ),
         (
-            {
-                "title": "Report publication",
-                "body": "Annual and Sustainability Report for 2025.",
-                "report_kind": "annual",
-            },
-            "2025",
+            "forecast",
+            "Annual and Sustainability Report forecast 2027",
+            "The forecast concerns 2027.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
         ),
         (
-            {
-                "title": "Annual Report 2025, Q4 2025",
-                "document_type": "ANNUAL_REPORT",
-                "report_kind": "annual",
-            },
-            "2025",
+            "provider-conflict",
+            "Annual and Sustainability Report 2025",
+            "The report covers financial year 2025.",
+            ["sub:report", "sub:report:annual"],
+            "2024",
+            None,
+            "conflicting_provider_title",
+            "fiscal_identity_ambiguous",
         ),
         (
-            {"title": "Year-end Report 2025 compared with Q1 2024", "report_kind": "annual"},
+            "contradictory-headings",
+            "Annual Report publication",
+            "Annual and Sustainability Report 2025. Annual and Sustainability Report 2024.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "conflicting_covered_headings",
+            "fiscal_identity_ambiguous",
+        ),
+        (
+            "covered-heading",
+            "Annual Report publication",
+            "Annual and Sustainability Report for 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "misleading-title-q4",
+            "Annual Report 2025, Q4 2025",
+            "The annual report covers 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "report_title",
+            None,
+        ),
+        (
+            "misleading-body-q4",
+            "Annual and Sustainability Report 2025",
+            "Fourth quarter 2025 highlights are included in this annual report.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "report_title",
+            None,
+        ),
+        (
+            "year-end-comparator",
+            "Year-end Report 2025 compared with Q1 2024",
+            "Fourth quarter 2025.",
+            ["sub:report", "sub:report:interim:q4"],
+            None,
             "2025/2025-q4",
+            "report_title",
+            None,
         ),
     ],
 )
-def test_compound_and_year_end_retain_comparator_forecast_conflict_guards(doc, expected):
-    assert resolve_fiscal_identity(doc)[0] == expected
+def test_compound_and_year_end_guards_through_public_evidence_cli(
+    cli_lane,
+    case,
+    title,
+    body,
+    feed_tags,
+    provider_period,
+    expected,
+    basis,
+    limitation,
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": f"https://mfn.se/a/guard/{case}",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body,
+        "feed_tags": feed_tags,
+        "input": {"title": title, "fiscal_period": provider_period},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == expected
+    assert source["fiscal_period_source"] == basis
+    if limitation is not None:
+        assert limitation in diagnostic["limitations"]
