@@ -708,19 +708,24 @@ def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
     mark_evidence_packets_unusable(
         conn, company_id=company_id, as_of=AS_OF, reason="evidence_incomplete"
     )
-    conn.execute(
-        "DELETE FROM evidence_selection_manifests WHERE company_id=? AND as_of=?",
-        (company_id, AS_OF),
-    )
-    assert (
-        conn.execute(
-            "SELECT 1 FROM evidence_selection_manifests WHERE company_id=? AND as_of=?",
-            (company_id, AS_OF),
-        ).fetchone()
-        is None
-    )
+    # Keep the old manifest present in the exact scope: the changed batch must
+    # supply identity even when stale persisted provenance is available.
+    stale_row = conn.execute(
+        """SELECT manifest_id, manifest_json, report_rules_fingerprint
+           FROM evidence_selection_manifests
+           WHERE manifest_id=? AND company_id=? AND as_of=?""",
+        (original_id, company_id, AS_OF),
+    ).fetchone()
+    assert stale_row is not None
+    assert stale_row["manifest_id"] == original_id
+    assert stale_row["report_rules_fingerprint"] == report_rules_metadata()["fingerprint"]
+    assert json.loads(stale_row["manifest_json"])["source_input_fingerprint"] == original_fp
 
     packet, current = view(lane)
+    assert conn.execute(
+        "SELECT 1 FROM evidence_selection_manifests WHERE manifest_id=?",
+        (original_id,),
+    ).fetchone() is not None
     assert packet is None
     assert current.source_input_fingerprint == changed_fp
     assert current.source_input_fingerprint != original_fp
