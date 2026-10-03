@@ -973,6 +973,7 @@ def export_ranking_files(
     *,
     evidence_packet_hash: str | None = None,
     evidence_packet_hashes: dict[str, str] | None = None,
+    numerical_provenance: dict | None = None,
 ) -> tuple[Path, Path]:
     from dataclasses import asdict
 
@@ -1001,6 +1002,8 @@ def export_ranking_files(
         "evidence_packet_hashes": evidence_packet_hashes or {},
         "scores": [asdict(s) for s in ranking.scores],
     }
+    if numerical_provenance is not None:
+        ranking_data["numerical_provenance"] = numerical_provenance
 
     ranking_json_path = exports_dir / "ranking.json"
     ranking_json_path.write_text(json.dumps(ranking_data, indent=2, ensure_ascii=False))
@@ -1186,46 +1189,28 @@ def cmd_rank(args: argparse.Namespace) -> int:
                 )
             )
 
+    companies = list({company.id: company for company in companies}.values())
     if not companies:
         print("no companies to rank", file=sys.stderr)
         return 1
 
-    # Reconstruct deterministic inputs from stored observations. The rank
-    # command must not fetch live data or substitute an empty result map.
-    from alphaforge.cli.ranking_loader import load_results_for_company
+    # Stable universe order; freeze and durably retain before any calculation.
+    from alphaforge.db.numerical_runs import (
+        canonical,
+        capture_inputs,
+        digest,
+        evaluate,
+        retain_inputs,
+        retain_outputs,
+        rules_bundle,
+    )
 
-    results_by_company: dict[int, dict] = {}
-    for company in companies:
-        results_by_company[company.id] = load_results_for_company(conn, company.id, as_of)
-
-    # Run ranking
+    companies.sort(key=lambda c: (c.ticker, c.id))
+    source_rows = {}
+    body, textual_context = capture_inputs(conn, companies, as_of, source_rows=source_rows)
+    numerical_identity, financial_inputs_hash = retain_inputs(conn, body, rules_bundle())
+    ranking, _, original_outputs = evaluate(body, textual_context)
     engine = RankingEngine()
-    ranking = engine.rank(companies, results_by_company)
-
-    # The readiness gate is deterministic and runs before any future model
-    # call. Persist its verdict alongside each score for auditability.
-    from alphaforge.core.gate.readiness import AgentReadinessGate
-
-    gate = AgentReadinessGate()
-    for score in ranking.scores:
-        loaded = results_by_company.get(score.company_id, {})
-        candidate = loaded.get("candidate")
-        if candidate is None:
-            from types import SimpleNamespace
-
-            candidate = SimpleNamespace(
-                company_id=score.company_id,
-                research_evidence=loaded.get("research_evidence") or {},
-                full_results=loaded,
-            )
-        candidate.ticker = score.ticker
-        candidate.ranking_model = score.ranking_model
-        assessment = gate.assess(candidate)
-        score.readiness_status = assessment.status
-        score.readiness_blockers = [f"{item.code}: {item.message}" for item in assessment.blockers]
-        score.readiness_limitations = [
-            f"{item.code}: {item.message}" for item in assessment.limitations
-        ]
 
     # Ranking provenance is the frozen evidence packet input, not a hash of
     # the resulting score JSON.  A multi-company run records the stable map in
@@ -1242,62 +1227,103 @@ def cmd_rank(args: argparse.Namespace) -> int:
         else None
     )
 
-    exports_dir = Path("exports") / as_of
-    ranking_json_path, ranking_csv_path = export_ranking_files(
-        ranking,
-        as_of,
-        engine.RANKING_MODEL_VERSION,
-        exports_dir,
-        evidence_packet_hash=evidence_packet_hash,
-        evidence_packet_hashes=evidence_packet_hashes,
-    )
-    # Export auditable DCF artefacts alongside the heuristic ranking —
-    # keeps valuation_score and DCF fair-value clearly separate.
-    dcf_path = exports_dir / "dcf.json"
-    try:
-        dcf_export: dict[str, dict] = {}
-        for company in companies:
-            loaded = results_by_company.get(company.id, {})
-            rd = loaded.get("reverse_dcf") or {}
-            if rd:
-                # Keep only serializable, auditable fields
-                dcf_export[str(company.id)] = rd
-            else:
-                dcf_export[str(company.id)] = {
-                    "status": "unavailable",
-                    "dcf": {
-                        "available": False,
-                        "policy_version": None,
-                        "missing_information": ["ranking_inputs_unavailable"],
-                        "warnings": [],
-                    },
-                }
-        dcf_path.write_text(json.dumps(dcf_export, indent=2, ensure_ascii=False, default=str))
-    except Exception as exc:
-        print(f"rank: DCF export failed, {dcf_path} not written: {exc}", file=sys.stderr)
-        return 1
-
     # Save ranking run to DB.
     universe_bytes = json.dumps(sorted([c.ticker for c in companies]), sort_keys=True).encode()
     universe_hash = hashlib.sha256(universe_bytes).hexdigest()
 
     eligible_count = sum(1 for s in ranking.scores if s.rank_eligible)
-    run_id = save_ranking_run(
-        conn,
-        as_of=as_of,
-        model_version=engine.RANKING_MODEL_VERSION,
-        packet_hash=evidence_packet_hash,
-        universe_hash=universe_hash,
-        company_count=len(ranking.scores),
-        eligible_count=eligible_count,
-        scores=[asdict(s) for s in ranking.scores],
-        inputs_summary={
-            "ranking_type": "deterministic_watchlist",
-            "total_companies": len(companies),
-            "eligible_count": eligible_count,
-            "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
-            "evidence_packet_hashes": evidence_packet_hashes,
-        },
+    try:
+        run_id = save_ranking_run(
+            conn,
+            as_of=as_of,
+            model_version=engine.RANKING_MODEL_VERSION,
+            packet_hash=evidence_packet_hash,
+            universe_hash=universe_hash,
+            company_count=len(ranking.scores),
+            eligible_count=eligible_count,
+            scores=[asdict(s) for s in ranking.scores],
+            inputs_summary={
+                "ranking_type": "deterministic_watchlist",
+                "total_companies": len(companies),
+                "eligible_count": eligible_count,
+                "ranking_models_used": list({s.ranking_model for s in ranking.scores}),
+                "evidence_packet_hashes": evidence_packet_hashes,
+                "financial_inputs_hash": financial_inputs_hash,
+                "numerical_identity": numerical_identity,
+            },
+            commit=False,
+        )
+        artifact_id = retain_outputs(
+            conn,
+            run_id,
+            numerical_identity,
+            textual_context,
+            original_outputs,
+            source_rows=source_rows,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    run_metadata = {
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "financial_inputs_hash": financial_inputs_hash,
+        "numerical_identity": numerical_identity,
+        "as_of": as_of,
+        "source_rows": source_rows,
+        "source_rows_hash": digest(source_rows),
+    }
+    provenance = {
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "financial_inputs_hash": financial_inputs_hash,
+        "numerical_identity": numerical_identity,
+        "row_id_namespace": "retained_numerical_body",
+        "source_rows_reference": "run.json#source_rows",
+    }
+    runs_dir = Path("exports") / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir = runs_dir / artifact_id
+
+    import shutil
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix=".publishing-", dir=runs_dir) as staging:
+        staging_dir = Path(staging)
+        export_ranking_files(
+            ranking,
+            as_of,
+            engine.RANKING_MODEL_VERSION,
+            staging_dir,
+            evidence_packet_hash=evidence_packet_hash,
+            evidence_packet_hashes=evidence_packet_hashes,
+            numerical_provenance=provenance,
+        )
+        (staging_dir / "dcf.json").write_text(canonical(original_outputs["dcf"]), encoding="utf-8")
+        (staging_dir / "outputs.json").write_text(canonical(original_outputs), encoding="utf-8")
+        (staging_dir / "run.json").write_text(canonical(run_metadata), encoding="utf-8")
+        names = {path.name for path in staging_dir.iterdir()}
+        if exports_dir.exists():
+            if (
+                not exports_dir.is_dir()
+                or {path.name for path in exports_dir.iterdir()} != names
+                or any(
+                    (exports_dir / name).read_bytes() != (staging_dir / name).read_bytes()
+                    for name in names
+                )
+            ):
+                raise FileExistsError(f"conflicting immutable run artifact: {artifact_id}")
+        else:
+            staging_dir.replace(exports_dir)
+
+    # Date directory is explicitly a mutable convenience, never replay authority.
+    latest_dir = Path("exports") / as_of
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("ranking.json", "ranking.csv", "dcf.json", "run.json"):
+        shutil.copyfile(exports_dir / name, latest_dir / name)
+    (latest_dir / "latest.json").write_text(
+        canonical({"mutable_latest_alias": True, "run_id": run_id, "artifact_id": artifact_id}),
+        encoding="utf-8",
     )
 
     print(
@@ -1307,8 +1333,27 @@ def cmd_rank(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     print(f"ranking_run_id={run_id}")
+    print(f"run_artifact_id={artifact_id}")
+    print(f"financial_inputs_hash={financial_inputs_hash}")
+    print(f"numerical_identity={numerical_identity}")
     print(f"evidence_packet_hashes={json.dumps(evidence_packet_hashes, sort_keys=True)}")
     return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    from alphaforge.config import Settings
+    from alphaforge.db.connection import get_connection
+    from alphaforge.db.migrations import migrate
+    from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run
+
+    conn = get_connection(Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env())
+    migrate(conn)
+    try:
+        print(canonical(replay_run(conn, args.run_id)))
+        return 0
+    except ReplayRefusal as exc:
+        print(canonical({"status": "not_replayable", "reason": exc.reason}), file=sys.stderr)
+        return 1
 
 
 def _company_id_from_args(conn, args: argparse.Namespace) -> int | None:
@@ -1468,6 +1513,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Watchlist CSV path (optional, uses DB watchlist if omitted)",
     )
     rank.set_defaults(func=cmd_rank)
+
+    replay = sub.add_parser(
+        "replay", help="Audit a retained executed run; never authorize new live analysis"
+    )
+    replay.add_argument("--run-id", type=int, required=True)
+    replay.set_defaults(func=cmd_replay)
 
     mfn_seed = sub.add_parser(
         "mfn-map-seed",

@@ -4,7 +4,7 @@ A clean, simple stock-research system for the Nordic small-cap universe: one mai
 
 ## Status
 
-Implemented: deterministic ranking/valuation exports and a one-company MFN/PDF evidence lane; thesis generation remains planned. Start with [`docs/architecture.md`](docs/architecture.md) for implemented paths, boundaries and contract ownership. The target design remains [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md).
+Implemented: deterministic ranking/valuation exports with executed-run audit replay, and a one-company MFN/PDF evidence lane; thesis generation remains planned. Start with [`docs/architecture.md`](docs/architecture.md) for implemented paths, boundaries and contract ownership. The target design remains [`docs/plans/2026-09-16-alphaforge-mvp.md`](docs/plans/2026-09-16-alphaforge-mvp.md).
 
 ## Design principles
 

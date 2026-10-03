@@ -87,8 +87,10 @@ ranking never masquerades as a discounted-cash-flow.
   `projected_cash_flows`, plus `implied` solves for
   `revenue_growth / ebit_margin / terminal_growth` within
   `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`.
-* **Export:** `alphaforge rank` writes `exports/<as_of>/dcf.json`
-  alongside `ranking.json/csv`; `ranking_loader` also returns top-level
+* **Export:** `alphaforge rank` retains original outputs, then writes
+  `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
+  remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)
+  binds inputs and exact code/rule assumptions before consumption; `ranking_loader` also returns top-level
   `dcf` / `reverse_dcf` so callers do not need to reach into
   `candidate.full_results`. Every non-valued path emits a structured
   unavailable result (`dcf.available=false` with `missing_information` and
@@ -134,7 +136,9 @@ without error.
   stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`
   — except missing ROIC, which yields a provisional available DCF at 0%
   reinvestment (see policy above).
-* Deterministic: identical selected stored inputs under identical rules →
-  identical `DcfValue` and `valuation_score`; this does not retain financial
-  vintages or implement executed-run numerical replay.
+* Deterministic: identical selected inputs under identical supported rules →
+  identical `DcfValue` and `valuation_score`. New executed ranking runs retain
+  immutable numerical bodies, exact code/rules and original outputs for
+  [audit replay](executed-run-replay.md); full financial vintages and arbitrary
+  historical-known-then reconstruction are not implemented.
 * Credentials never appear in exports or logs (`authKey` redacted in adapter).
