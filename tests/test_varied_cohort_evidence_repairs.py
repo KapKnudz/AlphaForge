@@ -203,9 +203,7 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     old_run = conn.execute(
         "SELECT id,inputs_summary FROM ranking_runs ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert main(
-        ["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]
-    ) == 0
+    assert main(["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]) == 0
     old_replay = json.loads(capsys.readouterr().out)
     old_summary = json.loads(old_run["inputs_summary"])
     old_text_hash = conn.execute(
@@ -231,9 +229,7 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     repaired_run = conn.execute(
         "SELECT id,inputs_summary FROM ranking_runs ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert main(
-        ["--dsn", dsn, "replay", "--run-id", str(repaired_run["id"])]
-    ) == 0
+    assert main(["--dsn", dsn, "replay", "--run-id", str(repaired_run["id"])]) == 0
     repaired_replay = json.loads(capsys.readouterr().out)
     repaired_summary = json.loads(repaired_run["inputs_summary"])
     repaired_text_hash = conn.execute(

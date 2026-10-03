@@ -36,11 +36,11 @@ assumptions. None is extracted from MFN `fiscal_period` or the PDF text here.
 Textual fiscal identity changes observation/relation/manifest slots and packet
 provenance; it cannot correct wrongly acquired provider financial inputs.
 
-Cross-boundary tests run the real loader with available DCF and synthetic
-non-calendar financial controls before/after each historical fiscal repair.
-Financial selection, metrics and the entire reverse-DCF result remain equal,
-while observations/fingerprints/packet hashes change. This is a boundary
-regression, **not proof that the live DCF is correct**.
+Cross-boundary tests execute the public rank and replay commands with available
+DCF and synthetic non-calendar financial controls before/after each historical
+fiscal repair. Financial selection, metrics and the entire reverse-DCF result
+remain equal, while observations/fingerprints/packet hashes change. This is a
+boundary regression, **not proof that the live DCF is correct**.
 
 Retained source reconciliation identifies remaining numerical questions for
 the separate DCF/source scout, without edits here:
@@ -86,8 +86,8 @@ HTTP only on the normal path; upgrade controls explicitly pin the scout's old
 resolver outputs to model historical interpretation. No paid models or new
 bulk source downloads are involved.
 
-Local validation: full `pytest -q` **889 passed, 1 deselected**; `ruff check .`,
-`ruff format --check .`, `lint-imports` (all three contracts) and
-`tools/check_evidence_manifest_boundary.py` passed. The focused new module has
-32 passing cases. These results protect behavior; they do not certify source
-accuracy or the separate DCF audit.
+Local validation covered the full `pytest -q` suite, `ruff check .`,
+`ruff format --check .`, all three `lint-imports` contracts,
+`tools/check_evidence_manifest_boundary.py` and the focused new module. These
+checks protect behavior; they do not certify source accuracy or the separate
+DCF audit.
