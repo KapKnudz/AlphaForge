@@ -125,7 +125,10 @@ interpretation before the broad `report_kind` filter class: an English
 `ANNUAL_REPORT` editions remain annual, without changing report-class horizons.
 Compound `Annual and Sustainability Report` titles and guarded body headings
 identify the covered annual year/range under the same forecast, comparator and
-conflict safeguards as `Annual Report`.
+conflict safeguards as `Annual Report`. The body-heading fallback does not
+treat a year attached to `published` or `publication` as covered-year evidence;
+without a separate covered year, the identity remains unresolved. A covered
+year before a later publication date remains admissible.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use
@@ -424,10 +427,10 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v13 and evidence rules v15 deliberately
-invalidate earlier annual range/fiscal interpretation and off-feed rebuild
-behavior. A retained candidate with an older fingerprint is never selected or
-restamped: the flow re-runs current admission and covered identity from its
+confer current readiness. Report rules v14 and evidence rules v15 deliberately
+invalidate earlier annual range/fiscal interpretation, including publication-
+year heading guards, and off-feed rebuild behavior. A retained candidate with
+an older fingerprint is never selected or restamped: the flow re-runs current admission and covered identity from its
 immutable source facts: original public detail HTML is re-parsed by the normal
 MFN parser to re-prove title, publication, attachment selection and (for Cision)
 canonical issuer confirmation. Narrative admission also requires independently
