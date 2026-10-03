@@ -1616,6 +1616,35 @@ def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
     assert left_root["implied_assumption"] < 0.0 < right_root["implied_assumption"]
 
 
+def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121, number_Of_Shares=10_000_000)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 1.257757952557623e-05}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["solution_status"] == "candidate_solutions"
+    assert terminal["sign_change_bracket_count"] == 1
+    assert terminal["crossing_count_on_grid"] == 1
+    assert terminal["candidate_solution_count"] == 1
+    assert terminal["sample_match_candidate_count"] == 0
+    assert terminal["implied_assumption"] == pytest.approx(0.01)
+    assert len(terminal["sampled_match_regions"]) == 1
+    region = terminal["sampled_match_regions"][0]
+    assert region["lower_sample_assumption"] < 0.01 < region["upper_sample_assumption"]
+    assert region["associated_sign_change_bracket_count"] == 1
+
+
 def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(
     monkeypatch, tmp_path
 ):

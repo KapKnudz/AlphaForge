@@ -294,10 +294,17 @@ class ReverseDcfEngine:
             raise ValueError("reverse DCF range diagnostic produced a non-finite price")
         differences = tuple(price - inputs.current_price for price in prices)
         matches = tuple(abs(difference) <= price_tolerance for difference in differences)
+        nonzero_residual_indexes = [
+            index for index, difference in enumerate(differences) if difference != 0.0
+        ]
         brackets = [
-            (points[index], points[index + 1])
-            for index in range(sample_intervals)
-            if differences[index] * differences[index + 1] < 0
+            (points[left], points[right])
+            for left, right in zip(
+                nonzero_residual_indexes,
+                nonzero_residual_indexes[1:],
+                strict=False,
+            )
+            if differences[left] * differences[right] < 0
         ]
         sampled_match_points = []
         sampled_match_regions = []
@@ -342,18 +349,14 @@ class ReverseDcfEngine:
                     }
                 )
             else:
-                adjacent_sign_change = (
-                    differences[start - 1] * differences[start] < 0
-                    or differences[start] * differences[start + 1] < 0
+                sign_change = any(
+                    lower <= points[start] <= upper for lower, upper in brackets
                 )
-                outer_sign_change = differences[start - 1] * differences[start + 1] < 0
-                if outer_sign_change and not adjacent_sign_change:
-                    brackets.append((points[start - 1], points[start + 1]))
                 sampled_match_points.append(
                     {
                         "classification": (
                             "sampled_match_with_sign_change"
-                            if adjacent_sign_change or outer_sign_change
+                            if sign_change
                             else "sampled_no_sign_change_match"
                         ),
                         "location": "interior",
@@ -363,7 +366,7 @@ class ReverseDcfEngine:
                         "qualification": (
                             "sample matches within price tolerance alongside sampled sign-change "
                             "evidence; analytical exactness at the sample is not established"
-                            if adjacent_sign_change or outer_sign_change
+                            if sign_change
                             else "isolated sample matches within price tolerance without a sampled "
                             "sign change; tangency or analytical exactness is not established"
                         ),

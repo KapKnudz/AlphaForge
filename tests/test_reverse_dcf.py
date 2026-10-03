@@ -124,6 +124,27 @@ def test_range_diagnostics_convert_sampled_straddle_to_crossing_bracket():
     assert diagnostics["sampled_match_regions"] == []
 
 
+def test_range_diagnostics_preserve_crossing_across_tolerance_match_region():
+    inputs = _target_at(_inputs(), "terminal_growth", 0.01)
+    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+        inputs,
+        "terminal_growth",
+        -0.01,
+        0.04,
+        price_tolerance=0.03,
+    )
+
+    assert len(brackets) == 1
+    assert brackets[0][0] < 0.01 < brackets[0][1]
+    assert matches == ()
+    assert len(diagnostics["sampled_match_regions"]) == 1
+    region = diagnostics["sampled_match_regions"][0]
+    assert region["lower_sample_assumption"] < 0.01 < region["upper_sample_assumption"]
+    assert region["associated_sign_change_bracket_count"] == 1
+    result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[0])
+    assert result.implied_assumption == pytest.approx(0.01)
+
+
 def test_range_diagnostics_preserve_two_crossings_around_tolerance_match():
     inputs = _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02)
     center_target = _target_at(inputs, "terminal_growth", 0.0)
