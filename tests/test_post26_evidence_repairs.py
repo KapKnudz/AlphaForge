@@ -668,7 +668,18 @@ def test_v2_manifest_identity_survives_ranking_loader_and_actual_exports(
     assert ranking["scores"][0]["evidence_packet_hash"] == packet["packet_hash"]
 
     assert cmd_rank(args) == 0
-    assert {name: (output / name).read_bytes() for name in names} == first_exports
+    replay_exports = {name: (output / name).read_bytes() for name in names}
+    assert replay_exports["ranking.csv"] == first_exports["ranking.csv"]
+    assert replay_exports["dcf.json"] == first_exports["dcf.json"]
+    replay_ranking = json.loads(replay_exports["ranking.json"])
+    assert replay_ranking["scores"] == ranking["scores"]
+    assert replay_ranking["evidence_packet_hashes"] == ranking["evidence_packet_hashes"]
+    assert replay_ranking["numerical_provenance"]["run_id"] != ranking["numerical_provenance"][
+        "run_id"
+    ]
+    assert replay_ranking["numerical_provenance"]["artifact_id"] != ranking[
+        "numerical_provenance"
+    ]["artifact_id"]
 
 
 def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
