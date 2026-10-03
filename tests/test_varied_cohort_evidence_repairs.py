@@ -263,6 +263,52 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
         )
 
 
+@pytest.mark.parametrize("verb", ["forecasts", "forecasting"])
+@pytest.mark.parametrize(
+    "title,body,expected,basis",
+    [
+        ("Annual and Sustainability Report {verb} 2027", "", None, "unresolved"),
+        (
+            "Annual Report publication",
+            "Annual and Sustainability Report {verb} 2027.",
+            None,
+            "unresolved",
+        ),
+        (
+            "Annual and Sustainability Report 2025 {verb} 2027",
+            "",
+            "2025",
+            "report_title",
+        ),
+        (
+            "Annual Report publication",
+            "Annual and Sustainability Report for 2025. The company {verb} 2027 growth.",
+            "2025",
+            "covered_report_heading",
+        ),
+    ],
+)
+def test_forecast_inflections_through_public_evidence_cli(
+    cli_lane, verb, title, body, expected, basis
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": "https://mfn.se/a/guard/forecast-inflection",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body.format(verb=verb),
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": title.format(verb=verb)},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == expected
+    assert source["fiscal_period_source"] == basis
+    if expected is None:
+        assert "fiscal_identity_unresolved" in diagnostic["limitations"]
+
+
 @pytest.mark.parametrize(
     "case,title,body,feed_tags,provider_period,expected,basis,limitation",
     [

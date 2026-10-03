@@ -72,8 +72,12 @@ correctness certificate.
 annual class and recognizes compound annual body headings. `mfn_taxonomy.py`
 recognizes the compound English title as annual. Existing comparator,
 forecast, provider/title conflict, and contradictory-heading refusal remain.
-`report_rules.py` advances interpretation version to 12 and records the new
-fiscal semantics in fingerprint inputs; changed interpretation creates new
+Published-head review also exposed inflected `forecasts` / `forecasting` in
+compound annual titles or headings; the fiscal-context guard now rejects those
+forecast years while retaining covered annual years and independent sentences.
+`report_rules.py` advances interpretation version to 13 and records the new
+fiscal semantics in fingerprint inputs; evidence rules advance to 15 so prior
+packets cannot confer current readiness. Changed interpretation creates new
 immutable observations, reusing verified bytes/extraction, never restamping
 old history.
 

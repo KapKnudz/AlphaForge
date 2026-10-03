@@ -337,7 +337,7 @@ def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
 
 
 _NON_COVERED_FISCAL_CONTEXT = re.compile(
-    r"\b(?:forecast|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
+    r"\b(?:forecast(?:s|ing)?|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
     re.IGNORECASE,
 )
 
