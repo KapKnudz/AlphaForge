@@ -1396,6 +1396,8 @@ def load_results_for_company(
                                     }
                                 )
                             for _match in _sample_matches:
+                                if _match["associated_sign_change_bracket_count"]:
+                                    continue
                                 _point_inputs = replace(
                                     dcf_inputs,
                                     assumptions=replace(

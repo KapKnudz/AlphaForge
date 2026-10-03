@@ -1583,6 +1583,39 @@ def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
     assert "conditional and assumption-sensitive" in upper_root["interpretation"]
 
 
+def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 9.830675428653587}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 2.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["sign_change_bracket_count"] == 2
+    assert terminal["crossing_count_on_grid"] == 2
+    assert terminal["candidate_solution_count"] == 2
+    assert terminal["sample_match_candidate_count"] == 0
+    assert terminal["sampled_match_point_count"] == 1
+    match = terminal["sampled_match_points"][0]
+    assert match["classification"] == "sampled_match_with_sign_change"
+    assert match["associated_sign_change_bracket_count"] == 2
+    assert all(
+        candidate["solution_evidence"] == "sign_change_bracket"
+        for candidate in terminal["candidate_roots"]
+    )
+    left_root, right_root = terminal["candidate_roots"]
+    assert left_root["implied_assumption"] < 0.0 < right_root["implied_assumption"]
+
+
 def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(
     monkeypatch, tmp_path
 ):

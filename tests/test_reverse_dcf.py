@@ -82,6 +82,7 @@ def test_range_diagnostics_classify_endpoint_match_without_crossing():
     assert len(matches) == 1
     assert matches[0]["classification"] == "sampled_endpoint_match"
     assert matches[0]["location"] == "lower_endpoint"
+    assert matches[0]["associated_sign_change_bracket_count"] == 0
     assert "analytical exactness is not established" in matches[0]["qualification"]
     assert diagnostics["sign_change_bracket_count"] == 0
     assert diagnostics["sampled_match_regions"] == []
@@ -99,6 +100,7 @@ def test_range_diagnostics_classify_no_sign_change_match_without_crossing():
     assert brackets == ()
     assert len(matches) == 1
     assert matches[0]["classification"] == "sampled_no_sign_change_match"
+    assert matches[0]["associated_sign_change_bracket_count"] == 0
     assert "tangency or analytical exactness is not established" in matches[0][
         "qualification"
     ]
@@ -115,9 +117,36 @@ def test_range_diagnostics_convert_sampled_straddle_to_crossing_bracket():
 
     assert len(brackets) == 1
     assert brackets[0][0] < 0.01 < brackets[0][1]
-    assert matches == ()
+    assert len(matches) == 1
+    assert matches[0]["classification"] == "sampled_match_with_sign_change"
+    assert matches[0]["associated_sign_change_bracket_count"] == 1
     assert diagnostics["sign_change_bracket_count"] == 1
     assert diagnostics["sampled_match_regions"] == []
+
+
+def test_range_diagnostics_preserve_two_crossings_around_tolerance_match():
+    inputs = _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02)
+    center_target = _target_at(inputs, "terminal_growth", 0.0)
+    inputs = replace(center_target, current_price=center_target.current_price - 0.5e-6)
+
+    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+        inputs,
+        "terminal_growth",
+        -0.01,
+        0.04,
+    )
+
+    assert len(brackets) == 2
+    assert brackets[0][1] == pytest.approx(0.0)
+    assert brackets[1][0] == pytest.approx(0.0)
+    assert len(matches) == 1
+    assert matches[0]["classification"] == "sampled_match_with_sign_change"
+    assert matches[0]["associated_sign_change_bracket_count"] == 2
+    assert diagnostics["sign_change_bracket_count"] == 2
+    assert diagnostics["sampled_match_point_count"] == 1
+    left_result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[0])
+    right_result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[1])
+    assert left_result.implied_assumption < 0.0 < right_result.implied_assumption
 
 
 def test_range_diagnostics_classify_contiguous_plateau_samples_as_region():
@@ -136,4 +165,5 @@ def test_range_diagnostics_classify_contiguous_plateau_samples_as_region():
     assert region["lower_sample_assumption"] == pytest.approx(0.02)
     assert region["upper_sample_assumption"] == pytest.approx(0.04)
     assert region["sample_count"] > 1
+    assert region["associated_sign_change_bracket_count"] == 0
     assert "continuous equivalence interval is not established" in region["qualification"]

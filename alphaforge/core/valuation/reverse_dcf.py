@@ -168,15 +168,23 @@ class ReverseDcfEngine:
         lower_difference = lower_value.value_per_share - inputs.current_price
         upper_difference = upper_value.value_per_share - inputs.current_price
 
-        if abs(lower_difference) <= price_tolerance:
+        if lower_difference == 0.0:
             return self._result(
                 inputs, assumption, lower_bound, lower_bound, upper_bound, 0, lower_value
             )
-        if abs(upper_difference) <= price_tolerance:
+        if upper_difference == 0.0:
             return self._result(
                 inputs, assumption, upper_bound, lower_bound, upper_bound, 0, upper_value
             )
         if lower_difference * upper_difference > 0:
+            if abs(lower_difference) <= price_tolerance:
+                return self._result(
+                    inputs, assumption, lower_bound, lower_bound, upper_bound, 0, lower_value
+                )
+            if abs(upper_difference) <= price_tolerance:
+                return self._result(
+                    inputs, assumption, upper_bound, lower_bound, upper_bound, 0, upper_value
+                )
             raise ValueError(
                 "current price is not bracketed by modeled prices at the supplied bounds"
             )
@@ -286,7 +294,11 @@ class ReverseDcfEngine:
             raise ValueError("reverse DCF range diagnostic produced a non-finite price")
         differences = tuple(price - inputs.current_price for price in prices)
         matches = tuple(abs(difference) <= price_tolerance for difference in differences)
-        brackets: list[tuple[float, float]] = []
+        brackets = [
+            (points[index], points[index + 1])
+            for index in range(sample_intervals)
+            if differences[index] * differences[index + 1] < 0
+        ]
         sampled_match_points = []
         sampled_match_regions = []
         index = 0
@@ -329,32 +341,47 @@ class ReverseDcfEngine:
                         ),
                     }
                 )
-            elif differences[start - 1] * differences[start + 1] < 0:
-                brackets.append((points[start - 1], points[start + 1]))
             else:
+                adjacent_sign_change = (
+                    differences[start - 1] * differences[start] < 0
+                    or differences[start] * differences[start + 1] < 0
+                )
+                outer_sign_change = differences[start - 1] * differences[start + 1] < 0
+                if outer_sign_change and not adjacent_sign_change:
+                    brackets.append((points[start - 1], points[start + 1]))
                 sampled_match_points.append(
                     {
-                        "classification": "sampled_no_sign_change_match",
+                        "classification": (
+                            "sampled_match_with_sign_change"
+                            if adjacent_sign_change or outer_sign_change
+                            else "sampled_no_sign_change_match"
+                        ),
                         "location": "interior",
                         "assumption": points[start],
                         "modeled_price": prices[start],
                         "price_difference": differences[start],
                         "qualification": (
-                            "isolated sample matches within price tolerance without a sampled "
+                            "sample matches within price tolerance alongside sampled sign-change "
+                            "evidence; analytical exactness at the sample is not established"
+                            if adjacent_sign_change or outer_sign_change
+                            else "isolated sample matches within price tolerance without a sampled "
                             "sign change; tangency or analytical exactness is not established"
                         ),
                     }
                 )
             index += 1
 
-        brackets.extend(
-            (points[index], points[index + 1])
-            for index in range(sample_intervals)
-            if not matches[index]
-            and not matches[index + 1]
-            and differences[index] * differences[index + 1] < 0
-        )
         brackets.sort()
+        for match in sampled_match_points:
+            match["associated_sign_change_bracket_count"] = sum(
+                lower <= match["assumption"] <= upper for lower, upper in brackets
+            )
+        for region in sampled_match_regions:
+            region["associated_sign_change_bracket_count"] = sum(
+                lower <= region["upper_sample_assumption"]
+                and upper >= region["lower_sample_assumption"]
+                for lower, upper in brackets
+            )
 
         changes = []
         for left, right in zip(prices, prices[1:], strict=False):
