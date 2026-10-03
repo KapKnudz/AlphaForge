@@ -464,3 +464,13 @@ class ReverseDcfEngine:
             raise ValueError("terminal_growth must exceed -1")
         if assumptions.reinvestment_return is not None and assumptions.reinvestment_return <= 0.0:
             raise ValueError("reinvestment_return must be positive when supplied")
+        if assumptions.reinvestment_return is not None and (
+            assumptions.ebit_margin < 0.0
+            or (
+                assumptions.ebit_margin_start is not None
+                and assumptions.ebit_margin_start < 0.0
+            )
+        ):
+            raise UnsupportedValuationModel(
+                "ROIC-based reinvestment is unsupported for negative NOPAT"
+            )

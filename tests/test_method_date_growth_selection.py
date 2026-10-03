@@ -1548,6 +1548,28 @@ def test_near_bound_terminal_solve_is_qualified_and_terminal_dependence_exported
     assert result["dcf"]["terminal_value_share_of_enterprise_value"] is not None
 
 
+def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.957417027608026}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["implied_assumption"] == pytest.approx(-0.009, abs=1e-6)
+    assert terminal["near_bound"] is False
+    assert terminal["near_bound_side"] is None
+    assert terminal["lower_endpoint_price"] is not None
+    assert terminal["upper_endpoint_price"] is not None
+
+
 def test_negative_modeled_equity_is_not_exported_as_tradable_negative_price(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121, net_Debt=1_000)])
     packet(conn, cid)

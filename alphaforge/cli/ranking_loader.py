@@ -1456,12 +1456,10 @@ def load_results_for_company(
                                 _root_summaries.append(_root_summary)
                             _chosen = _roots[0]
                             _chosen_value = _chosen["valuation"]
-                            _distance_to_lower = _chosen["implied_assumption"] - _bounds[0]
                             _distance_to_upper = _bounds[1] - _chosen["implied_assumption"]
                             _near_bound = (
                                 _assump == "terminal_growth"
-                                and min(_distance_to_lower, _distance_to_upper)
-                                <= (_bounds[1] - _bounds[0]) * 0.05
+                                and _distance_to_upper <= (_bounds[1] - _bounds[0]) * 0.05
                             )
                             reverse_dcf_results[_assump] = {
                                 **_diagnostics,
@@ -1492,11 +1490,7 @@ def load_results_for_company(
                                     else None
                                 ),
                                 "near_bound": _near_bound,
-                                "near_bound_side": (
-                                    "lower" if _distance_to_lower <= _distance_to_upper else "upper"
-                                )
-                                if _near_bound
-                                else None,
+                                "near_bound_side": "upper" if _near_bound else None,
                                 "interpretation": (
                                     "near-bound terminal-growth equivalence is conditional and "
                                     "assumption-sensitive, not an economic conclusion"
