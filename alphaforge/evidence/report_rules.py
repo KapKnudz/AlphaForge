@@ -24,7 +24,7 @@ from alphaforge.evidence.mfn_taxonomy import (
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 11
+REPORT_RULES_VERSION = 12
 
 
 @dataclass(frozen=True)
@@ -82,6 +82,10 @@ def report_rules_inputs() -> dict[str, Any]:
         "completeness": {
             "grouping": "bilingual_dedupe_without_feed_group_id",
             "class_rule": "report_kind_annual_or_quarterly",
+        },
+        "fiscal_interpretation": {
+            "annual_gate": "guarded-document-type-before-broad-report-kind",
+            "compound_annual_heading": "annual-and-sustainability-report",
         },
         "history_window": _history_window_values(),
     }

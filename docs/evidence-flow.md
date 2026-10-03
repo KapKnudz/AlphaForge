@@ -119,6 +119,13 @@ not scan arbitrary narrative for the first year/quarter: publication dates,
 forecasts and comparator mentions are not covered identity. Covered month spans
 accept separator punctuation (including a comma before the year); explicit
 year-end report titles retain fiscal Q4, distinct from annual-report identity.
+The finer guarded `document_type` determines annual-versus-year-end fiscal
+interpretation before the broad `report_kind` filter class: an English
+`YEAR_END_REPORT` keeps Q4 even when that broad class is `annual`. Real
+`ANNUAL_REPORT` editions remain annual, without changing report-class horizons.
+Compound `Annual and Sustainability Report` titles and guarded body headings
+identify the covered annual year/range under the same forecast, comparator and
+conflict safeguards as `Annual Report`.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use
