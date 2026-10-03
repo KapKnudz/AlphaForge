@@ -674,12 +674,14 @@ def test_v2_manifest_identity_survives_ranking_loader_and_actual_exports(
     replay_ranking = json.loads(replay_exports["ranking.json"])
     assert replay_ranking["scores"] == ranking["scores"]
     assert replay_ranking["evidence_packet_hashes"] == ranking["evidence_packet_hashes"]
-    assert replay_ranking["numerical_provenance"]["run_id"] != ranking["numerical_provenance"][
-        "run_id"
-    ]
-    assert replay_ranking["numerical_provenance"]["artifact_id"] != ranking[
-        "numerical_provenance"
-    ]["artifact_id"]
+    assert (
+        replay_ranking["numerical_provenance"]["run_id"]
+        != ranking["numerical_provenance"]["run_id"]
+    )
+    assert (
+        replay_ranking["numerical_provenance"]["artifact_id"]
+        != ranking["numerical_provenance"]["artifact_id"]
+    )
 
 
 def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
@@ -733,10 +735,13 @@ def test_v2_loader_uses_exact_batch_fingerprint_not_stale_manifest(lane):
     assert json.loads(stale_row["manifest_json"])["source_input_fingerprint"] == original_fp
 
     packet, current = view(lane)
-    assert conn.execute(
-        "SELECT 1 FROM evidence_selection_manifests WHERE manifest_id=?",
-        (original_id,),
-    ).fetchone() is not None
+    assert (
+        conn.execute(
+            "SELECT 1 FROM evidence_selection_manifests WHERE manifest_id=?",
+            (original_id,),
+        ).fetchone()
+        is not None
+    )
     assert packet is None
     assert current.source_input_fingerprint == changed_fp
     assert current.source_input_fingerprint != original_fp
