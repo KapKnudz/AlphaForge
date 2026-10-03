@@ -54,6 +54,7 @@ REPORT_TERMS_SE: list[str] = [
     "year-end report",
     "interim report",
     "annual report",
+    "annual and sustainability report",
     "quarterly report",
     "year end report",
 ]
@@ -104,7 +105,13 @@ def report_kind(title: str) -> str | None:
     lower = " ".join(title.lower().split())
     if any(
         term in lower
-        for term in ("årsredovisning", "annual report", "year-end report", "year end report")
+        for term in (
+            "årsredovisning",
+            "annual report",
+            "annual and sustainability report",
+            "year-end report",
+            "year end report",
+        )
     ):
         return "annual"
     if any(
@@ -130,7 +137,14 @@ def document_type(title: str) -> str | None:
     back to the existing ``report_kind`` behavior.
     """
     lower = " ".join(title.lower().split())
-    if any(term in lower for term in ("årsredovis", "annual report")):
+    if any(
+        term in lower
+        for term in (
+            "årsredovis",
+            "annual report",
+            "annual and sustainability report",
+        )
+    ):
         return "ANNUAL_REPORT"
     if any(term in lower for term in ("year-end report", "year end report", "bokslutskommunik")):
         return "YEAR_END_REPORT"

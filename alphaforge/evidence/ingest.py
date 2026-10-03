@@ -337,7 +337,7 @@ def _expand_fiscal_year(start_year: str, end_part: str | None) -> str:
 
 
 _NON_COVERED_FISCAL_CONTEXT = re.compile(
-    r"\b(?:forecast|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
+    r"\b(?:forecast(?:s|ing)?|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
     re.IGNORECASE,
 )
 
@@ -411,7 +411,10 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     are invented from quarter labels.
     """
     title = _NON_COVERED_FISCAL_CONTEXT.split(str(doc.get("title") or ""), maxsplit=1)[0]
-    annual = doc.get("report_kind") == "annual"
+    # The broad filter class calls English year-end releases annual. Only the
+    # finer, guarded document type distinguishes the actual annual edition.
+    typed = _document_type_for_identity(doc)
+    annual = typed == "ANNUAL_REPORT" or (not typed and doc.get("report_kind") == "annual")
     title_period = None if annual else _quarter_period(title)
     if not title_period and is_report(title):
         title_period = _year_period(title)
@@ -448,7 +451,7 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
     body = str(doc.get("content_text") or doc.get("body") or "")
     labelled = re.compile(
         r"\b(?:interim\s+report|quarterly\s+report|year[- ]end\s+report|"
-        r"annual\s+report|delårsrapport|delarsrapport|kvartalsrapport|"
+        r"annual\s+(?:and\s+sustainability\s+)?report|delårsrapport|delarsrapport|kvartalsrapport|"
         r"bokslutskommunik[eé]|årsredovisning|arsredovisning)"
         r"\s*(?:for\b|för\b|[:–-])?\s*([^.!?\n]{0,100}?20\d{2}(?:\s*/\s*(?:20)?\d{2})?)",
         re.IGNORECASE,
