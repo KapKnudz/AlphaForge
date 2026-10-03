@@ -34,8 +34,9 @@ selection diagnostics. Natural provider/observation keys and raw payloads remain
 retained; these snapshot-local IDs must not be used to join mutable source rows.
 Company IDs remain actual repository identities.
 
-For new runs, an independent immutable per-run audit map records each table's
-`snapshot_row_id` → original `source_row_id` and company. Migration
+For new runs, an independent immutable per-run audit map records every retained
+row whose source surrogate is normalized: table, `snapshot_row_id`, original
+`source_row_id` and company. Migration
 [018](../db/migrations/018_numerical_source_row_maps.sql) owns
 `numerical_run_source_rows`; `run.json#source_rows` and the replay envelope expose
 that map, and ranking JSON explicitly labels its diagnostic row-ID namespace.
@@ -85,12 +86,13 @@ the database-local run ID, numerical identity, textual-context hash, output hash
 and (when retained) independent source-row-map hash,
 so same-local-ID runs from different databases do not collide unless their retained
 artifacts are identical. Identical artifacts are verified byte-for-byte and reused;
-conflicts never overwrite the original directory. The SQLite retained body/output is
-replay authority, not an editable filesystem copy. `exports/<as_of>/` remains a clearly
+conflicts never overwrite the original directory. The SQLite retained records are
+replay authority, not editable filesystem copies. `exports/<as_of>/` remains a clearly
 mutable latest convenience alias with `run.json` identifying its run and artifact and
-`latest.json` explicitly marking it mutable. Ranking JSON carries run and artifact IDs
-and both numerical identities beside, not instead of, textual evidence hashes. A
-subsequent same-cutoff rank never rewrites a different older run artifact.
+`latest.json` explicitly marking it mutable. Ranking JSON carries run and artifact
+IDs, the financial-input hash and numerical identity beside, not instead of,
+textual evidence hashes. A subsequent same-cutoff rank never rewrites a different
+older run artifact.
 
 Replay reads only retained run/body records, constructs a disposable memory DB,
 and runs the existing selection/calculation path without mutable numerical
@@ -119,13 +121,14 @@ ranking JSON are presentations; `outputs.json` is the exact comparison surface.
 Comparison includes the full output body, not just score/hash equality.
 
 [`test_executed_numerical_runs.py`](../tests/test_executed_numerical_runs.py) and
-[`selection coverage`](../tests/test_executed_numerical_runs_selection.py) exercise real repository → capture → loader → ranking/export → replay, single
+[`selection coverage`](../tests/test_executed_numerical_runs_selection.py)
+exercise real repository → capture → loader → ranking/export → replay, single
 and multi-company insertion permutations, same-key report/price/KPI corrections,
 removal of live rows, retained-only reconstructed memory databases and forbidden
 live-table reads. It covers missing/zero, non-calendar fiscal histories, splits,
 sector branches, dividends, denominations, rule/code changes, tamper/conflicts,
-legacy refusal, atomic second-reader visibility and persistence failure before consumption. Fixtures require no
-live provider acquisition or model call. Additional
+legacy refusal, atomic second-reader visibility and persistence failure before
+consumption. Fixtures require no live provider acquisition or model call. Additional
 [hosted-review regressions](../tests/test_numerical_retention_review_regressions.py)
 exercise real two-connection insertion interleaving through rank/export/replay,
 contradictory concurrent retention refusal, original-source/snapshot rejection-ID

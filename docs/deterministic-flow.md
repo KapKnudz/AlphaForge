@@ -311,10 +311,11 @@ fingerprints by [evidence-flow.md](evidence-flow.md).
 
 Every new `rank` freezes and retains its numerical input body before evaluation,
 then atomically commits its consumable ranking row and original canonical output
-link before filesystem publication. Schema v17 adds
-immutable content-addressed bodies and run/output links without inventing legacy
-snapshots. `financial_inputs_hash` identifies numerical inputs separately from
-`numerical_identity`, which also binds exact executing code/rules/runtime.
+link before filesystem publication. Schema migrations 017 and 018 add immutable
+content-addressed bodies, run/output links and a separately hashed source-row audit
+map without inventing legacy snapshots or source IDs. `financial_inputs_hash`
+identifies numerical inputs separately from `numerical_identity`, which also binds
+exact executing code/rules/runtime.
 Textual packet/manifest identity remains separate. Full scores, metrics, DCF
 projections/solves and refusal facts replay from retained inputs without mutable
 numerical lookups; unsupported code/rules and legacy runs refuse honestly.
@@ -322,11 +323,12 @@ See [executed-run replay](executed-run-replay.md) for retention boundaries,
 serialization and typed refusal semantics.
 
 Run-addressed `exports/runs/<artifact_id>/` contains original ranking/DCF files and
-canonical `outputs.json` plus identity metadata `run.json`. The DSN-free artifact ID
-binds the local run ID to the retained numerical, textual and output hashes, preventing
-same-local-ID collisions across databases without exposing connection details. The date
-paths in the table above are mutable latest aliases, never replay authority; corrections
-can change a new same-cutoff run but cannot change an original retained run. This is
+canonical `outputs.json` plus identity metadata `run.json`. The detailed
+[artifact identity and collision contract](executed-run-replay.md#retention-publication-and-refusal)
+prevents same-local-ID collisions across databases without exposing connection
+details. The date paths in the table above are mutable latest aliases, never replay
+authority; corrections can change a new same-cutoff run but cannot change an original
+retained run. This is
 Option B, not full historical vintages, immutable thesis revisions or the planned
 standalone `export` command.
 
