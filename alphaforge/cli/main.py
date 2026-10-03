@@ -1198,6 +1198,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
     from alphaforge.db.numerical_runs import (
         canonical,
         capture_inputs,
+        digest,
         evaluate,
         retain_inputs,
         retain_outputs,
@@ -1205,7 +1206,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
     )
 
     companies.sort(key=lambda c: (c.ticker, c.id))
-    body, textual_context = capture_inputs(conn, companies, as_of)
+    source_rows = {}
+    body, textual_context = capture_inputs(conn, companies, as_of, source_rows=source_rows)
     numerical_identity, financial_inputs_hash = retain_inputs(conn, body, rules_bundle())
     ranking, _, original_outputs = evaluate(body, textual_context)
     engine = RankingEngine()
@@ -1252,7 +1254,12 @@ def cmd_rank(args: argparse.Namespace) -> int:
             commit=False,
         )
         artifact_id = retain_outputs(
-            conn, run_id, numerical_identity, textual_context, original_outputs
+            conn,
+            run_id,
+            numerical_identity,
+            textual_context,
+            original_outputs,
+            source_rows=source_rows,
         )
     except Exception:
         conn.rollback()
@@ -1263,12 +1270,16 @@ def cmd_rank(args: argparse.Namespace) -> int:
         "financial_inputs_hash": financial_inputs_hash,
         "numerical_identity": numerical_identity,
         "as_of": as_of,
+        "source_rows": source_rows,
+        "source_rows_hash": digest(source_rows),
     }
     provenance = {
         "run_id": run_id,
         "artifact_id": artifact_id,
         "financial_inputs_hash": financial_inputs_hash,
         "numerical_identity": numerical_identity,
+        "row_id_namespace": "retained_numerical_body",
+        "source_rows_reference": "run.json#source_rows",
     }
     runs_dir = Path("exports") / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)

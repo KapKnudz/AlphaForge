@@ -185,7 +185,12 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     fresh, _ = setup(periods=[], price_date=None)
     fresh.execute("DELETE FROM watchlist")
     fresh.execute("DELETE FROM companies")
-    for table in ("ranking_runs", "numerical_input_bodies", "executed_numerical_runs"):
+    for table in (
+        "ranking_runs",
+        "numerical_input_bodies",
+        "executed_numerical_runs",
+        "numerical_run_source_rows",
+    ):
         for r in conn.execute(f"SELECT * FROM {table}"):
             columns = r.keys()
             fresh.execute(
@@ -467,6 +472,8 @@ def test_legacy_and_replay_cli_are_honest(monkeypatch, tmp_path, capsys):
     capsys.readouterr()
     assert cmd_replay(argparse.Namespace(dsn="sqlite:///:memory:", run_id=run)) == 0
     assert json.loads(capsys.readouterr().out)["outputs"] == outputs
+    conn.execute("DROP TRIGGER numerical_source_rows_no_delete")
+    conn.execute("DELETE FROM numerical_run_source_rows")
     conn.execute("DROP TRIGGER numerical_run_no_delete")
     conn.execute("DELETE FROM executed_numerical_runs")
     conn.execute("UPDATE ranking_runs SET inputs_summary=NULL")

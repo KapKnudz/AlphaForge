@@ -74,16 +74,21 @@ def digest(value) -> str:
 
 
 def run_artifact_id(
-    run_id: int, numerical_identity: str, textual_context_hash: str, outputs_hash: str
+    run_id: int,
+    numerical_identity: str,
+    textual_context_hash: str,
+    outputs_hash: str,
+    source_rows_hash: str | None = None,
 ) -> str:
-    return digest(
-        {
-            "run_id": run_id,
-            "numerical_identity": numerical_identity,
-            "textual_context_hash": textual_context_hash,
-            "outputs_hash": outputs_hash,
-        }
-    )
+    identity = {
+        "run_id": run_id,
+        "numerical_identity": numerical_identity,
+        "textual_context_hash": textual_context_hash,
+        "outputs_hash": outputs_hash,
+    }
+    if source_rows_hash is not None:
+        identity["source_rows_hash"] = source_rows_hash
+    return digest(identity)
 
 
 def rules_bundle() -> dict:
@@ -151,13 +156,16 @@ def rules_bundle() -> dict:
     }
 
 
-def capture_inputs(conn, companies, as_of: str) -> tuple[dict, dict]:
+def capture_inputs(
+    conn, companies, as_of: str, *, source_rows: dict | None = None
+) -> tuple[dict, dict]:
     """Freeze the loader's candidate/selection domain before running any calculator.
 
     Examined rejection/history rows are retained because they affect refusal and
     chronology, not as a general observation-vintage service. Text stays separate.
     """
     tables = {table: [] for table in TABLES}
+    original_ids = {}
     text = {}
     cutoff = date.fromisoformat(as_of)
     start, end = trailing_dividend_window(cutoff)
@@ -190,6 +198,8 @@ def capture_inputs(conn, companies, as_of: str) -> tuple[dict, dict]:
                     if item.get("raw_payload"):
                         item["raw_payload"] = canonical(json.loads(item["raw_payload"]))
                     tables[table].append(item)
+                    if table not in {"companies", "prices", "dividend_window_coverage"}:
+                        original_ids[id(item)] = row["id"]
             # Only the current candidate and actually paired historical closes
             # participate; intervening unselected daily prices are not retained.
             reports = sorted(
@@ -243,12 +253,30 @@ def capture_inputs(conn, companies, as_of: str) -> tuple[dict, dict]:
                 "evidence_manifest": manifest.to_dict(),
                 "evidence_lane": bool(packet),
             }
+        source_mapping = []
         for table, rows in tables.items():
             rows.sort(key=canonical)
             # Normalize internal surrogate IDs: no insertion-order numerical identity.
             if table not in {"companies", "prices", "dividend_window_coverage"}:
                 for index, row in enumerate(rows, 1):
                     row["id"] = index
+                    source_mapping.append(
+                        {
+                            "table": table,
+                            "snapshot_row_id": index,
+                            "source_row_id": original_ids[id(row)],
+                            "company_id": row["company_id"],
+                        }
+                    )
+        if source_rows is not None:
+            source_rows.update(
+                {
+                    "encoding": "numerical-source-rows-v1",
+                    "snapshot_namespace": "retained_numerical_body",
+                    "source_namespace": "originating_sqlite_database",
+                    "rows": source_mapping,
+                }
+            )
         body = {
             "encoding": ENCODING,
             "as_of": as_of,
@@ -271,7 +299,21 @@ def retain_inputs(conn, body: dict, rules: dict) -> tuple[str, str]:
     if existing is not None and tuple(existing) != expected:
         raise ReplayRefusal("conflicting_immutable_insertion")
     if existing is None:
-        conn.execute("INSERT INTO numerical_input_bodies VALUES (?,?,?,?)", (identity, *expected))
+        try:
+            conn.execute(
+                "INSERT INTO numerical_input_bodies VALUES (?,?,?,?)", (identity, *expected)
+            )
+        except sqlite3.IntegrityError:
+            # A concurrent identical insertion can win after our absence read.
+            # Do not swallow unrelated constraint/retention faults or contradictions.
+            winner = conn.execute(
+                "SELECT financial_inputs_hash,body,rules FROM numerical_input_bodies WHERE numerical_identity=?",
+                (identity,),
+            ).fetchone()
+            if winner is None:
+                raise
+            if tuple(winner) != expected:
+                raise ReplayRefusal("conflicting_immutable_insertion") from None
     conn.commit()  # Required before calculation, let retention failures abort consumption.
     return identity, financial_hash
 
@@ -323,7 +365,9 @@ def evaluate(body: dict, text: dict):
         memory.close()
 
 
-def retain_outputs(conn, run_id: int, identity: str, text: dict, outputs: dict) -> str:
+def retain_outputs(
+    conn, run_id: int, identity: str, text: dict, outputs: dict, *, source_rows: dict | None = None
+) -> str:
     text_hash = digest(text)
     outputs_hash = digest(outputs)
     expected = (identity, canonical(text), text_hash, canonical(outputs), outputs_hash)
@@ -337,8 +381,26 @@ def retain_outputs(conn, run_id: int, identity: str, text: dict, outputs: dict) 
         conn.execute(
             "INSERT INTO executed_numerical_runs VALUES (?,?,?,?,?,?)", (run_id, *expected)
         )
+    mapping = conn.execute(
+        "SELECT source_rows,source_rows_hash FROM numerical_run_source_rows WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    if source_rows is not None:
+        expected_mapping = (canonical(source_rows), digest(source_rows))
+        if mapping is not None and tuple(mapping) != expected_mapping:
+            raise ReplayRefusal("conflicting_immutable_insertion")
+        if mapping is None:
+            if existing is not None:
+                # Never manufacture original row IDs for already retained runs.
+                raise ReplayRefusal("conflicting_immutable_insertion")
+            conn.execute(
+                "INSERT INTO numerical_run_source_rows VALUES (?,?,?)", (run_id, *expected_mapping)
+            )
+            mapping = expected_mapping
     conn.commit()
-    return run_artifact_id(run_id, identity, text_hash, outputs_hash)
+    return run_artifact_id(
+        run_id, identity, text_hash, outputs_hash, mapping[1] if mapping else None
+    )
 
 
 def replay_run(conn, run_id: int) -> dict:
@@ -407,6 +469,13 @@ def replay_run(conn, run_id: int) -> dict:
             packet = context.get("evidence_packet")
             if packet is not None and not validate_frozen_packet(packet):
                 raise ReplayRefusal("invalid_textual_context")
+        source_mapping = conn.execute(
+            "SELECT source_rows,source_rows_hash FROM numerical_run_source_rows WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        source_rows = json.loads(source_mapping[0]) if source_mapping else None
+        if source_mapping is not None and digest(source_rows) != source_mapping[1]:
+            raise ReplayRefusal("invalid_source_row_map")
         _, _, outputs = evaluate(body, text)
         if canonical(outputs) != canonical(original):
             raise ReplayRefusal("output_mismatch")
@@ -417,7 +486,11 @@ def replay_run(conn, run_id: int) -> dict:
                 row["numerical_identity"],
                 row["textual_context_hash"],
                 row["outputs_hash"],
+                source_mapping[1] if source_mapping else None,
             ),
+            "source_rows": source_rows,
+            "source_rows_hash": source_mapping[1] if source_mapping else None,
+            "source_rows_status": "retained" if source_mapping else "not_retained",
             "audit_only": True,
             "numerical_identity": row["numerical_identity"],
             "outputs": outputs,

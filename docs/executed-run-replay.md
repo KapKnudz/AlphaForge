@@ -32,7 +32,21 @@ the [deterministic](deterministic-flow.md) and [valuation](valuation.md) owners.
 Surrogate numerical row IDs are assigned in canonical body order for stable
 selection diagnostics. Natural provider/observation keys and raw payloads remain
 retained; these snapshot-local IDs must not be used to join mutable source rows.
-Company IDs remain actual repository identities. Generated acquisition timestamps
+Company IDs remain actual repository identities.
+
+For new runs, an independent immutable per-run audit map records each table's
+`snapshot_row_id` → original `source_row_id` and company. Migration
+[018](../db/migrations/018_numerical_source_row_maps.sql) owns
+`numerical_run_source_rows`; `run.json#source_rows` and the replay envelope expose
+that map, and ranking JSON explicitly labels its diagnostic row-ID namespace.
+For example, `rejection:1` may map to source `financial_period_rejections.id=2`,
+not to live row 1 belonging to another company. Source IDs refer only to the
+originating SQLite database, not globally unique provider IDs or a current-state
+join guarantee. The map is captured in the same read snapshot, retained atomically
+with outputs, and independently hashed; it never enters the canonical numerical
+body, numerical identity or exact output comparison. Runs predating this map are
+not backfilled; replay reports `source_rows_status=not_retained` without guessing
+original IDs. Generated acquisition timestamps
 that are not calculation inputs are excluded; rejection and dividend verification
 times consumed in diagnostics remain retained. This is not a general vintage
 service and cannot recover pre-retention overwritten values.
@@ -60,12 +74,15 @@ Input retention commits before calculation. The consumable `ranking_runs` row an
 its retained executed-output link commit atomically before any filesystem export.
 Any output-retention error rolls both records back rather than publishing an
 unrepeatable run; an interrupted run can leave only an unused retained input body.
-Identical retries verify retained content; contradictory insertions refuse.
+Identical retries, including an identical concurrent insertion winning after an
+absence read, verify retained content; contradictory insertions refuse. Unrelated
+insertion faults still abort retention rather than being treated as success.
 SQLite triggers prohibit update, delete and replacement of immutable records.
 
 `exports/runs/<artifact_id>/` contains the write-once ranking JSON/CSV, DCF JSON,
 `outputs.json` and `run.json` identities. The artifact ID is a DSN-free SHA-256 over
-the database-local run ID, numerical identity, textual-context hash and output hash,
+the database-local run ID, numerical identity, textual-context hash, output hash,
+and (when retained) independent source-row-map hash,
 so same-local-ID runs from different databases do not collide unless their retained
 artifacts are identical. Identical artifacts are verified byte-for-byte and reused;
 conflicts never overwrite the original directory. The SQLite retained body/output is
@@ -86,7 +103,8 @@ implementation is supplied by the ordinary supported release process.
 Typed `ReplayRefusal.reason` outcomes include `missing_run`,
 `legacy_not_replayable`, `missing_snapshot`, `corrupt_retained_body`,
 `unavailable_code_revision`, `unsupported_rules_or_code`,
-`invalid_textual_context`, `conflicting_immutable_insertion`, and `output_mismatch`.
+`invalid_textual_context`, `invalid_source_row_map`, `conflicting_immutable_insertion`,
+and `output_mismatch`.
 Legacy `ranking_runs` without retained inputs remain honestly non-replayable;
 no retrospective snapshots are fabricated. Hash-only records are insufficient.
 
@@ -107,4 +125,9 @@ removal of live rows, retained-only reconstructed memory databases and forbidden
 live-table reads. It covers missing/zero, non-calendar fiscal histories, splits,
 sector branches, dividends, denominations, rule/code changes, tamper/conflicts,
 legacy refusal, atomic second-reader visibility and persistence failure before consumption. Fixtures require no
-live provider acquisition or model call.
+live provider acquisition or model call. Additional
+[hosted-review regressions](../tests/test_numerical_retention_review_regressions.py)
+exercise real two-connection insertion interleaving through rank/export/replay,
+contradictory concurrent retention refusal, original-source/snapshot rejection-ID
+mapping after live-row removal, source-map atomicity/immutability and v17 upgrade
+without fabricated source IDs.
