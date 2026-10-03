@@ -12,11 +12,9 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-09-30-report-denomination-v17"`
-  (v17 retains the v16 verified dividend-yield provenance, metric-specific
-  export horizons and full annual rejection span, and adds acquired report
-  values-currency/conversion provenance; `valuation_score` remains heuristic
-  and DCF separate).
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-10-03-dcf-availability-diagnostics-v18"`
+  (v18 records the dated-positive-ROIC availability contract and reverse-DCF
+  diagnostic output; `valuation_score` remains heuristic and DCF separate).
   Financial selection is `verified-dates-consecutive-annual-denomination-v1` in the loader;
   [the deterministic flow](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring)
   owns its date, freshness, refusal-provenance and export contract.
@@ -49,7 +47,7 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v12-consecutive-annual-growth"`) — historical growth
+  (`VERSION = "reverse-dcf-v13-dated-roic-availability-diagnostics"`) — historical growth
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
@@ -58,12 +56,14 @@ ranking never masquerades as a discounted-cash-flow.
   5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
   EBIT margin revenue-weighted over 3–5 annuals, reinvestment from
-  **Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount
+  **usable dated finite positive Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount
   from `RequiredReturnPolicy` market-cap buckets in **absolute SEK**
   (market cap from `price × shares` is in MSEK — scaled ×1e6 for bucket
-  selection). Missing ROIC (KPI 37) is provisional, not fatal: the DCF stays
-  `available` with net reinvestment 0%, lowered confidence, a warning, and
-  `missing_information=("roic",)`. Report `currency` at calculation is verified
+  selection). Without usable dated finite positive ROIC, ordinary growth-based
+  FCFF is unavailable with `missing_information=("dated_positive_roic",)`;
+  no zero-reinvestment value or implied roots are emitted. Negative NOPAT with
+  ROIC-based reinvestment is unavailable rather than described as cash released
+  by negative investment. Report `currency` at calculation is verified
   values currency; original currency, conversion mode/target and original→target
   ratio remain separate provenance. Compatible non-SEK raw multiples may be
   available, but DCF retains its SEK-only required-return refusal and does not
@@ -78,15 +78,20 @@ ranking never masquerades as a discounted-cash-flow.
   (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
   with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
   cutoff-filtered verified-date contract, **not historical-known-then PIT**.
-  Rejected market inputs cannot drive valuation; missing ROIC retains the
-  policy's explicit provisional behavior. DCF market cap, enterprise value, and
+  Rejected market inputs cannot drive valuation. DCF market cap, enterprise value, and
   the required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,
   `projected_cash_flows`, plus `implied` solves for
   `revenue_growth / ebit_margin / terminal_growth` within
-  `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`.
+  `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`. Exports include the operative
+  growth-fade endpoint and label each implied result as a conditional one-variable
+  solve. Endpoint prices, deterministic sampled ranges, above/below direction,
+  target-denominated boundary gaps, and sampled monotonicity/interior extrema are
+  reported without claiming that a finite scan proves the full range. Near-bound
+  terminal-growth roots and discounted-terminal-value dependence are qualifications,
+  not economic conclusions.
 * **Export:** `alphaforge rank` retains original outputs, then writes
   `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)

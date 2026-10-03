@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, timedelta
 from math import isfinite
 from types import SimpleNamespace
@@ -35,6 +36,33 @@ from alphaforge.evidence.manifest_store import load_evidence_view
 
 SELECTION_VERSION = "verified-dates-consecutive-annual-denomination-v1"
 MAX_PRICE_AGE_DAYS = 7
+
+
+def _dcf_unavailable_reason(missing_information: tuple[str, ...]) -> str | None:
+    if "dated_positive_roic" in missing_information:
+        return (
+            "Growth-based FCFF requires a usable dated finite positive ROIC to model "
+            "reinvestment; no ordinary value or implied roots were produced."
+        )
+    if "negative_nopat_unsupported_reinvestment" in missing_information:
+        return (
+            "ROIC-based reinvestment is unsupported for negative NOPAT; the model does not "
+            "treat negative investment as cash released."
+        )
+    return None
+
+
+def _equity_qualification(equity_value: float) -> dict[str, Any]:
+    negative = equity_value < 0
+    return {
+        "negative_modeled_equity": negative,
+        "equity_value_qualification": (
+            "negative modeled equity is not a tradable negative share price; "
+            "limited-liability and turnaround option value are outside this FCFF model"
+            if negative
+            else "conditional FCFF result, not an investment conclusion"
+        ),
+    }
 
 
 def _date(value: Any) -> date | None:
@@ -1277,6 +1305,7 @@ def load_results_for_company(
                             "tax_rate": dcf_policy_decision.assumptions.tax_rate,
                             "discount_rate": dcf_policy_decision.assumptions.discount_rate,
                             "terminal_growth": dcf_policy_decision.assumptions.terminal_growth,
+                            "revenue_growth_fade_to": dcf_policy_decision.assumptions.revenue_growth_fade_to,
                             "net_reinvestment_rate": dcf_policy_decision.assumptions.net_reinvestment_rate,
                             "reinvestment_return": dcf_policy_decision.assumptions.reinvestment_return,
                             "ebit_margin_start": dcf_policy_decision.assumptions.ebit_margin_start,
@@ -1297,6 +1326,12 @@ def load_results_for_company(
                         "value_per_share": dcf_value.value_per_share,
                         "terminal_value": dcf_value.terminal_value,
                         "discounted_terminal_value": dcf_value.discounted_terminal_value,
+                        "terminal_value_share_of_enterprise_value": (
+                            dcf_value.discounted_terminal_value / dcf_value.enterprise_value
+                            if dcf_value.enterprise_value != 0
+                            else None
+                        ),
+                        **_equity_qualification(dcf_value.equity_value),
                         "projected_cash_flows": [
                             {
                                 "year": p.year,
@@ -1330,24 +1365,144 @@ def load_results_for_company(
                         else [],
                         "missing_information": list(dcf_policy_decision.missing_information),
                     }
-                    # Reverse DCF: solve implied assumption that equates model to market price
+                    # Each reverse result is a one-variable conditional solve; the
+                    # other assumptions remain fixed at the exported base case.
                     for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
                         _bounds = dcf_policy_decision.solve_bounds.get(_assump)
                         if _bounds is None:
                             continue
                         try:
-                            _res = engine.solve(dcf_inputs, _assump, _bounds[0], _bounds[1])
+                            _diagnostics, _brackets, _exact_points = engine.diagnose_solve_range(
+                                dcf_inputs, _assump, _bounds[0], _bounds[1]
+                            )
+                            _roots = []
+                            for _lower, _upper in _brackets:
+                                _res = engine.solve(dcf_inputs, _assump, _lower, _upper)
+                                _roots.append(
+                                    {
+                                        "implied_assumption": _res.implied_assumption,
+                                        "modeled_price": _res.modeled_price,
+                                        "price_difference": _res.price_difference,
+                                        "iterations": _res.iterations,
+                                        "root_bracket": [_lower, _upper],
+                                        "valuation": _res.valuation,
+                                    }
+                                )
+                            for _point in _exact_points:
+                                if any(
+                                    abs(_root["implied_assumption"] - _point)
+                                    <= (_bounds[1] - _bounds[0])
+                                    / (_diagnostics["diagnostic_grid_points"] - 1)
+                                    for _root in _roots
+                                ):
+                                    continue
+                                _point_inputs = replace(
+                                    dcf_inputs,
+                                    assumptions=replace(
+                                        dcf_inputs.assumptions, **{_assump: _point}
+                                    ),
+                                )
+                                _point_value = engine.value(_point_inputs)
+                                _roots.append(
+                                    {
+                                        "implied_assumption": _point,
+                                        "modeled_price": _point_value.value_per_share,
+                                        "price_difference": (
+                                            _point_value.value_per_share - dcf_inputs.current_price
+                                        ),
+                                        "iterations": 0,
+                                        "root_bracket": [_point, _point],
+                                        "valuation": _point_value,
+                                    }
+                                )
+                            _roots.sort(key=lambda _root: _root["implied_assumption"])
+                            _conditional_scope = (
+                                "one-variable conditional solve; all other assumptions held fixed"
+                            )
+                            if not _roots:
+                                _direction = _diagnostics["no_solution_direction"]
+                                _error = (
+                                    f"target price is {_direction} the sampled attainable range"
+                                    if _direction in {"above", "below"}
+                                    else "target lies within the sampled range but no solve bracket was found"
+                                )
+                                reverse_dcf_results[_assump] = {
+                                    **_diagnostics,
+                                    "error": _error,
+                                    "solve_scope": _conditional_scope,
+                                    "candidate_roots": [],
+                                }
+                                continue
+
+                            _root_summaries = []
+                            for _root in _roots:
+                                _valuation = _root["valuation"]
+                                _root_summary = {
+                                    key: value for key, value in _root.items() if key != "valuation"
+                                }
+                                _root_summary.update(
+                                    {
+                                        "enterprise_value": _valuation.enterprise_value,
+                                        "equity_value": _valuation.equity_value,
+                                        "terminal_value_share_of_enterprise_value": (
+                                            _valuation.discounted_terminal_value
+                                            / _valuation.enterprise_value
+                                            if _valuation.enterprise_value != 0
+                                            else None
+                                        ),
+                                        **_equity_qualification(_valuation.equity_value),
+                                    }
+                                )
+                                _root_summaries.append(_root_summary)
+                            _chosen = _roots[0]
+                            _chosen_value = _chosen["valuation"]
+                            _distance_to_lower = _chosen["implied_assumption"] - _bounds[0]
+                            _distance_to_upper = _bounds[1] - _chosen["implied_assumption"]
+                            _near_bound = (
+                                _assump == "terminal_growth"
+                                and min(_distance_to_lower, _distance_to_upper)
+                                <= (_bounds[1] - _bounds[0]) * 0.05
+                            )
                             reverse_dcf_results[_assump] = {
-                                "implied_assumption": _res.implied_assumption,
-                                "lower_bound": _res.lower_bound,
-                                "upper_bound": _res.upper_bound,
-                                "target_price": _res.target_price,
-                                "modeled_price": _res.modeled_price,
-                                "price_difference": _res.price_difference,
-                                "iterations": _res.iterations,
-                                "value_per_share": _res.valuation.value_per_share,
-                                "enterprise_value": _res.valuation.enterprise_value,
-                                "equity_value": _res.valuation.equity_value,
+                                **_diagnostics,
+                                "implied_assumption": _chosen["implied_assumption"],
+                                "lower_bound": _bounds[0],
+                                "upper_bound": _bounds[1],
+                                "target_price": dcf_inputs.current_price,
+                                "modeled_price": _chosen["modeled_price"],
+                                "price_difference": _chosen["price_difference"],
+                                "iterations": _chosen["iterations"],
+                                "value_per_share": _chosen_value.value_per_share,
+                                "enterprise_value": _chosen_value.enterprise_value,
+                                "equity_value": _chosen_value.equity_value,
+                                **_equity_qualification(_chosen_value.equity_value),
+                                "root_bracket": _chosen["root_bracket"],
+                                "candidate_roots": _root_summaries,
+                                "root_count_on_grid": len(_root_summaries),
+                                "root_uniqueness": (
+                                    "multiple crossings observed on the diagnostic grid"
+                                    if len(_root_summaries) > 1
+                                    else "one crossing observed; additional roots between grid points are not excluded"
+                                ),
+                                "solve_scope": _conditional_scope,
+                                "terminal_value_share_of_enterprise_value": (
+                                    _chosen_value.discounted_terminal_value
+                                    / _chosen_value.enterprise_value
+                                    if _chosen_value.enterprise_value != 0
+                                    else None
+                                ),
+                                "near_bound": _near_bound,
+                                "near_bound_side": (
+                                    "lower" if _distance_to_lower <= _distance_to_upper else "upper"
+                                )
+                                if _near_bound
+                                else None,
+                                "interpretation": (
+                                    "near-bound terminal-growth equivalence is conditional and "
+                                    "assumption-sensitive, not an economic conclusion"
+                                    if _near_bound
+                                    else "conditional one-variable equivalence, not an economic conclusion"
+                                ),
                             }
                         except Exception as exc:
                             reverse_dcf_results[_assump] = {"error": str(exc)}
@@ -1382,6 +1537,9 @@ def load_results_for_company(
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
                     "missing_information": list(dcf_policy_decision.missing_information),
+                    "unavailable_reason": _dcf_unavailable_reason(
+                        dcf_policy_decision.missing_information
+                    ),
                     "warnings": list(dcf_policy_decision.warnings)
                     if dcf_policy_decision.warnings
                     else [],

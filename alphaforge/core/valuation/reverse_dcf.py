@@ -257,6 +257,123 @@ class ReverseDcfEngine:
         )
         return nopat * (1.0 - reinvestment_share_of_nopat)
 
+    def diagnose_solve_range(
+        self,
+        inputs: ReverseDcfInputs,
+        assumption: ImpliedAssumption,
+        lower_bound: float,
+        upper_bound: float,
+        *,
+        sample_intervals: int = 200,
+        price_tolerance: float = 1e-6,
+    ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[float, ...]]:
+        """Report endpoint and sampled range diagnostics without assuming monotonicity."""
+        if assumption not in _SUPPORTED_ASSUMPTIONS:
+            raise ValueError(f"unsupported implied assumption: {assumption}")
+        if not lower_bound < upper_bound:
+            raise ValueError("lower_bound must be less than upper_bound")
+        if sample_intervals <= 0 or price_tolerance <= 0:
+            raise ValueError("range diagnostic settings must be positive")
+
+        points = tuple(
+            lower_bound + (upper_bound - lower_bound) * index / sample_intervals
+            for index in range(sample_intervals + 1)
+        )
+        prices = tuple(
+            self._value_with(inputs, assumption, point).value_per_share for point in points
+        )
+        if not all(isfinite(price) for price in prices):
+            raise ValueError("reverse DCF range diagnostic produced a non-finite price")
+        differences = tuple(price - inputs.current_price for price in prices)
+        brackets = tuple(
+            (points[index], points[index + 1])
+            for index in range(sample_intervals)
+            if differences[index] * differences[index + 1] < 0
+        )
+        exact_points = tuple(
+            point
+            for point, difference in zip(points, differences, strict=True)
+            if abs(difference) <= price_tolerance
+        )
+
+        changes = []
+        for left, right in zip(prices, prices[1:], strict=False):
+            tolerance = 1e-12 * max(1.0, abs(left), abs(right))
+            changes.append(1 if right - left > tolerance else -1 if left - right > tolerance else 0)
+        observed_changes = [change for change in changes if change]
+        if not observed_changes:
+            monotonicity = "sampled_flat"
+        elif all(change > 0 for change in observed_changes):
+            monotonicity = "sampled_increasing"
+        elif all(change < 0 for change in observed_changes):
+            monotonicity = "sampled_decreasing"
+        else:
+            monotonicity = "sampled_non_monotonic"
+
+        extrema = []
+        for index in range(1, sample_intervals):
+            if prices[index] > prices[index - 1] and prices[index] > prices[index + 1]:
+                extrema.append(
+                    {"type": "local_maximum", "assumption": points[index], "price": prices[index]}
+                )
+            elif prices[index] < prices[index - 1] and prices[index] < prices[index + 1]:
+                extrema.append(
+                    {"type": "local_minimum", "assumption": points[index], "price": prices[index]}
+                )
+
+        minimum_index = min(range(len(prices)), key=prices.__getitem__)
+        maximum_index = max(range(len(prices)), key=prices.__getitem__)
+        minimum_price, maximum_price = prices[minimum_index], prices[maximum_index]
+        target = inputs.current_price
+        if target < minimum_price - price_tolerance:
+            target_position = "below_sampled_range"
+            no_solution_direction = "below"
+            nearest_boundary = "sampled_minimum"
+            nearest_boundary_price = minimum_price
+        elif target > maximum_price + price_tolerance:
+            target_position = "above_sampled_range"
+            no_solution_direction = "above"
+            nearest_boundary = "sampled_maximum"
+            nearest_boundary_price = maximum_price
+        else:
+            target_position = "within_sampled_range"
+            no_solution_direction = "not_established"
+            lower_gap = target - minimum_price
+            upper_gap = maximum_price - target
+            if lower_gap <= upper_gap:
+                nearest_boundary = "sampled_minimum"
+                nearest_boundary_price = minimum_price
+            else:
+                nearest_boundary = "sampled_maximum"
+                nearest_boundary_price = maximum_price
+        boundary_gap = abs(target - nearest_boundary_price)
+        diagnostics = {
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "lower_endpoint_price": prices[0],
+            "upper_endpoint_price": prices[-1],
+            "target_price": target,
+            "target_position": target_position,
+            "no_solution_direction": no_solution_direction,
+            "sampled_minimum_price": minimum_price,
+            "sampled_minimum_assumption": points[minimum_index],
+            "sampled_maximum_price": maximum_price,
+            "sampled_maximum_assumption": points[maximum_index],
+            "nearest_boundary": nearest_boundary,
+            "nearest_boundary_price": nearest_boundary_price,
+            "nearest_boundary_gap": boundary_gap,
+            "nearest_boundary_gap_denominator": "target_price",
+            "nearest_boundary_gap_denominator_value": target,
+            "nearest_boundary_gap_pct_target": boundary_gap / target * 100.0,
+            "monotonicity": monotonicity,
+            "interior_extrema": extrema,
+            "diagnostic_grid_points": sample_intervals + 1,
+            "range_qualification": (
+                "sampled range only; extrema or roots between grid points are not excluded"
+            ),
+        }
+        return diagnostics, brackets, exact_points
+
     def _value_with(
         self,
         inputs: ReverseDcfInputs,
