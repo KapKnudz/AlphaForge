@@ -1548,6 +1548,38 @@ def test_near_bound_terminal_solve_is_qualified_and_terminal_dependence_exported
     assert result["dcf"]["terminal_value_share_of_enterprise_value"] is not None
 
 
+def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.853213549541081}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 12.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["root_count_on_grid"] == 2
+    assert terminal["implied_assumption"] == pytest.approx(-0.00714154, abs=1e-6)
+    assert terminal["near_bound"] is False
+    assert terminal["near_bound_side"] is None
+    assert terminal["near_cap_candidate_present"] is True
+    assert "upper solve cap" in terminal["near_cap_warning"]
+    lower_root, upper_root = terminal["candidate_roots"]
+    assert lower_root["near_bound"] is False
+    assert lower_root["near_bound_side"] is None
+    assert upper_root["implied_assumption"] == pytest.approx(0.039, abs=1e-6)
+    assert upper_root["near_bound"] is True
+    assert upper_root["near_bound_side"] == "upper"
+    assert "conditional and assumption-sensitive" in upper_root["interpretation"]
+
+
 def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)

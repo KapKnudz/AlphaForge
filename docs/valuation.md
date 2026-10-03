@@ -138,9 +138,9 @@ without error.
 ## Integrity
 
 * No guessed fundamentals: absent `ebitda`, gross `total_Debt`, or KPI history
-  stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`
-  — except missing ROIC, which yields a provisional available DCF at 0%
-  reinvestment (see policy above).
+  stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`.
+  Missing usable dated positive ROIC makes growth-based FCFF unavailable; no
+  zero-reinvestment valuation or implied roots are emitted.
 * Deterministic: identical selected inputs under identical supported rules →
   identical `DcfValue` and `valuation_score`. New executed ranking runs retain
   immutable numerical bodies, exact code/rules and original outputs for

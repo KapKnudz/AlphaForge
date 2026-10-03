@@ -1437,6 +1437,11 @@ def load_results_for_company(
                             _root_summaries = []
                             for _root in _roots:
                                 _valuation = _root["valuation"]
+                                _root_near_bound = (
+                                    _assump == "terminal_growth"
+                                    and _bounds[1] - _root["implied_assumption"]
+                                    <= (_bounds[1] - _bounds[0]) * 0.05
+                                )
                                 _root_summary = {
                                     key: value for key, value in _root.items() if key != "valuation"
                                 }
@@ -1451,15 +1456,24 @@ def load_results_for_company(
                                             else None
                                         ),
                                         **_equity_qualification(_valuation.equity_value),
+                                        "near_bound": _root_near_bound,
+                                        "near_bound_side": (
+                                            "upper" if _root_near_bound else None
+                                        ),
+                                        "interpretation": (
+                                            "near-bound terminal-growth equivalence is conditional and "
+                                            "assumption-sensitive, not an economic conclusion"
+                                            if _root_near_bound
+                                            else "conditional one-variable equivalence, not an economic conclusion"
+                                        ),
                                     }
                                 )
                                 _root_summaries.append(_root_summary)
                             _chosen = _roots[0]
                             _chosen_value = _chosen["valuation"]
-                            _distance_to_upper = _bounds[1] - _chosen["implied_assumption"]
-                            _near_bound = (
-                                _assump == "terminal_growth"
-                                and _distance_to_upper <= (_bounds[1] - _bounds[0]) * 0.05
+                            _selected_root_summary = _root_summaries[0]
+                            _near_cap_candidate_present = any(
+                                _root["near_bound"] for _root in _root_summaries
                             )
                             reverse_dcf_results[_assump] = {
                                 **_diagnostics,
@@ -1489,13 +1503,15 @@ def load_results_for_company(
                                     if _chosen_value.enterprise_value != 0
                                     else None
                                 ),
-                                "near_bound": _near_bound,
-                                "near_bound_side": "upper" if _near_bound else None,
-                                "interpretation": (
-                                    "near-bound terminal-growth equivalence is conditional and "
-                                    "assumption-sensitive, not an economic conclusion"
-                                    if _near_bound
-                                    else "conditional one-variable equivalence, not an economic conclusion"
+                                "near_bound": _selected_root_summary["near_bound"],
+                                "near_bound_side": _selected_root_summary["near_bound_side"],
+                                "interpretation": _selected_root_summary["interpretation"],
+                                "near_cap_candidate_present": _near_cap_candidate_present,
+                                "near_cap_warning": (
+                                    "at least one terminal-growth candidate root is near the upper "
+                                    "solve cap; equivalence is conditional and assumption-sensitive"
+                                    if _near_cap_candidate_present
+                                    else None
                                 ),
                             }
                         except Exception as exc:
