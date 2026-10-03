@@ -75,11 +75,12 @@ forecast, provider/title conflict, and contradictory-heading refusal remain.
 Published-head review also exposed inflected `forecasts` / `forecasting` in
 compound annual titles or headings; the fiscal-context guard now rejects those
 forecast years while retaining covered annual years and independent sentences.
-`report_rules.py` advances interpretation version to 13 and records the new
-fiscal semantics in fingerprint inputs; evidence rules advance to 15 so prior
-packets cannot confer current readiness. Changed interpretation creates new
-immutable observations, reusing verified bytes/extraction, never restamping
-old history.
+The initial repair advanced report and evidence interpretation so prior packets
+cannot confer current readiness. Current rule versions and later guards are
+owned by the
+[evidence-flow contract](../evidence-flow.md#immutable-history-and-legacy-backfill).
+Changed interpretation creates new immutable observations, reusing verified
+bytes/extraction, never restamping old history.
 
 `tests/test_varied_cohort_evidence_repairs.py` exercises the public
 `alphaforge evidence --ticker ... --as-of 2026-10-03 --diagnostic` parser/command,

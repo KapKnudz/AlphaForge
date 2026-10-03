@@ -127,8 +127,9 @@ Compound `Annual and Sustainability Report` titles and guarded body headings
 identify the covered annual year/range under the same forecast, comparator and
 conflict safeguards as `Annual Report`. For that compound body heading, the
 fallback does not treat a year attached to `published` or `publication` as
-covered-year evidence; without a separate covered year, the identity remains
-unresolved. A covered year before a later publication date remains admissible.
+covered-year evidence; without separate admissible covered-year evidence, the
+identity remains unresolved. A covered year before a later publication date
+remains admissible.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use

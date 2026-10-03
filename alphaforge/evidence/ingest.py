@@ -408,7 +408,7 @@ def _year_period(text: str) -> str | None:
 
 
 def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str | None]:
-    """Resolve covered identity, never a forecast/comparator or publication year.
+    """Resolve covered identity, refusing publication years in compound annual headings.
 
     Provider fields outrank report titles; body fallback requires a report-labelled
     heading. Previously derived fields are outputs, not new provider assertions.
@@ -469,9 +469,7 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
             continue
         heading = match.group(0)
-        if _COMPOUND_ANNUAL_HEADING.match(heading) and _PUBLICATION_YEAR_CONTEXT.search(
-            heading
-        ):
+        if _COMPOUND_ANNUAL_HEADING.match(heading) and _PUBLICATION_YEAR_CONTEXT.search(heading):
             continue
         period = None if annual else _quarter_period(heading)
         if not period:

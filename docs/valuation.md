@@ -94,7 +94,9 @@ ranking never masquerades as a discounted-cash-flow.
   gaps, and sampled monotonicity/interior extrema are reported without claiming
   that a finite scan proves the full range or analytical exactness. Terminal-growth
   candidates near the upper cap and discounted-terminal-value dependence are
-  qualifications, not economic conclusions.
+  qualifications, not economic conclusions. Base and candidate results also flag
+  negative modeled equity as non-tradable; limited-liability and turnaround option
+  value remain outside this FCFF model.
 * **Export:** `alphaforge rank` retains original outputs, then writes
   `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)
