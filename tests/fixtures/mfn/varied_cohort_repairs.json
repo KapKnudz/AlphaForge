@@ -1,0 +1,175 @@
+{
+  "provenance": "2026-10-03 varied-cohort diagnosis.json, source-inventory.csv and feed excerpts; real titles/release URLs with bounded body excerpts",
+  "fiscal": [
+    {
+      "input": {
+        "title": "Clas Ohlsons bokslutskommuniké 2025/26",
+        "report_kind": "quarterly",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025/2026-q4",
+      "expected": "2025/2026-q4",
+      "source_url": "https://mfn.se/cis/a/clas-ohlson/clas-ohlsons-bokslutskommunike-2025-26-385a1a8d",
+      "body": "Clas Ohlsons bokslutskommuniké 2025/26 2026-06-03 07:00:00 Stark avslutning på året - fortsatt positivt momentum Fjärde kvartalet - 1 februari till 30 april Nettoomsättningen uppgick till 2 611 Mkr (2 343), en ökning med 11 procent, varav 9 procent avser organisk tillväxt, 2 procent förvärv och 0 procent valutaeffekter Försäljning online uppgick ti",
+      "published_at": "2026-06-03T05:00:00Z",
+      "ticker": "CLAS B"
+    },
+    {
+      "input": {
+        "title": "Clas Ohlson Year-end report 2025/26",
+        "report_kind": "annual",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025/2026",
+      "expected": "2025/2026-q4",
+      "source_url": "https://mfn.se/cis/a/clas-ohlson/clas-ohlson-year-end-report-2025-26-c41def1c",
+      "body": "Clas Ohlson Year-end report 2025/26 2026-06-03 07:00:00 A strong end to the year - continued positive momentum Fourth quarter - 1 February to 30 April Net sales amounted to 2,611 MSEK (2,343), an increase of 11%, of which 9% related to organic growth, 2% acquisition and 0% to currency effects Online sales amounted to 615 MSEK (493), an increase of ",
+      "published_at": "2026-06-03T05:00:00Z",
+      "ticker": "CLAS B"
+    },
+    {
+      "input": {
+        "title": "Evolution: Bokslutskommuniké januari–december 2025",
+        "report_kind": "quarterly",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025/2025-q4",
+      "expected": "2025/2025-q4",
+      "source_url": "https://mfn.se/cis/a/evolution/evolution-bokslutskommunike-januari-december-2025-829a1ea3",
+      "body": "Evolution: Bokslutskommuniké januari–december 2025 2026-02-05 07:30:00 Fjärde kvartalet 2025 (4 kv 2024) Nettoomsättningen minskade 3,7% till 514,2 MEUR (533,8) och totala rörelseintäkter minskade 9,5% till 565,9 MEUR (625,3) Justerad EBITDA (exklusive övriga rörelseintäkter) minskade 6,1% till 341,5 MEUR (363,6), motsvarande en marginal om 66,4% (",
+      "published_at": "2026-02-05T06:30:00Z",
+      "ticker": "EVO"
+    },
+    {
+      "input": {
+        "title": "Evolution: Year-end report January–December 2025",
+        "report_kind": "annual",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025",
+      "expected": "2025/2025-q4",
+      "source_url": "https://mfn.se/cis/a/evolution/evolution-year-end-report-january-december-2025-480927cf",
+      "body": "Evolution: Year-end report January–December 2025 2026-02-05 07:30:00 Fourth quarter of 2025 (Q4 2024) Net revenues decreased 3.7% to EUR 514.2 million (533.8) and total operating revenues decreased 9.5% to EUR 565.9 million (625.3) Adjusted EBITDA (excluding other operating revenues) decreased 6.1% to EUR 341.5 million (363.6), corresponding to a m",
+      "published_at": "2026-02-05T06:30:00Z",
+      "ticker": "EVO"
+    },
+    {
+      "input": {
+        "title": "Mips Annual and Sustainability Report 2025",
+        "report_kind": "annual",
+        "document_type": "ANNUAL_REPORT"
+      },
+      "old_period": null,
+      "expected": "2025",
+      "source_url": "https://mfn.se/a/mips/mips-annual-and-sustainability-report-2025",
+      "body": "Mips Annual and Sustainability Report 2025 2026-03-19 17:55:00 Today, Mips AB (publ) publishes the annual and sustainability report for 2025. The annual and sustainability report is available on the company's website, www.mipscorp.com For more information, please contact: Max Strandwitz, President and CEO Max.Strandwitz@Mipsprotection.com tel +46 7",
+      "published_at": "2026-03-19T16:55:00Z",
+      "ticker": "MIPS"
+    },
+    {
+      "input": {
+        "title": "Bactiguard Holding AB’s Annual and Sustainability Report 2025",
+        "report_kind": "annual",
+        "document_type": "ANNUAL_REPORT"
+      },
+      "old_period": null,
+      "expected": "2025",
+      "source_url": "https://mfn.se/a/bactiguard-holding/bactiguard-holding-abs-annual-and-sustainability-report-2025",
+      "body": "Bactiguard Holding AB’s Annual and Sustainability Report 2025 2026-04-16 07:00:00 The Annual and Sustainability Report 2025 for Bactiguard Holding AB (publ) is now available at ir.bactiguard.com/ During 2025, we built a stronger foundation by sharpening our focus as a licensing company, strengthening existing partnerships, and solidifying our thera",
+      "published_at": "2026-04-16T05:00:00Z",
+      "ticker": "BACTI B"
+    },
+    {
+      "ticker": "BACTI B",
+      "input": {
+        "title": "Bactiguard Holding AB’s year-end report 2025",
+        "report_kind": "annual",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025",
+      "expected": "2025/2025-q4",
+      "source_url": "https://mfn.se/cis/a/bactiguard-holding/bactiguard-holding-abs-year-end-report-2025-2780cfa9",
+      "body": "A year of strategic execution concluded with a strong Q4\n\n Fourth quarter 2025 (October – December)\n\n* Total revenue amounted to SEK 65.6 (68.3) million, a decrease of SEK 2.7\n  million corresponding to 3.9%.\n* Net sales amounted to SEK 63.2 (63.1) million, an increase of SEK 0.1 million\n  corresponding to 0.1%. Adjusted for currency effects of SEK",
+      "published_at": "2026-02-05T06:00:00Z"
+    },
+    {
+      "ticker": "BACTI B",
+      "input": {
+        "title": "Bactiguard Holding AB:s bokslutskommuniké 2025",
+        "report_kind": "quarterly",
+        "document_type": "YEAR_END_REPORT"
+      },
+      "old_period": "2025/2025-q4",
+      "expected": "2025/2025-q4",
+      "source_url": "https://mfn.se/cis/a/bactiguard-holding/bactiguard-holding-ab-s-bokslutskommunike-2025-0c51db25",
+      "body": "Ett år av strategiskt genomförande avslutades med ett starkt fjärde kvartal\n\n Fjärde kvartalet 2025 (oktober – december)\n\n* Totala intäkter uppgick till 65,6 (68,3) MSEK, en minskning med 2,7 MSEK\n  motsvarande 3,9%.\n* Nettoomsättningen uppgick till 63,2 (63,1) MSEK, en ökning med 0,1 MSEK\n  motsvarande 0,1%. Justerat för valutakurseffekter på -6,0",
+      "published_at": "2026-02-05T06:00:00Z"
+    }
+  ],
+  "controls": [
+    {
+      "ticker": "CLAS B",
+      "input": {
+        "title": "Clas Ohlson interim report Q1 2026/27",
+        "report_kind": "quarterly"
+      },
+      "expected": "2026/2027-q1",
+      "source_url": "https://mfn.se/a/clas-ohlson/clas-ohlson-interim-report-q1-2026-27",
+      "body": "Structurally stronger – the best first quarter to date\n\nFirst quarter – 1 May to 31 July\n\n* Net sales amounted to 3,278 MSEK (2,814), an increase of 16%, of which 11%\n  related to organic growth, 3% acquisition and 2% to currency effects\n* Online sales amounted to 734 MSEK (542), an increase of 35%, of which 15%\n  related to acquisitions\n* Operatin",
+      "published_at": "2026-09-03T05:00:00Z"
+    },
+    {
+      "ticker": "CLAS B",
+      "input": {
+        "title": "Clas Ohlson publishes Annual Report for 2025/26",
+        "report_kind": "annual"
+      },
+      "expected": "2025/2026",
+      "source_url": "https://mfn.se/cis/a/clas-ohlson/clas-ohlson-publishes-annual-report-for-2025-26-06c1f811",
+      "body": "Clas Ohlson's Annual Report for financial year 2025/26 is now available at\nabout.clasohlson.com.\n\nIn addition to detailed information on financial developments, the annual report\nalso includes the company's sustainability report, which for the first time has\nbeen prepared in accordance with the new EU requirements under the CSRD. The\nreport provide",
+      "published_at": "2026-07-03T08:00:00Z"
+    }
+  ],
+  "source_verification": [
+    {
+      "ticker": "CLAS B",
+      "release_url": "https://mfn.se/cis/a/clas-ohlson/clas-ohlson-year-end-report-2025-26-c41def1c",
+      "pdf_url": "https://mb.cision.com/Main/1116/4356813/4130290.pdf",
+      "sha256": "9d60ba5c9880a22a8c7b53e4476c7cd6aa952d9486933bd82b48eb10a66ffd8b",
+      "page": 1,
+      "covered_text_excerpt": "CLAS OHLSON YEAR - END REPORT/ Q 4  2025/26  \n \n“A strong end to the year – continued positive momentum\"  \nKristofer Tonström, President and CEO \nFourth quarter \n• Net sales amounted to 2,611 MSEK (2,343), an increase of 11%, of which 9% related to \norganic growth, 2% acquisition and 0% to currency effects \n• Online sales amounted to 615 MSEK (493)"
+    },
+    {
+      "ticker": "EVO",
+      "release_url": "https://mfn.se/cis/a/evolution/evolution-year-end-report-january-december-2025-480927cf",
+      "pdf_url": "https://mb.cision.com/Main/12069/4304629/3923659.pdf",
+      "sha256": "569f79fc110aee8015ddd81780ae15b9afdcd122d018a2e3bff3ba77db23c3e8",
+      "page": 8,
+      "covered_text_excerpt": "Year-end report | January-December 2025 | Evolution AB (publ) 8 (16) \n \nCondensed consolidated income statement \n  Oct-Dec Oct-Dec Jan-Dec Jan-Dec \nGroup, EUR thousands 2025 2024 2025 2024 \nRevenues - Live 438,553 459,447 1,772,579 1,775,734 \nRevenues - RNG 75,651 74,398 293,961 287,351 \nNet revenues 514,204 533,845 2,066,540 2,063,085 \nOther opera"
+    },
+    {
+      "ticker": "BACTI B",
+      "release_url": "https://mfn.se/cis/a/bactiguard-holding/bactiguard-holding-ab-s-bokslutskommunike-2025-0c51db25",
+      "pdf_url": "https://mb.cision.com/Main/9686/4302810/3918008.pdf",
+      "sha256": "1fc3ce731a73b95b044df28b66ac28bb61d283ee456c5d8fe2f03f4bcbc05807",
+      "page": 1,
+      "covered_text_excerpt": "BACTIGUARD HOLDING AB | BACTIGUARD.COM \nBOKSLUTSKOMMUNIKÉ 2025 \n \nEtt år av strategiskt genomförande avslutades med ett starkt fjärde kvartal \nFjärde kvartalet 2025 (oktober – december) \n• Totala intäkter uppgick till 65,6 (68,3) MSEK, en minskning med 2,7 MSEK motsvarande 3,9%. \n• Nettoomsättningen uppgick till 63,2 (63,1) MSEK, en ökning med 0,1 "
+    },
+    {
+      "ticker": "BACTI B",
+      "release_url": "https://mfn.se/a/bactiguard-holding/bactiguard-holding-abs-annual-and-sustainability-report-2025",
+      "pdf_url": "https://storage.mfn.se/c4e87f04-6963-4b3b-bd40-07571f2f6921/bactiguard-holding-abs-annual-and-sustainability-report-2025.pdf",
+      "sha256": "13249bebf1d104981362e8b82ea45ffc67cab988a9139df44385b79bf9da5a1c",
+      "page": 1,
+      "covered_text_excerpt": "TO CHAMPION A \nHEALTHIER WORLD BY \nPREVENTING INFECTIONS\nANNUAL AND SUSTAINABILITY REPORT\n2025"
+    },
+    {
+      "ticker": "MIPS",
+      "release_url": "https://mfn.se/a/mips/mips-annual-and-sustainability-report-2025",
+      "pdf_url": "https://storage.mfn.se/e527ab77-2fbd-4d36-93f1-eee59a26231d/mips-annual-and-sustainability-report-2025.pdf",
+      "sha256": "5d93d30dd47a3d8d7ce29fba997cf2d46da5dbe0b3eebfd1b58f0f6568d6c577",
+      "page": 1,
+      "covered_text_excerpt": "2025  |  Annual and Sustainability Report"
+    }
+  ]
+}
