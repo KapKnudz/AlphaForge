@@ -2,12 +2,17 @@
 
 from dataclasses import dataclass, replace
 from datetime import date
-from math import isfinite
+from math import isclose, isfinite
 from statistics import mean, pstdev
 from typing import Literal
 
 from alphaforge.core.statistics import cagr
 from alphaforge.core.types import Report
+from alphaforge.core.valuation.reinvestment import (
+    ECONOMIC_CONVENTION,
+    ReinvestmentCalibration,
+    qualify_calibration,
+)
 from alphaforge.core.valuation.required_return import (
     RequiredReturnDecision,
     RequiredReturnPolicy,
@@ -77,12 +82,13 @@ class DcfPolicyDecision:
     required_return: RequiredReturnDecision | None = None
     missing_information: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    calibration: ReinvestmentCalibration | None = None
 
 
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v13-dated-roic-availability-diagnostics"
+    VERSION = "reverse-dcf-v14-qualified-forward-reinvestment"
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
     TERMINAL_GROWTH = 0.02
@@ -112,6 +118,7 @@ class DcfAssumptionPolicy:
         currency: str | None = "SEK",
         market_cap: float | None = None,
         roic: float | None = None,
+        calibration_record: dict | None = None,
     ) -> DcfPolicyDecision:
         missing = self._missing_operating_inputs(current_report)
         if missing:
@@ -173,11 +180,22 @@ class DcfAssumptionPolicy:
             )
         ebit_margin, fcf_margin, normalization, economics_source, economics_warnings = economics
         warnings.extend(economics_warnings)
-        roic_fraction = self._roic_fraction(roic)
-        if roic_fraction is None:
+        calibration = None
+        if calibration_record is not None:
+            try:
+                calibration = qualify_calibration(
+                    calibration_record,
+                    as_of=as_of or date.today(),
+                    currency=currency,
+                    tax_rate=self.TAX_RATE,
+                )
+            except (ValueError, TypeError, KeyError, OverflowError) as exc:
+                warnings.append(f"reinvestment calibration rejected: {exc}")
+        roic_fraction = calibration.future_incremental_return if calibration else None
+        if calibration is None:
             warnings.append(
-                "growth-based FCFF is unavailable without a usable dated finite positive ROIC; "
-                "no ordinary valuation or implied-growth results were produced"
+                "growth-based FCFF requires qualified operating-capital and earnings evidence; "
+                "a dated provider ROIC alone does not establish its basis or future marginal return"
             )
             return DcfPolicyDecision(
                 available=False,
@@ -186,13 +204,18 @@ class DcfAssumptionPolicy:
                 solve_bounds=dict(self.SOLVE_BOUNDS),
                 assumption_sources={
                     "reinvestment_return": (
-                        "requires a usable dated finite positive Börsdata ROIC observation"
+                        "requires qualified own-company average operating ROIC with "
+                        "an explicitly assumed future incremental return"
                     )
                 },
                 normalized_fcf_margin=fcf_margin,
                 normalization=self._with_reinvestment_confidence(normalization, None),
                 required_return=required_return,
-                missing_information=("dated_positive_roic",),
+                missing_information=(
+                    "dated_positive_roic"
+                    if self._roic_fraction(roic) is None and calibration_record is None
+                    else "admissible_reinvestment_calibration",
+                ),
                 warnings=tuple(warnings),
             )
 
@@ -224,17 +247,30 @@ class DcfAssumptionPolicy:
                 warnings=tuple(warnings),
             )
 
-        reinvestment_share_of_nopat = self._clamp(
-            growth / roic_fraction if growth > 0 else 0.0,
-            0.0,
-            1.0,
-        )
-        raw_reinvestment = ebit_margin * (1.0 - self.TAX_RATE) * reinvestment_share_of_nopat
-        reinvestment = self._clamp(raw_reinvestment, *self.NET_REINVESTMENT_RANGE)
-        if reinvestment != raw_reinvestment:
-            warnings.append(
-                f"net reinvestment rate clamped from {raw_reinvestment:.4f} to {reinvestment:.4f}"
+        refusal = None
+        if ebit_margin <= 0 or current_margin is None or current_margin <= 0:
+            refusal = "nonpositive_nopat_unsupported_reinvestment"
+        elif not isclose(current_margin, ebit_margin, rel_tol=1e-12, abs_tol=1e-12):
+            refusal = "varying_margin_capital_evidence_unavailable"
+        elif growth < 0:
+            refusal = "unsupported_capital_release"
+        if refusal:
+            return DcfPolicyDecision(
+                available=False,
+                policy_version=self.VERSION,
+                assumptions=None,
+                solve_bounds=dict(self.SOLVE_BOUNDS),
+                assumption_sources={},
+                required_return=required_return,
+                calibration=calibration,
+                missing_information=(refusal,),
+                warnings=tuple(warnings),
             )
+        # Use the normalized base margin unchanged throughout this bounded slice.
+        warnings.append(
+            "future incremental return is an assumption calibrated from historical average ROIC; "
+            "terminal return converges to the discount hurdle proxy, not measured company WACC"
+        )
 
         assumptions = DcfAssumptions(
             projection_years=self.PROJECTION_YEARS,
@@ -243,14 +279,12 @@ class DcfAssumptionPolicy:
             tax_rate=self.TAX_RATE,
             discount_rate=required_return.required_return,
             terminal_growth=self.TERMINAL_GROWTH,
-            net_reinvestment_rate=reinvestment,
+            net_reinvestment_rate=0.0,
             reinvestment_return=roic_fraction,
             revenue_growth_fade_to=self.TERMINAL_GROWTH,
-            ebit_margin_start=(
-                current_report.ebit / current_report.revenue
-                if current_report.ebit is not None
-                else None
-            ),
+            ebit_margin_start=ebit_margin,
+            economic_convention=ECONOMIC_CONVENTION,
+            calibration_identity=calibration.identity,
         )
         return DcfPolicyDecision(
             available=True,
@@ -266,22 +300,18 @@ class DcfAssumptionPolicy:
                     "deterministic required-return hurdle selected by market-cap bucket"
                 ),
                 "terminal_growth": "fixed mature nominal growth policy",
-                "net_reinvestment_rate": (
-                    "normalized NOPAT margin multiplied by historical revenue growth / "
-                    "Börsdata ROIC, capped at 100% of NOPAT and the policy range; "
-                    "reported FCF is diagnostic only because it includes aggregate investing cash flow"
-                ),
+                "net_reinvestment_rate": "inactive legacy field; inspect investment amounts instead",
                 "reinvestment_return": (
-                    "positive Börsdata ROIC used to recompute mature-state "
-                    "reinvestment from terminal growth"
+                    "assumed future incremental return calibrated from own-company average "
+                    "operating ROIC; linear fade to discount hurdle proxy in the last funding interval"
                 ),
+                "economic_convention": "end-of-year spending funds next-year profit; no capital release or funding caps",
                 "revenue_growth_fade_to": (
                     "year-one revenue growth fades linearly to fixed mature "
                     "terminal growth by the final explicit year"
                 ),
                 "ebit_margin_start": (
-                    "current R12 or latest annual EBIT margin; fades linearly "
-                    "to the modeled final-year EBIT margin"
+                    "constant positive normalized EBIT margin; changes require capital evidence"
                 ),
             },
             normalized_fcf_margin=fcf_margin,
@@ -291,6 +321,7 @@ class DcfAssumptionPolicy:
             ),
             reinvestment_roic=roic_fraction,
             required_return=required_return,
+            calibration=calibration,
             missing_information=(),
             warnings=tuple(warnings),
         )

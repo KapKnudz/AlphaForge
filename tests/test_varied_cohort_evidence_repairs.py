@@ -236,7 +236,10 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
         ).fetchone()
     )
     old_text_hash = old_output_body[2]
-    assert old_replay["outputs"]["dcf"][str(company_id)]["dcf"]["available"] is True
+    # Textual fiscal interpretations never manufacture capital calibration.
+    retained_dcf = old_replay["outputs"]["dcf"][str(company_id)]["dcf"]
+    assert retained_dcf["available"] is False
+    assert retained_dcf["missing_information"] == ["admissible_reinvestment_calibration"]
     manifests = list(
         conn.execute("SELECT manifest_id, manifest_json FROM evidence_selection_manifests")
     )

@@ -27,6 +27,7 @@ from alphaforge.core.valuation.dividend_yield import (
     DIVIDEND_YIELD_POLICY_VERSION,
     trailing_dividend_window,
 )
+from alphaforge.core.valuation.reinvestment import CALIBRATION_VERSION, ECONOMIC_CONVENTION
 from alphaforge.core.valuation.required_return import RequiredReturnPolicy
 from alphaforge.db.migrations import migrate
 from alphaforge.evidence.manifest_store import load_evidence_view
@@ -38,12 +39,13 @@ TABLES = (
     "financial_period_rejections",
     "prices",
     "kpi_observations",
+    "reinvestment_calibrations",
     "market_input_rejections",
     "stock_splits",
     "dividends",
     "dividend_window_coverage",
 )
-ENCODING = "executed-numerical-v1"
+ENCODING = "executed-numerical-v2"
 
 
 class ReplayRefusal(ValueError):
@@ -105,6 +107,7 @@ def rules_bundle() -> dict:
             ROOT / "alphaforge/cli/main.py",
             Path(__file__),
             ROOT / "alphaforge/db/migrations.py",
+            ROOT / "alphaforge/db/reinvestment.py",
             ROOT / "alphaforge/config.py",
             ROOT / "alphaforge/evidence/report_rules.py",
             ROOT / "alphaforge/evidence/mfn_taxonomy.py",
@@ -147,6 +150,8 @@ def rules_bundle() -> dict:
         "selection": SELECTION_VERSION,
         "max_price_age_calendar_days": MAX_PRICE_AGE_DAYS,
         "dcf": DcfAssumptionPolicy.VERSION,
+        "reinvestment_calibration": CALIBRATION_VERSION,
+        "economic_convention": ECONOMIC_CONVENTION,
         "solve_bounds": DcfAssumptionPolicy.SOLVE_BOUNDS,
         "required_return": RequiredReturnPolicy.VERSION,
         "dividend_yield": DIVIDEND_YIELD_POLICY_VERSION,

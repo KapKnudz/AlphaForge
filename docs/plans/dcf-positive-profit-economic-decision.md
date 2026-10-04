@@ -1,6 +1,8 @@
 # Positive-profit DCF slice: pre-implementation decision gate
 
-Status: proposed convention, not implemented economics. No company valuation or newly admitted calibration is produced by this investigation.
+Status: convention approved via task instruction 001, with the annotations below; implemented behavior is owned by [valuation.md](../valuation.md). No company valuation or newly admitted issuer calibration is produced by this investigation.
+
+Approval annotations: implied-margin solving is unavailable for this constant-margin slice; terminal-growth solving is not identifiable and must not emit roots. Convergence to the hurdle is deliberately conservative and can understate high-return companies such as Mips and Evolution. Linked explicit-transition sensitivity before convergence is distinguished from mature terminal neutrality.
 
 ## Authority and current behavior
 
@@ -14,10 +16,10 @@ Current owners are `alphaforge/core/valuation/reverse_dcf.py` and `dcf_policy.py
 2. Initially admit only constant positive margin ROIC scenarios with qualified historical capital evidence and an explicitly assumed future incremental return. Historical average ROIC is not measured future marginal ROIC. Varying margins remain unsupported absent capital-driven-profit evidence; no revenue-growth shortcut or unpriced efficiency improvement. Sales-to-capital implementation can wait for qualified evidence rather than expanding this slice.
 3. Linear return fade across the explicit funding intervals, starting at the admitted future-return assumption and reaching the positive discount hurdle in the final interval. The hurdle is a **proxy**, not measured company WACC. Horizon remains five years as policy, not a company-specific moat estimate.
 4. Year n funds year n+1 at the terminal return. Terminal NOPAT derives from year n revenue times `(1+gT)` and stable margin/tax; terminal investment funds n+2, `I_(n+1)=NOPAT_(n+1)*gT/qT`. Export both NOPAT and FCFF, investment amounts/ratios and the return path. Still refuse `gT >= r`, nonfinite values and nonpositive returns/rates before division.
-5. Link the explicit revenue fade endpoint to candidate terminal growth during that solve, named a terminal-growth-plus-transition scenario. It is not the previous frozen-path one-axis solve.
+5. Link the explicit revenue fade endpoint to terminal growth in any explicitly supplied scenario. Under the approval annotation, terminal growth is **not solved**. This is not the previous frozen-path one-axis solve; linked transition scenarios may change pre-convergence value even though mature growth produces no excess-return value.
 6. No silent caps, cash refunds or capital releases. Ordinary public policy refuses unsupported external financing, zero/negative profits or sign crossings, and capital contraction. Invalid candidates must be reported as invalid, not converted into endpoint prices or opportunistically narrowed bounds.
 
-Alternative timing is same-year spending with an explicit starting-capital state and separately consistent terminal bridge. Alternative varying-margin treatment requires qualified sales-to-capital evidence. Neither alternative can be selected just from current EBIT/revenue history. Please confirm the proposed six points or specify replacements before calculation changes.
+Alternative timing is same-year spending with an explicit starting-capital state and separately consistent terminal bridge. Alternative varying-margin treatment requires qualified sales-to-capital evidence. Neither alternative can be selected just from current EBIT/revenue history. The six points were confirmed subject to the approval annotations above.
 
 ## Independent arithmetic locks
 

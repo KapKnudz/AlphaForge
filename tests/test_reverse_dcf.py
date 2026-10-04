@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from alphaforge.core.valuation.reinvestment import LEGACY_CONVENTION
 from alphaforge.core.valuation.reverse_dcf import (
     DcfAssumptions,
     ReverseDcfEngine,
@@ -24,6 +25,7 @@ def _inputs(
         current_revenue=100.0,
         net_debt=5.0,
         assumptions=DcfAssumptions(
+            economic_convention=LEGACY_CONVENTION,
             projection_years=5,
             revenue_growth=revenue_growth,
             ebit_margin=ebit_margin,

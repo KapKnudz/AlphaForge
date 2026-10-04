@@ -373,7 +373,7 @@ class TestModelNumberFidelity:
     def test_ranking_model_version_constant(self):
         """Ranking model version is constant across runs."""
         engine = RankingEngine()
-        assert engine.RANKING_MODEL_VERSION == "2026-10-03-dcf-availability-diagnostics-v18"
+        assert engine.RANKING_MODEL_VERSION == "2026-10-04-dcf-forward-reinvestment-v19"
 
     def test_score_determinism(self):
         """Same company produces same scores regardless of order."""

@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
 
+from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION, LEGACY_CONVENTION
+
 ImpliedAssumption = Literal["revenue_growth", "ebit_margin", "terminal_growth"]
 _SUPPORTED_ASSUMPTIONS = {"revenue_growth", "ebit_margin", "terminal_growth"}
 _BANK_BRANCH_IDS = {68, 69, 70}
@@ -16,6 +18,26 @@ _PROPERTY_BRANCH_ID = 75
 
 class UnsupportedValuationModel(ValueError):
     """Raised when FCFF is inappropriate for the supplied company sector."""
+
+
+class UnsupportedEconomicPolicy(UnsupportedValuationModel):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def forward_investment(nopat: float, next_nopat: float, incremental_return: float) -> float:
+    """Uncapped end-of-period capital needed for next-period profit."""
+    if not all(isfinite(x) for x in (nopat, next_nopat, incremental_return)):
+        raise ValueError("funding operands must be finite")
+    if nopat <= 0 or next_nopat <= 0 or incremental_return <= 0:
+        raise UnsupportedEconomicPolicy("nonpositive_nopat_or_return")
+    if next_nopat < nopat:
+        raise UnsupportedEconomicPolicy("unsupported_capital_release")
+    investment = (next_nopat - nopat) / incremental_return
+    if not isfinite(investment):
+        raise ValueError("funding calculation produced non-finite investment")
+    return investment
 
 
 @dataclass(frozen=True)
@@ -30,6 +52,8 @@ class DcfAssumptions:
     reinvestment_return: float | None = None
     revenue_growth_fade_to: float | None = None
     ebit_margin_start: float | None = None
+    economic_convention: str = ECONOMIC_CONVENTION
+    calibration_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +76,11 @@ class ProjectedCashFlow:
     nopat: float
     fcff: float
     discounted_fcff: float
+    next_nopat: float | None = None
+    profit_growth: float | None = None
+    incremental_return: float | None = None
+    reinvestment: float | None = None
+    reinvestment_share_of_nopat: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +91,8 @@ class DcfValue:
     terminal_value: float
     discounted_terminal_value: float
     projected_cash_flows: tuple[ProjectedCashFlow, ...]
+    terminal_cash_flow: ProjectedCashFlow | None = None
+    terminal_pole_distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +113,8 @@ class ReverseDcfEngine:
 
     def value(self, inputs: ReverseDcfInputs) -> DcfValue:
         self._validate(inputs)
+        if inputs.assumptions.economic_convention == ECONOMIC_CONVENTION:
+            return self._forward_value(inputs)
         assumptions = inputs.assumptions
         revenue = inputs.current_revenue
         projected: list[ProjectedCashFlow] = []
@@ -143,6 +176,86 @@ class ReverseDcfEngine:
             projected_cash_flows=tuple(projected),
         )
 
+    @staticmethod
+    def solve_availability(inputs: ReverseDcfInputs, assumption: ImpliedAssumption) -> str | None:
+        if inputs.assumptions.economic_convention != ECONOMIC_CONVENTION:
+            return None
+        if assumption == "ebit_margin":
+            return "unavailable_constant_margin_only"
+        if assumption == "terminal_growth":
+            return "not_identifiable"
+        return None
+
+    def _forward_value(self, inputs: ReverseDcfInputs) -> DcfValue:
+        a = inputs.assumptions
+        revenue = inputs.current_revenue
+        operating = []
+        # Look ahead through n+2: year n funds n+1, terminal year funds n+2.
+        for year in range(1, a.projection_years + 3):
+            growth = (
+                self._fade(a.revenue_growth, a.revenue_growth_fade_to, year, a.projection_years)
+                if year <= a.projection_years
+                else a.terminal_growth
+            )
+            if year == a.projection_years and a.projection_years > 1:
+                growth = a.terminal_growth
+            revenue *= 1 + growth
+            nopat = revenue * a.ebit_margin * (1 - a.tax_rate)
+            operating.append((revenue, growth, nopat))
+        rows = []
+        for index in range(a.projection_years + 1):
+            revenue, growth, nopat = operating[index]
+            next_nopat = operating[index + 1][2]
+            # Assign the mature endpoint exactly, avoiding subtract/add loss of
+            # significance when the calibrated starting return is very large.
+            q = (
+                self._fade(a.reinvestment_return, a.discount_rate, index + 1, a.projection_years)
+                if index < a.projection_years - 1
+                else a.discount_rate
+            )
+            investment = forward_investment(nopat, next_nopat, q)
+            if investment > nopat:
+                raise UnsupportedEconomicPolicy("unsupported_financing")
+            fcff = nopat - investment
+            rows.append(
+                ProjectedCashFlow(
+                    year=index + 1,
+                    revenue_growth=growth,
+                    revenue=revenue,
+                    ebit_margin=a.ebit_margin,
+                    ebit=revenue * a.ebit_margin,
+                    nopat=nopat,
+                    fcff=fcff,
+                    discounted_fcff=fcff / (1 + a.discount_rate) ** (index + 1),
+                    next_nopat=next_nopat,
+                    profit_growth=(next_nopat - nopat) / nopat,
+                    incremental_return=q,
+                    reinvestment=investment,
+                    reinvestment_share_of_nopat=investment / nopat,
+                )
+            )
+        terminal = rows[-1]
+        distance = a.discount_rate - a.terminal_growth
+        terminal_value = terminal.fcff / distance
+        discounted_terminal = terminal_value / (1 + a.discount_rate) ** a.projection_years
+        enterprise = sum(row.discounted_fcff for row in rows[:-1]) + discounted_terminal
+        equity = enterprise - inputs.net_debt
+        price = equity / inputs.shares_outstanding
+        values = (terminal_value, discounted_terminal, enterprise, equity, price)
+        values += tuple(value for row in rows for value in vars(row).values())
+        if not all(isfinite(value) for value in values):
+            raise ValueError("DCF produced a non-finite output")
+        return DcfValue(
+            enterprise,
+            equity,
+            price,
+            terminal_value,
+            discounted_terminal,
+            tuple(rows[:-1]),
+            terminal,
+            distance,
+        )
+
     def solve(
         self,
         inputs: ReverseDcfInputs,
@@ -156,6 +269,9 @@ class ReverseDcfEngine:
     ) -> ReverseDcfResult:
         if assumption not in _SUPPORTED_ASSUMPTIONS:
             raise ValueError(f"unsupported implied assumption: {assumption}")
+        refusal = self.solve_availability(inputs, assumption)
+        if refusal:
+            raise UnsupportedEconomicPolicy(refusal)
         if not lower_bound < upper_bound:
             raise ValueError("lower_bound must be less than upper_bound")
         if price_tolerance <= 0 or assumption_tolerance <= 0 or max_iterations <= 0:
@@ -278,6 +394,9 @@ class ReverseDcfEngine:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
         if assumption not in _SUPPORTED_ASSUMPTIONS:
             raise ValueError(f"unsupported implied assumption: {assumption}")
+        refusal = self.solve_availability(inputs, assumption)
+        if refusal:
+            raise UnsupportedEconomicPolicy(refusal)
         if not lower_bound < upper_bound:
             raise ValueError("lower_bound must be less than upper_bound")
         if sample_intervals <= 0 or price_tolerance <= 0:
@@ -474,7 +593,13 @@ class ReverseDcfEngine:
         assumption: ImpliedAssumption,
         value: float,
     ) -> DcfValue:
-        assumptions = replace(inputs.assumptions, **{assumption: value})
+        changes = {assumption: value}
+        if (
+            assumption == "terminal_growth"
+            and inputs.assumptions.economic_convention == ECONOMIC_CONVENTION
+        ):
+            changes["revenue_growth_fade_to"] = value
+        assumptions = replace(inputs.assumptions, **changes)
         return self.value(replace(inputs, assumptions=assumptions))
 
     @staticmethod
@@ -533,6 +658,21 @@ class ReverseDcfEngine:
             numeric_assumptions += (assumptions.ebit_margin_start,)
         if not all(isfinite(value) for value in numeric_inputs + numeric_assumptions):
             raise ValueError("all DCF inputs must be finite")
+        if assumptions.economic_convention not in {LEGACY_CONVENTION, ECONOMIC_CONVENTION}:
+            raise ValueError("unsupported economic convention")
+        if assumptions.economic_convention == ECONOMIC_CONVENTION:
+            if assumptions.discount_rate <= 0:
+                raise ValueError("discount hurdle proxy must be positive")
+            if assumptions.reinvestment_return is None:
+                raise ValueError("qualified positive reinvestment return required")
+            if assumptions.ebit_margin <= 0 or assumptions.tax_rate == 1:
+                raise UnsupportedEconomicPolicy("nonpositive_nopat_unsupported_reinvestment")
+            if assumptions.ebit_margin_start not in (None, assumptions.ebit_margin):
+                raise UnsupportedEconomicPolicy("varying_margin_capital_evidence_unavailable")
+            if assumptions.revenue_growth_fade_to != assumptions.terminal_growth:
+                raise ValueError("explicit growth endpoint must equal terminal growth")
+            if assumptions.revenue_growth < 0 or assumptions.terminal_growth < 0:
+                raise UnsupportedEconomicPolicy("unsupported_capital_release")
         if inputs.current_price <= 0:
             raise ValueError("current_price must be positive")
         if inputs.shares_outstanding <= 0:
