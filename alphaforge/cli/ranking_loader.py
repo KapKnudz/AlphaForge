@@ -26,12 +26,23 @@ from alphaforge.core.kpi_taxonomy import (
 from alphaforge.core.ranking.sector_rules import ranking_model_for_branch
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
+from alphaforge.core.valuation.dcf_contract import (
+    DcfResultMetadata,
+    DcfResultStatus,
+    EvidenceReference,
+    serialize_dcf_result,
+)
+from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
 from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
 )
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.reinvestment import qualify_calibration
+from alphaforge.core.valuation.reverse_dcf import (
+    UnsupportedEconomicPolicy,
+    UnsupportedValuationModel,
+)
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
 
@@ -103,6 +114,78 @@ def _normalization_payload(normalization) -> dict[str, Any] | None:
         "selected_window_years": normalization.selected_window_years,
         "reasons": list(normalization.reasons),
     }
+
+
+def _dcf_exception_status(exc: Exception) -> DcfResultStatus:
+    if isinstance(exc, UnsupportedEconomicPolicy):
+        return DcfResultStatus.DOMAIN_UNAVAILABLE
+    if isinstance(exc, UnsupportedValuationModel):
+        return DcfResultStatus.UNSUPPORTED
+    if isinstance(exc, RuntimeError):
+        return DcfResultStatus.NONCONVERGENCE
+    if isinstance(exc, (ValueError, OverflowError)):
+        return DcfResultStatus.INVALID_INPUT
+    return DcfResultStatus.UNAVAILABLE
+
+
+def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
+    if reason is None:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if "did not converge" in reason:
+        return DcfResultStatus.NONCONVERGENCE
+    if "not bracketed" in reason or "no solve bracket" in reason:
+        return DcfResultStatus.NO_CROSSING
+    if "finite" in reason or "must be positive" in reason or "must exceed" in reason:
+        return DcfResultStatus.INVALID_INPUT
+    if reason == "unavailable_constant_margin_only" or reason.startswith(
+        "market-cap hurdle policy is defined for SEK; received "
+    ):
+        return DcfResultStatus.UNSUPPORTED
+    if reason == "not_identifiable":
+        return DcfResultStatus.NOT_IDENTIFIABLE
+    if reason in {
+        "dated_positive_roic",
+        "admissible_reinvestment_calibration",
+        "normalized EBIT history unavailable",
+        "net_debt",
+        "current_revenue_or_shares",
+        "price_unavailable",
+    }:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if reason in {
+        "negative_nopat_unsupported_reinvestment",
+        "nonpositive_nopat_unsupported_reinvestment",
+        "varying_margin_capital_evidence_unavailable",
+        "unsupported_capital_release",
+        "unsupported_financing",
+        "invalid_candidate_economics",
+    }:
+        return DcfResultStatus.DOMAIN_UNAVAILABLE
+    if "banks require" in reason or "property companies require" in reason or "not FCFF" in reason:
+        return DcfResultStatus.UNSUPPORTED
+    if "not both verified" in reason:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if "denomination mismatch" in reason or "conflicts" in reason:
+        return DcfResultStatus.INVALID_INPUT
+    return DcfResultStatus.INSUFFICIENT_EVIDENCE
+
+
+def _dcf_solve_status(
+    solution_status: str | None, reason: str | None, error: str | None
+) -> DcfResultStatus:
+    if solution_status == "not_identifiable":
+        return DcfResultStatus.NOT_IDENTIFIABLE
+    if solution_status == "sampled_match_region":
+        return DcfResultStatus.SAMPLED_MATCH_REGION
+    if solution_status == "no_candidate_solution":
+        return DcfResultStatus.NO_CROSSING
+    if solution_status == "candidate_solutions":
+        return DcfResultStatus.CANDIDATE_SOLUTIONS
+    if solution_status == "unavailable":
+        return _dcf_failure_status(
+            error if reason == "invalid_candidate_economics" else reason or error
+        )
+    return DcfResultStatus.UNAVAILABLE
 
 
 def _equity_qualification(equity_value: float) -> dict[str, Any]:
@@ -727,6 +810,32 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _adjusted_shares_with_splits(
+    shares: float | None,
+    period_end: str,
+    comparison_date: str,
+    split_rows,
+):
+    if shares is None:
+        return None, ()
+    start = date.fromisoformat(period_end[:10])
+    end = date.fromisoformat(comparison_date[:10])
+    if start >= end:
+        return shares, ()
+    applicable = tuple(
+        row for row in split_rows if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
+    )
+    if not applicable:
+        return shares, applicable
+    adjusted = adjust_historical_shares(
+        shares,
+        period_end,
+        comparison_date,
+        [(row["split_type"], row["ratio"], row["split_date"]) for row in applicable],
+    )
+    return adjusted, applicable
+
+
 def _report(row, *, shares_override: float | None = None) -> Report:
     # Prefer dedicated net_debt column when present; keep total_debt for compat.
     try:
@@ -768,6 +877,8 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         conversion_mode=row["conversion_mode"],
         conversion_target_currency=_currency_code(row["conversion_target_currency"]),
         currency_ratio=_number(row["currency_ratio"]),
+        company_id=int(row["company_id"]),
+        period_type=str(row["period_type"]),
     )
 
 
@@ -780,6 +891,7 @@ def _price(row) -> StockPrice:
         close=float(row["close"]),
         volume=int(row["volume"]) if row["volume"] is not None else None,
         currency=_currency_code(row["currency"]),
+        company_id=int(row["company_id"]),
     )
 
 
@@ -1022,16 +1134,24 @@ def load_results_for_company(
             _missing.append(
                 "financial fiscal end/publication unavailable under verified-date selection"
             )
+        _unavailable_dcf = serialize_dcf_result(
+            {
+                "available": False,
+                "policy_version": DcfAssumptionPolicy.VERSION,
+                "missing_information": _missing,
+            },
+            DcfResultMetadata(
+                DcfResultStatus.INSUFFICIENT_EVIDENCE,
+                _missing[0] if _missing else None,
+                (),
+                DcfAssumptionPolicy.VERSION,
+            ),
+        )
         _unavailable = {
             "status": "unavailable",
             "missing_information": _missing,
             "selection": selection,
-            "dcf": {
-                "available": False,
-                "policy_version": None,
-                "missing_information": _missing,
-                "warnings": [],
-            },
+            "dcf": _unavailable_dcf,
         }
         return {
             "financial": None,
@@ -1064,23 +1184,22 @@ def load_results_for_company(
     # the raw row in the database and adjust only historical calculation input
     # into the latest report's share basis.
     split_rows = conn.execute(
-        "SELECT split_type, ratio, split_date FROM stock_splits WHERE company_id=? ORDER BY split_date",
+        "SELECT borsdata_id, split_type, ratio, split_date "
+        "FROM stock_splits WHERE company_id=? ORDER BY split_date",
         (company_id,),
     ).fetchall()
-    split_events = [(row[0], row[1], row[2]) for row in split_rows]
     comparison_date = str(period_rows[-1]["period_end"])[:10]
     reports = []
-    for index, row in enumerate(period_rows):
-        raw_shares = _number(row["shares_outstanding"])
-        adjusted = raw_shares
-        if index < len(period_rows) - 1 and raw_shares is not None and split_events:
-            adjusted = adjust_historical_shares(
-                raw_shares,
-                str(row["period_end"])[:10],
-                comparison_date,
-                split_events,
-            )
+    applied_splits_by_report = {}
+    for row in period_rows:
+        adjusted, applied_splits = _adjusted_shares_with_splits(
+            _number(row["shares_outstanding"]),
+            str(row["period_end"]),
+            comparison_date,
+            split_rows,
+        )
         reports.append(_report(row, shares_override=adjusted))
+        applied_splits_by_report[(row["period_type"], row["period_end"])] = applied_splits
     current_report = reports[-1]
     historical_reports = reports[:-1]
     dcf_r12_reports = [
@@ -1099,14 +1218,31 @@ def load_results_for_company(
         dcf_current_report = dcf_annual_reports[-1]
     else:
         dcf_current_report = None
+    dcf_split_rows = (
+        applied_splits_by_report.get(
+            (dcf_current_report.period_type, dcf_current_report.period_end.isoformat()),
+            (),
+        )
+        if dcf_current_report is not None and dcf_current_report.period_end is not None
+        else ()
+    )
+    dcf_split_refs = tuple(
+        EvidenceReference(
+            source_id=(f"stock-split:borsdata-{row['borsdata_id']}:date-{row['split_date']}"),
+            observed_on=str(row["split_date"]),
+            anchor="shares outstanding adjustment event",
+        )
+        for row in dcf_split_rows
+    )
     financial_mapper = FinancialMapper()
     annual_reports = []
     for row in annual_period_rows:
-        shares = _number(row["shares_outstanding"])
-        if shares is not None and split_events:
-            shares = adjust_historical_shares(
-                shares, str(row["period_end"])[:10], comparison_date, split_events
-            )
+        shares, _ = _adjusted_shares_with_splits(
+            _number(row["shares_outstanding"]),
+            str(row["period_end"]),
+            comparison_date,
+            split_rows,
+        )
         annual_reports.append(_report(row, shares_override=shares))
     latest_annual = annual_reports[-1] if annual_reports else None
     historical_annuals = annual_reports[:-1]
@@ -1260,6 +1396,7 @@ def load_results_for_company(
     # ------------------------------------------------------------------
     dcf_policy_decision = None
     dcf_value = None
+    dcf_failure_status = None
     reverse_dcf_results: dict[str, Any] = {}
     # Build annual report history for DCF policy (needs year property)
     try:
@@ -1268,7 +1405,7 @@ def load_results_for_company(
         # Provider ROIC remains a percentage-point diagnostic; it no longer
         # supplies a naked future return. Qualified capital records own that input.
         roic_for_dcf = kpis.get(37)
-        from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy, DcfPolicyDecision
+        from alphaforge.core.valuation.dcf_policy import DcfPolicyDecision
         from alphaforge.core.valuation.reverse_dcf import ReverseDcfEngine, ReverseDcfInputs
 
         policy = DcfAssumptionPolicy()
@@ -1319,6 +1456,8 @@ def load_results_for_company(
                 as_of=cutoff,
                 currency=(dcf_current_report.currency if dcf_current_report is not None else None),
                 market_cap=market_cap_for_hurdle,
+                market_price=latest_price,
+                market_split_references=dcf_split_refs,
                 roic=roic_for_dcf,
                 calibration_record=calibration_record,
             )
@@ -1391,13 +1530,12 @@ def load_results_for_company(
                             "record": json.loads(dcf_policy_decision.calibration.record_json),
                         },
                         "required_return": {
-                            "size_bucket": dcf_policy_decision.required_return.size_bucket
-                            if dcf_policy_decision.required_return
-                            else None,
+                            "policy_version": dcf_policy_decision.required_return.policy_version,
+                            "market_cap": dcf_policy_decision.required_return.market_cap,
+                            "size_bucket": dcf_policy_decision.required_return.size_bucket,
+                            "required_return": dcf_policy_decision.required_return.required_return,
+                            "source_date": dcf_policy_decision.required_return.source_date,
                             "basis": "discount_rate_proxy_for_cost_of_capital",
-                            "required_return": dcf_policy_decision.required_return.required_return
-                            if dcf_policy_decision.required_return
-                            else None,
                         }
                         if dcf_policy_decision.required_return
                         else None,
@@ -1637,6 +1775,7 @@ def load_results_for_company(
                     reverse_dcf["implied"] = reverse_dcf_results
                     reverse_dcf["status"] = "available"
                 except Exception as exc:
+                    dcf_failure_status = _dcf_exception_status(exc)
                     reverse_dcf["dcf_error"] = str(exc)
                     reverse_dcf["dcf"] = {
                         "available": False,
@@ -1677,6 +1816,7 @@ def load_results_for_company(
                 }
                 reverse_dcf["status"] = "unavailable"
     except Exception as exc:
+        dcf_failure_status = _dcf_exception_status(exc)
         # Never break ranking on DCF failure — keep heuristic score available
         try:
             reverse_dcf["dcf_error"] = f"dcf wiring failed: {exc}"
@@ -1710,6 +1850,59 @@ def load_results_for_company(
             "missing_information": price_missing,
             "warnings": [],
         }
+    dcf_result = reverse_dcf.get("dcf")
+    if isinstance(dcf_result, dict):
+        missing = dcf_result.get("missing_information") or ()
+        failure_reason = next(iter(missing), None)
+        if dcf_result.get("available"):
+            result_status = DcfResultStatus.AVAILABLE
+            result_reason = None
+        else:
+            result_reason = (
+                reverse_dcf.get("dcf_error") or failure_reason
+                if dcf_failure_status is not None
+                else failure_reason or reverse_dcf.get("dcf_error")
+            )
+            result_status = dcf_failure_status or _dcf_failure_status(result_reason)
+        decision_warnings = tuple(
+            dcf_result.get("warnings")
+            or (dcf_policy_decision.warnings if dcf_policy_decision is not None else ())
+        )
+        result_version = dcf_result.get("policy_version") or (
+            dcf_policy_decision.policy_version if dcf_policy_decision is not None else None
+        )
+        reverse_dcf["dcf"] = serialize_dcf_result(
+            dcf_result,
+            DcfResultMetadata(result_status, result_reason, decision_warnings, result_version),
+            dcf_policy_decision.assumption_provenance
+            if dcf_result.get("available") and dcf_policy_decision is not None
+            else {},
+        )
+    for solve_name, solve_result in reverse_dcf_results.items():
+        result_status = _dcf_solve_status(
+            solve_result.get("solution_status"),
+            solve_result.get("reason"),
+            solve_result.get("error"),
+        )
+        solve_result_version = (
+            dcf_policy_decision.policy_version if dcf_policy_decision is not None else None
+        )
+        solve_reason = solve_result.get("reason") or solve_result.get("error")
+        if result_status in {
+            DcfResultStatus.INVALID_INPUT,
+            DcfResultStatus.NO_CROSSING,
+            DcfResultStatus.NONCONVERGENCE,
+        }:
+            solve_reason = solve_result.get("error") or solve_reason
+        reverse_dcf_results[solve_name] = serialize_dcf_result(
+            solve_result,
+            DcfResultMetadata(
+                result_status,
+                solve_reason,
+                tuple(dcf_policy_decision.warnings) if dcf_policy_decision is not None else (),
+                solve_result_version,
+            ),
+        )
     # Provide DCF artefacts at top level so callers can export them without
     # reaching into candidate.full_results, and keep provenance separate from
     # the heuristic valuation_score.

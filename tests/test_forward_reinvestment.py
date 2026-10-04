@@ -27,6 +27,7 @@ from alphaforge.core.valuation.reverse_dcf import (
 )
 from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
+from alphaforge.db.repositories import upsert_prices, upsert_stock_splits
 
 
 def hand_inputs(q=0.1, terminal=0.04, years=2):
@@ -317,7 +318,18 @@ def test_average_history_and_future_assumption_are_distinct():
 def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2024, 100), annual(2025, 110), annual(2026, 121)])
     packet(conn, cid)
-    identity = synthetic_calibration_fixture(conn, cid)
+    record = synthetic_record()
+    record["company_id"] = cid
+    record["sources"]["unused"] = {
+        "source_id": "synthetic:unqualified-extra",
+        "url": "https://example.invalid/unqualified-extra",
+    }
+    identity = append_reinvestment_calibration(
+        conn,
+        cid,
+        record,
+        as_of=date.fromisoformat(CUTOFF),
+    )
     live = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
     assert live["dcf"]["available"]
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
@@ -325,7 +337,14 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     value = exported[str(cid)]["dcf"]
     assert value["calibration"]["identity"] == identity
     assert value["assumptions"]["calibration_identity"] == identity
-    assert value["required_return"]["basis"] == "discount_rate_proxy_for_cost_of_capital"
+    assert value["required_return"] == {
+        "policy_version": "required-return-v2-market-cap-buckets",
+        "market_cap": 100_000_000,
+        "size_bucket": "below_sek_1bn",
+        "required_return": 0.15,
+        "source_date": CUTOFF,
+        "basis": "discount_rate_proxy_for_cost_of_capital",
+    }
     assert (
         value["projected_cash_flows"][-1]["incremental_return"]
         == value["assumptions"]["discount_rate"]
@@ -333,19 +352,67 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert (
         value["terminal_cash_flow"]["incremental_return"] == value["assumptions"]["discount_rate"]
     )
+    assert value["status"] == "available"
+    assert value["reason"] is None
+    assert value["version"] == "reverse-dcf-v15-typed-result-contract"
+    provenance = value["assumption_provenance"]
+    assert set(provenance) == set(value["assumptions"])
+    assert provenance["revenue_growth"]["origin"] == "company_history"
+    assert provenance["ebit_margin"]["origin"] == "report_evidence"
+    assert provenance["tax_rate"]["origin"] == "fixed_default"
+    discount = provenance["discount_rate"]
+    assert discount["origin"] == "market_evidence"
+    discount_refs = {ref["anchor"]: ref for ref in discount["evidence_references"]}
+    assert discount_refs["close market-cap operand"] == {
+        "source_id": f"stock-price:company-{cid}:date-{CUTOFF}",
+        "source_url": None,
+        "published_on": None,
+        "observed_on": CUTOFF,
+        "anchor": "close market-cap operand",
+        "sha256": None,
+    }
+    assert discount_refs["shares outstanding market-cap operand"]["source_id"] == (
+        f"financial-period:company-{cid}:type-year:end-2026-03-31"
+    )
+    calibration_refs = provenance["reinvestment_return"]["evidence_references"]
+    record_sources = synthetic_record()["sources"]
+    assert {ref["source_id"] for ref in calibration_refs} == {
+        source["source_id"] for source in record_sources.values()
+    }
+    assert provenance["calibration_identity"]["evidence_references"] == calibration_refs
+    assert "synthetic:unqualified-extra" not in {ref["source_id"] for ref in calibration_refs}
+    assert provenance["reinvestment_return"]["limitations"]
+    json.dumps(value, allow_nan=False)
     for axis, status in (("ebit_margin", "unavailable"), ("terminal_growth", "not_identifiable")):
         result = exported[str(cid)]["implied"][axis]
         assert result["solution_status"] == status
+        assert result["status"] == ("unsupported" if axis == "ebit_margin" else "not_identifiable")
         assert result["candidate_roots"] == []
         assert not {"implied_assumption", "lower_endpoint_price", "value_per_share"} & result.keys()
     executed = conn.execute("SELECT * FROM executed_numerical_runs").fetchone()
     snapshot = conn.execute("SELECT body,rules FROM numerical_input_bodies").fetchone()
     body, rules = json.loads(snapshot["body"]), json.loads(snapshot["rules"])
+    retained_record = json.loads(body["tables"]["reinvestment_calibrations"][0]["record_json"])
+    retained_prices = {
+        (row["company_id"], row["price_date"]): row for row in body["tables"]["prices"]
+    }
+    retained_reports = {
+        (row["company_id"], row["period_type"], row["period_end"]): row
+        for row in body["tables"]["financial_periods"]
+    }
+    assert retained_prices[(cid, CUTOFF)]["close"] == 10
+    assert retained_reports[(cid, "year", "2026-03-31")]["shares_outstanding"] == 10
     assert body["tables"]["reinvestment_calibrations"][0]["identity"] == identity
+    assert {ref["source_id"] for ref in calibration_refs} == {
+        retained_record["sources"][operand]["source_id"] for operand in record_sources
+    }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
+    assert rules["dcf_result_contract"] == "dcf-result-contract-v1"
     original = json.loads(executed["outputs"])
-    assert replay_run(conn, executed["run_id"])["outputs"] == original
+    replayed = replay_run(conn, executed["run_id"])
+    assert replayed["outputs"] == original
+    assert replayed["outputs"]["dcf"][str(cid)]["dcf"] == value
     # A conflicting new review changes live availability, never the frozen run.
     record = synthetic_record()
     record["approval_id"] = "synthetic-alternative-review"
@@ -355,12 +422,129 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     conn.commit()
     assert replay_run(conn, executed["run_id"])["outputs"] == original
     assert canonical(json.loads(executed["outputs"])) == canonical(original)
+    old_rules = dict(rules)
+    old_rules.pop("dcf_result_contract")
+    monkeypatch.setattr("alphaforge.db.numerical_runs.rules_bundle", lambda: old_rules)
+    with pytest.raises(ReplayRefusal, match="unsupported_rules_or_code"):
+        replay_run(conn, executed["run_id"])
     monkeypatch.setattr(
         "alphaforge.db.numerical_runs.rules_bundle",
         lambda: {**rules_bundle(), "economic_convention": "incompatible"},
     )
     with pytest.raises(ReplayRefusal, match="unsupported_rules_or_code"):
         replay_run(conn, executed["run_id"])
+
+
+def test_missing_shares_do_not_parse_or_cite_unconsumed_split_dates():
+    conn, cid = setup(periods=[annual(2026, number_Of_Shares=None)])
+    upsert_stock_splits(
+        conn,
+        [{"insId": 991, "splitDate": "unknown", "splitType": "S", "ratio": "5:1"}],
+    )
+
+    result = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
+
+    assert result["current_shares"] is None
+    assert result["dcf"]["status"] == "insufficient_evidence"
+    assert result["dcf"]["missing_information"] == [
+        "positive market capitalization unavailable for required-return hurdle"
+    ]
+    assert result["dcf"]["assumption_provenance"] == {}
+    assert conn.execute("SELECT split_date FROM stock_splits").fetchone()[0] == "unknown"
+
+
+def test_split_adjusted_discount_provenance_is_retained_and_replayed(monkeypatch, tmp_path):
+    periods = [
+        annual(2024, 100, number_Of_Shares=90),
+        annual(2025, 110, number_Of_Shares=90),
+        annual(2026, 121, number_Of_Shares=90),
+        annual(
+            2026,
+            30,
+            period_type="quarter",
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+            period=1,
+            number_Of_Shares=450,
+        ),
+    ]
+    conn, cid = setup(periods=periods)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3}], currency="SEK")
+    upsert_stock_splits(
+        conn,
+        [{"insId": 991, "splitDate": "2026-04-15", "splitType": "S", "ratio": "5:1"}],
+    )
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    value = result["dcf"]
+    assert result["current_shares"] == 450
+    assert value["required_return"]["market_cap"] == 1_350_000_000
+    assert value["required_return"]["size_bucket"] == "sek_1bn_to_below_5bn"
+    assert value["assumptions"]["discount_rate"] == 0.135
+    discount_refs = value["assumption_provenance"]["discount_rate"]["evidence_references"]
+    assert {ref["source_id"] for ref in discount_refs} == {
+        f"financial-period:company-{cid}:type-year:end-2026-03-31",
+        f"stock-price:company-{cid}:date-{CUTOFF}",
+        "stock-split:borsdata-991:date-2026-04-15",
+    }
+
+    executed = conn.execute("SELECT * FROM executed_numerical_runs").fetchone()
+    body = json.loads(conn.execute("SELECT body FROM numerical_input_bodies").fetchone()[0])
+    assert body["tables"]["stock_splits"] == [
+        {
+            "id": 1,
+            "company_id": cid,
+            "borsdata_id": 991,
+            "split_type": "S",
+            "ratio": "5:1",
+            "split_date": "2026-04-15",
+        }
+    ]
+    replayed = replay_run(conn, executed["run_id"])["outputs"]
+    assert replayed["dcf"][str(cid)]["dcf"] == value
+
+
+def test_report_provenance_uses_exact_consumed_windows():
+    periods = [annual(year, 100 * 1.05 ** (year - 2017)) for year in range(2017, 2027)]
+    conn, cid = setup(periods=periods)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    provenance = value["assumption_provenance"]
+
+    def expected(years):
+        return {f"financial-period:company-{cid}:type-year:end-{year}-03-31" for year in years}
+
+    growth_refs = provenance["revenue_growth"]["evidence_references"]
+    margin_refs = provenance["ebit_margin"]["evidence_references"]
+    assert {ref["source_id"] for ref in growth_refs} == expected(range(2023, 2027))
+    assert {ref["source_id"] for ref in margin_refs} == expected(range(2022, 2027))
+    assert provenance["ebit_margin_start"]["evidence_references"] == margin_refs
+
+
+def test_report_provenance_identity_distinguishes_period_types():
+    periods = [
+        annual(2025, 110, operating_Income=None),
+        annual(2026, 121, operating_Income=None),
+        annual(2026, 121, period_type="r12", operating_Income=24.2),
+    ]
+    conn, cid = setup(periods=periods)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    provenance = value["assumption_provenance"]
+    growth_ids = {ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]}
+    margin_ids = {ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]}
+    annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
+    r12_id = f"financial-period:company-{cid}:type-r12:end-2026-03-31"
+    assert annual_id in growth_ids
+    assert margin_ids == {r12_id}
+    assert annual_id != r12_id
 
 
 def test_v18_upgrade_adds_empty_calibration_lane_without_backfill():
@@ -420,6 +604,11 @@ def test_public_missing_invalid_or_unsupported_inputs_never_leak_values(case):
         not {"value_per_share", "enterprise_value", "projected_cash_flows", "terminal_cash_flow"}
         & dcf["dcf"].keys()
     )
+    if case in {"missing", "basis", "future", "hash", "company"}:
+        assert dcf["dcf"]["status"] == "insufficient_evidence"
+    else:
+        assert dcf["dcf"]["status"] == "domain_unavailable"
+    assert dcf["dcf"]["version"] == "reverse-dcf-v15-typed-result-contract"
     if case in {"basis", "future", "hash", "company"}:
         candidates = result["selection"]["reinvestment_calibration"]["candidates"]
         assert candidates[0]["rejection_reason"]

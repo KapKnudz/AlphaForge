@@ -1295,6 +1295,21 @@ def test_valid_annual_split_history_has_no_false_dilution():
     )
 
 
+def test_ranking_ignores_malformed_split_date_after_latest_report(monkeypatch, tmp_path):
+    rows = [
+        annual(2025, 100, number_Of_Shares=None),
+        annual(2026, 110, number_Of_Shares=10),
+    ]
+    conn, cid = setup(periods=rows)
+    upsert_stock_splits(
+        conn, [{"insId": 991, "splitType": "S", "ratio": "5:1", "splitDate": "unknown"}]
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+
+    assert exported[str(cid)]["current_shares"] == 10
+
+
 @pytest.mark.parametrize("value", [None, 0])
 def test_missing_versus_zero_current_inputs_survive_selection(value):
     conn, cid = setup(periods=[annual(2026, free_Cash_Flow=value, net_Debt=value)])
@@ -1919,7 +1934,7 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     loaded = load_results_for_company(conn, cid, CUTOFF)
     synthetic_calibration_fixture(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    expected = "reverse-dcf-v14-qualified-forward-reinvestment"
+    expected = "reverse-dcf-v15-typed-result-contract"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected

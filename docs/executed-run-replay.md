@@ -26,9 +26,10 @@ Reports/rejections examined by chronology/refusal are part of the selected input
 domain. Encoding `executed-numerical-v2` also retains every analyst calibration
 candidate from [migration 019](../db/migrations/019_reinvestment_calibrations.sql),
 including rejected/conflicting choices, exact operand/source/accounting records
-and content identities. Rules bind the calibration and forward-funding/convergence
-policies; immutable old v1 runs are not reinterpreted under v2 and refuse honestly
-when their implementation/rules are incompatible. Unselected intervening daily prices and superseded admissible KPI rows
+and content identities. Rules bind the calibration,
+forward-funding/convergence policies and typed DCF result-contract version. A replay
+whose implementation or rules are incompatible refuses honestly rather than
+reinterpreting old outputs. Unselected intervening daily prices and superseded admissible KPI rows
 are excluded. Raw values survive beside canonical stored transformations; NULL
 and zero remain distinct. No liquidity, realized returns or thesis inputs are
 added. Provider scale, split adjustment, selection/refusals and formulas retain

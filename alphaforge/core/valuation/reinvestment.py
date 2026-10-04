@@ -11,6 +11,12 @@ from hashlib import sha256
 from math import isclose, isfinite
 
 CALIBRATION_VERSION = "own-company-average-roic-v1"
+CALIBRATION_EVIDENCE_OPERANDS = (
+    "capital_begin",
+    "capital_end",
+    "normalized_ebit",
+    "tax_rate",
+)
 ECONOMIC_CONVENTION = "forward-funded-constant-margin-hurdle-convergence-v1"
 LEGACY_CONVENTION = "legacy-capped-revenue-growth-v13"
 
@@ -87,10 +93,9 @@ def qualify_calibration(
         if not isinstance(record.get(key), str) or not record[key].strip():
             raise ValueError(f"calibration requires {key}")
     sources = record.get("sources")
-    required = {"normalized_ebit", "tax_rate", "capital_begin", "capital_end"}
-    if not isinstance(sources, dict) or not required <= sources.keys():
+    if not isinstance(sources, dict) or not set(CALIBRATION_EVIDENCE_OPERANDS) <= sources.keys():
         raise ValueError("calibration requires source provenance for every operand")
-    for operand in required:
+    for operand in CALIBRATION_EVIDENCE_OPERANDS:
         source = sources[operand]
         if not isinstance(source, dict):
             raise ValueError("invalid calibration source")
