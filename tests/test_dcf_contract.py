@@ -74,6 +74,14 @@ def test_result_status_mapping_distinguishes_input_and_solver_failures():
         is DcfResultStatus.INVALID_INPUT
     )
     assert (
+        _dcf_failure_status("market-cap hurdle policy is defined for SEK; received EUR")
+        is DcfResultStatus.UNSUPPORTED
+    )
+    assert (
+        _dcf_failure_status("positive market capitalization unavailable for required-return hurdle")
+        is DcfResultStatus.INSUFFICIENT_EVIDENCE
+    )
+    assert (
         _dcf_solve_status(
             "unavailable", "invalid_candidate_economics", "unsupported_capital_release"
         )

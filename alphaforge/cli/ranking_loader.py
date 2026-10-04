@@ -136,7 +136,9 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         return DcfResultStatus.NO_CROSSING
     if "finite" in reason or "must be positive" in reason or "must exceed" in reason:
         return DcfResultStatus.INVALID_INPUT
-    if reason == "unavailable_constant_margin_only":
+    if reason == "unavailable_constant_margin_only" or reason.startswith(
+        "market-cap hurdle policy is defined for SEK; received "
+    ):
         return DcfResultStatus.UNSUPPORTED
     if reason == "not_identifiable":
         return DcfResultStatus.NOT_IDENTIFIABLE

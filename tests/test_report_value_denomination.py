@@ -296,6 +296,8 @@ def test_verified_eur_values_allow_raw_multiples_but_not_sek_hurdle(monkeypatch,
     assert loaded["valuation"].raw_ev_ebit == pytest.approx(5.25)
     assert loaded["reverse_dcf"]["status"] == "unavailable"
     assert loaded["reverse_dcf"]["dcf"]["available"] is False
+    assert loaded["reverse_dcf"]["dcf"]["status"] == "unsupported"
+    assert "received EUR" in loaded["reverse_dcf"]["dcf"]["reason"]
     assert "received EUR" in " ".join(loaded["reverse_dcf"]["dcf"]["missing_information"])
     assert (
         conn.execute(
@@ -307,6 +309,8 @@ def test_verified_eur_values_allow_raw_multiples_but_not_sek_hurdle(monkeypatch,
     assert score["input_selection"]["report_denominations"][0]["values_currency"] == "EUR"
     assert dcf["market_cap"] == 100
     assert dcf["dcf"]["available"] is False
+    assert dcf["dcf"]["status"] == "unsupported"
+    assert "received EUR" in dcf["dcf"]["reason"]
 
 
 def test_verified_acquisition_target_is_not_relabelled_by_later_company_update():
