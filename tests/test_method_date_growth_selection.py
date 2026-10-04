@@ -1919,7 +1919,7 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     loaded = load_results_for_company(conn, cid, CUTOFF)
     synthetic_calibration_fixture(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    expected = "reverse-dcf-v14-qualified-forward-reinvestment"
+    expected = "reverse-dcf-v15-typed-result-contract"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected

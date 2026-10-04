@@ -333,19 +333,42 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert (
         value["terminal_cash_flow"]["incremental_return"] == value["assumptions"]["discount_rate"]
     )
+    assert value["status"] == "available"
+    assert value["reason"] is None
+    assert value["version"] == "reverse-dcf-v15-typed-result-contract"
+    provenance = value["assumption_provenance"]
+    assert set(provenance) == set(value["assumptions"])
+    assert provenance["revenue_growth"]["origin"] == "company_history"
+    assert provenance["ebit_margin"]["origin"] == "report_evidence"
+    assert provenance["tax_rate"]["origin"] == "fixed_default"
+    calibration_refs = provenance["reinvestment_return"]["evidence_references"]
+    record_sources = synthetic_record()["sources"]
+    assert {ref["source_id"] for ref in calibration_refs} == {
+        source["source_id"] for source in record_sources.values()
+    }
+    assert provenance["reinvestment_return"]["limitations"]
+    json.dumps(value, allow_nan=False)
     for axis, status in (("ebit_margin", "unavailable"), ("terminal_growth", "not_identifiable")):
         result = exported[str(cid)]["implied"][axis]
         assert result["solution_status"] == status
+        assert result["status"] == ("unsupported" if axis == "ebit_margin" else "not_identifiable")
         assert result["candidate_roots"] == []
         assert not {"implied_assumption", "lower_endpoint_price", "value_per_share"} & result.keys()
     executed = conn.execute("SELECT * FROM executed_numerical_runs").fetchone()
     snapshot = conn.execute("SELECT body,rules FROM numerical_input_bodies").fetchone()
     body, rules = json.loads(snapshot["body"]), json.loads(snapshot["rules"])
+    retained_record = json.loads(body["tables"]["reinvestment_calibrations"][0]["record_json"])
     assert body["tables"]["reinvestment_calibrations"][0]["identity"] == identity
+    assert {ref["source_id"] for ref in calibration_refs} == {
+        source["source_id"] for source in retained_record["sources"].values()
+    }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
+    assert rules["dcf_result_contract"] == "dcf-result-contract-v1"
     original = json.loads(executed["outputs"])
-    assert replay_run(conn, executed["run_id"])["outputs"] == original
+    replayed = replay_run(conn, executed["run_id"])
+    assert replayed["outputs"] == original
+    assert replayed["outputs"]["dcf"][str(cid)]["dcf"] == value
     # A conflicting new review changes live availability, never the frozen run.
     record = synthetic_record()
     record["approval_id"] = "synthetic-alternative-review"
@@ -355,6 +378,11 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     conn.commit()
     assert replay_run(conn, executed["run_id"])["outputs"] == original
     assert canonical(json.loads(executed["outputs"])) == canonical(original)
+    old_rules = dict(rules)
+    old_rules.pop("dcf_result_contract")
+    monkeypatch.setattr("alphaforge.db.numerical_runs.rules_bundle", lambda: old_rules)
+    with pytest.raises(ReplayRefusal, match="unsupported_rules_or_code"):
+        replay_run(conn, executed["run_id"])
     monkeypatch.setattr(
         "alphaforge.db.numerical_runs.rules_bundle",
         lambda: {**rules_bundle(), "economic_convention": "incompatible"},
@@ -420,6 +448,11 @@ def test_public_missing_invalid_or_unsupported_inputs_never_leak_values(case):
         not {"value_per_share", "enterprise_value", "projected_cash_flows", "terminal_cash_flow"}
         & dcf["dcf"].keys()
     )
+    if case in {"missing", "basis", "future", "hash", "company"}:
+        assert dcf["dcf"]["status"] == "insufficient_evidence"
+    else:
+        assert dcf["dcf"]["status"] == "domain_unavailable"
+    assert dcf["dcf"]["version"] == "reverse-dcf-v15-typed-result-contract"
     if case in {"basis", "future", "hash", "company"}:
         candidates = result["selection"]["reinvestment_calibration"]["candidates"]
         assert candidates[0]["rejection_reason"]

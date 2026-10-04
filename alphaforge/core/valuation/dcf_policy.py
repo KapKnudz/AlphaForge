@@ -1,6 +1,6 @@
 """Explicit, deterministic assumptions for the first reverse-DCF policy."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from math import isclose, isfinite
 from statistics import mean, pstdev
@@ -8,6 +8,11 @@ from typing import Literal
 
 from alphaforge.core.statistics import cagr
 from alphaforge.core.types import Report
+from alphaforge.core.valuation.dcf_contract import (
+    AssumptionOrigin,
+    AssumptionProvenance,
+    EvidenceReference,
+)
 from alphaforge.core.valuation.reinvestment import (
     ECONOMIC_CONVENTION,
     ReinvestmentCalibration,
@@ -76,6 +81,7 @@ class DcfPolicyDecision:
     assumptions: DcfAssumptions | None
     solve_bounds: dict[str, tuple[float, float]]
     assumption_sources: dict[str, str]
+    assumption_provenance: dict[str, AssumptionProvenance] = field(default_factory=dict)
     normalized_fcf_margin: float | None = None
     normalization: NormalizationDiagnostics | None = None
     reinvestment_roic: float | None = None
@@ -88,7 +94,7 @@ class DcfPolicyDecision:
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v14-qualified-forward-reinvestment"
+    VERSION = "reverse-dcf-v15-typed-result-contract"
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
     TERMINAL_GROWTH = 0.02
@@ -286,34 +292,119 @@ class DcfAssumptionPolicy:
             economic_convention=ECONOMIC_CONVENTION,
             calibration_identity=calibration.identity,
         )
+        assumption_sources = {
+            "projection_years": "fixed policy horizon",
+            "revenue_growth": growth_source,
+            "ebit_margin": economics_source,
+            "tax_rate": "fixed normalized Nordic modeling rate",
+            "discount_rate": ("deterministic required-return hurdle selected by market-cap bucket"),
+            "terminal_growth": "fixed mature nominal growth policy",
+            "net_reinvestment_rate": "inactive legacy field; inspect investment amounts instead",
+            "reinvestment_return": (
+                "assumed future incremental return calibrated from own-company average "
+                "operating ROIC; linear fade to discount hurdle proxy in the last funding interval"
+            ),
+            "economic_convention": "end-of-year spending funds next-year profit; no capital release or funding caps",
+            "revenue_growth_fade_to": (
+                "year-one revenue growth fades linearly to fixed mature "
+                "terminal growth by the final explicit year"
+            ),
+            "ebit_margin_start": (
+                "constant positive normalized EBIT margin; changes require capital evidence"
+            ),
+        }
+        annual_refs = self._report_evidence_references(
+            [*historical_annual_reports, latest_annual_report],
+            "annual revenue operands",
+        )
+        operating_reports = (
+            [current_report]
+            if economics_source == "current R12 EBIT margin fallback"
+            else [*historical_annual_reports, latest_annual_report]
+        )
+        operating_refs = self._report_evidence_references(
+            operating_reports,
+            "revenue and EBIT operands",
+        )
+        calibration_refs = self._calibration_evidence_references(calibration_record)
+        assumption_provenance = {
+            "projection_years": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["projection_years"],
+                limitations=("fixed policy horizon, not a company-specific moat estimate",),
+            ),
+            "revenue_growth": AssumptionProvenance(
+                AssumptionOrigin.COMPANY_HISTORY
+                if growth_source.startswith("annual revenue CAGR")
+                else AssumptionOrigin.FIXED_DEFAULT,
+                growth_source,
+                annual_refs if growth_source.startswith("annual revenue CAGR") else (),
+                ("historical growth is not a forecast guarantee",),
+            ),
+            "ebit_margin": AssumptionProvenance(
+                AssumptionOrigin.REPORT_EVIDENCE,
+                economics_source,
+                operating_refs,
+                ("normalized reported EBIT margin is not evidence of future margin expansion",),
+            ),
+            "tax_rate": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["tax_rate"],
+                limitations=("modeling assumption, not a forecast of issuer cash taxes",),
+            ),
+            "discount_rate": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["discount_rate"],
+                limitations=("market-cap bucket hurdle is a proxy, not measured company WACC",),
+            ),
+            "terminal_growth": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["terminal_growth"],
+                limitations=("fixed mature nominal growth policy",),
+            ),
+            "net_reinvestment_rate": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["net_reinvestment_rate"],
+                limitations=("inactive legacy field; operative investment is exported separately",),
+            ),
+            "reinvestment_return": AssumptionProvenance(
+                AssumptionOrigin.QUALIFIED_CALIBRATION,
+                assumption_sources["reinvestment_return"],
+                calibration_refs,
+                (
+                    "future incremental return is an explicit historical calibration assumption, not observed future ROIC",
+                ),
+            ),
+            "revenue_growth_fade_to": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["revenue_growth_fade_to"],
+                limitations=("linked to the fixed terminal-growth policy",),
+            ),
+            "ebit_margin_start": AssumptionProvenance(
+                AssumptionOrigin.REPORT_EVIDENCE,
+                assumption_sources["ebit_margin_start"],
+                operating_refs,
+                ("constant margin only; margin changes require capital evidence",),
+            ),
+            "economic_convention": AssumptionProvenance(
+                AssumptionOrigin.FIXED_DEFAULT,
+                assumption_sources["economic_convention"],
+                limitations=("approved end-of-year forward-funding convention",),
+            ),
+            "calibration_identity": AssumptionProvenance(
+                AssumptionOrigin.QUALIFIED_CALIBRATION,
+                "identity of the retained qualified calibration record",
+                calibration_refs,
+                ("identity does not independently authenticate source interpretation",),
+            ),
+        }
         return DcfPolicyDecision(
             available=True,
             policy_version=self.VERSION,
             assumptions=assumptions,
             solve_bounds=dict(self.SOLVE_BOUNDS),
-            assumption_sources={
-                "projection_years": "fixed policy horizon",
-                "revenue_growth": growth_source,
-                "ebit_margin": economics_source,
-                "tax_rate": "fixed normalized Nordic modeling rate",
-                "discount_rate": (
-                    "deterministic required-return hurdle selected by market-cap bucket"
-                ),
-                "terminal_growth": "fixed mature nominal growth policy",
-                "net_reinvestment_rate": "inactive legacy field; inspect investment amounts instead",
-                "reinvestment_return": (
-                    "assumed future incremental return calibrated from own-company average "
-                    "operating ROIC; linear fade to discount hurdle proxy in the last funding interval"
-                ),
-                "economic_convention": "end-of-year spending funds next-year profit; no capital release or funding caps",
-                "revenue_growth_fade_to": (
-                    "year-one revenue growth fades linearly to fixed mature "
-                    "terminal growth by the final explicit year"
-                ),
-                "ebit_margin_start": (
-                    "constant positive normalized EBIT margin; changes require capital evidence"
-                ),
-            },
+            assumption_sources=assumption_sources,
+            assumption_provenance=assumption_provenance,
             normalized_fcf_margin=fcf_margin,
             normalization=self._with_reinvestment_confidence(
                 normalization,
@@ -325,6 +416,55 @@ class DcfAssumptionPolicy:
             missing_information=(),
             warnings=tuple(warnings),
         )
+
+    @staticmethod
+    def _report_evidence_references(
+        reports: list[Report | None], anchor: str
+    ) -> tuple[EvidenceReference, ...]:
+        references = {}
+        for report in reports:
+            if report is None:
+                continue
+            period = report.period_end.isoformat() if report.period_end else f"year-{report.year}"
+            source_id = f"financial-period:{period}:period-{report.period}"
+            raw = report.raw_payload or {}
+            source_url = raw.get("source_url") or raw.get("url")
+            references[source_id] = EvidenceReference(
+                source_id=source_id,
+                source_url=source_url if isinstance(source_url, str) and source_url else None,
+                published_on=report.report_date.isoformat() if report.report_date else None,
+                anchor=anchor,
+            )
+        return tuple(references[key] for key in sorted(references))
+
+    @staticmethod
+    def _calibration_evidence_references(
+        record: dict | None,
+    ) -> tuple[EvidenceReference, ...]:
+        if not record:
+            return ()
+        sources = record.get("sources")
+        if not isinstance(sources, dict):
+            return ()
+        references = []
+        for operand, source in sorted(sources.items()):
+            if not isinstance(source, dict):
+                continue
+            source_id = source.get("source_id")
+            source_url = source.get("url")
+            if not isinstance(source_id, str) or not isinstance(source_url, str):
+                continue
+            references.append(
+                EvidenceReference(
+                    source_id=source_id,
+                    source_url=source_url,
+                    published_on=source.get("published_on"),
+                    observed_on=source.get("observed_on"),
+                    anchor=f"{source.get('anchor', '')} [{operand}]",
+                    sha256=source.get("sha256"),
+                )
+            )
+        return tuple(references)
 
     @classmethod
     def build_operating_history(

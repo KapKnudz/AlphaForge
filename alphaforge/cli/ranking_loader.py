@@ -26,12 +26,22 @@ from alphaforge.core.kpi_taxonomy import (
 from alphaforge.core.ranking.sector_rules import ranking_model_for_branch
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.calculator import ValuationCalculator
+from alphaforge.core.valuation.dcf_contract import (
+    DcfResultMetadata,
+    DcfResultStatus,
+    serialize_dcf_result,
+)
+from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
 from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
 )
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.reinvestment import qualify_calibration
+from alphaforge.core.valuation.reverse_dcf import (
+    UnsupportedEconomicPolicy,
+    UnsupportedValuationModel,
+)
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
 
@@ -103,6 +113,76 @@ def _normalization_payload(normalization) -> dict[str, Any] | None:
         "selected_window_years": normalization.selected_window_years,
         "reasons": list(normalization.reasons),
     }
+
+
+def _dcf_exception_status(exc: Exception) -> DcfResultStatus:
+    if isinstance(exc, UnsupportedEconomicPolicy):
+        return DcfResultStatus.DOMAIN_UNAVAILABLE
+    if isinstance(exc, UnsupportedValuationModel):
+        return DcfResultStatus.UNSUPPORTED
+    if isinstance(exc, RuntimeError):
+        return DcfResultStatus.NONCONVERGENCE
+    if isinstance(exc, (ValueError, OverflowError)):
+        return DcfResultStatus.INVALID_INPUT
+    return DcfResultStatus.UNAVAILABLE
+
+
+def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
+    if reason is None:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if "did not converge" in reason:
+        return DcfResultStatus.NONCONVERGENCE
+    if "not bracketed" in reason or "no solve bracket" in reason:
+        return DcfResultStatus.NO_CROSSING
+    if "finite" in reason or "must be positive" in reason or "must exceed" in reason:
+        return DcfResultStatus.INVALID_INPUT
+    if reason == "unavailable_constant_margin_only":
+        return DcfResultStatus.UNSUPPORTED
+    if reason == "not_identifiable":
+        return DcfResultStatus.NOT_IDENTIFIABLE
+    if reason in {
+        "dated_positive_roic",
+        "admissible_reinvestment_calibration",
+        "normalized EBIT history unavailable",
+        "net_debt",
+        "current_revenue_or_shares",
+        "price_unavailable",
+    }:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if reason in {
+        "negative_nopat_unsupported_reinvestment",
+        "nonpositive_nopat_unsupported_reinvestment",
+        "varying_margin_capital_evidence_unavailable",
+        "unsupported_capital_release",
+        "unsupported_financing",
+        "invalid_candidate_economics",
+    }:
+        return DcfResultStatus.DOMAIN_UNAVAILABLE
+    if "banks require" in reason or "property companies require" in reason or "not FCFF" in reason:
+        return DcfResultStatus.UNSUPPORTED
+    if "not both verified" in reason:
+        return DcfResultStatus.INSUFFICIENT_EVIDENCE
+    if "denomination mismatch" in reason or "conflicts" in reason:
+        return DcfResultStatus.INVALID_INPUT
+    return DcfResultStatus.INSUFFICIENT_EVIDENCE
+
+
+def _dcf_solve_status(
+    solution_status: str | None, reason: str | None, error: str | None
+) -> DcfResultStatus:
+    if solution_status == "not_identifiable":
+        return DcfResultStatus.NOT_IDENTIFIABLE
+    if solution_status == "sampled_match_region":
+        return DcfResultStatus.SAMPLED_MATCH_REGION
+    if solution_status == "no_candidate_solution":
+        return DcfResultStatus.NO_CROSSING
+    if solution_status == "candidate_solutions":
+        return DcfResultStatus.CANDIDATE_SOLUTIONS
+    if solution_status == "unavailable":
+        return _dcf_failure_status(
+            error if reason == "invalid_candidate_economics" else reason or error
+        )
+    return DcfResultStatus.UNAVAILABLE
 
 
 def _equity_qualification(equity_value: float) -> dict[str, Any]:
@@ -1022,16 +1102,24 @@ def load_results_for_company(
             _missing.append(
                 "financial fiscal end/publication unavailable under verified-date selection"
             )
+        _unavailable_dcf = serialize_dcf_result(
+            {
+                "available": False,
+                "policy_version": DcfAssumptionPolicy.VERSION,
+                "missing_information": _missing,
+            },
+            DcfResultMetadata(
+                DcfResultStatus.INSUFFICIENT_EVIDENCE,
+                _missing[0] if _missing else None,
+                (),
+                DcfAssumptionPolicy.VERSION,
+            ),
+        )
         _unavailable = {
             "status": "unavailable",
             "missing_information": _missing,
             "selection": selection,
-            "dcf": {
-                "available": False,
-                "policy_version": None,
-                "missing_information": _missing,
-                "warnings": [],
-            },
+            "dcf": _unavailable_dcf,
         }
         return {
             "financial": None,
@@ -1260,6 +1348,7 @@ def load_results_for_company(
     # ------------------------------------------------------------------
     dcf_policy_decision = None
     dcf_value = None
+    dcf_failure_status = None
     reverse_dcf_results: dict[str, Any] = {}
     # Build annual report history for DCF policy (needs year property)
     try:
@@ -1268,7 +1357,7 @@ def load_results_for_company(
         # Provider ROIC remains a percentage-point diagnostic; it no longer
         # supplies a naked future return. Qualified capital records own that input.
         roic_for_dcf = kpis.get(37)
-        from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy, DcfPolicyDecision
+        from alphaforge.core.valuation.dcf_policy import DcfPolicyDecision
         from alphaforge.core.valuation.reverse_dcf import ReverseDcfEngine, ReverseDcfInputs
 
         policy = DcfAssumptionPolicy()
@@ -1637,6 +1726,7 @@ def load_results_for_company(
                     reverse_dcf["implied"] = reverse_dcf_results
                     reverse_dcf["status"] = "available"
                 except Exception as exc:
+                    dcf_failure_status = _dcf_exception_status(exc)
                     reverse_dcf["dcf_error"] = str(exc)
                     reverse_dcf["dcf"] = {
                         "available": False,
@@ -1677,6 +1767,7 @@ def load_results_for_company(
                 }
                 reverse_dcf["status"] = "unavailable"
     except Exception as exc:
+        dcf_failure_status = _dcf_exception_status(exc)
         # Never break ranking on DCF failure — keep heuristic score available
         try:
             reverse_dcf["dcf_error"] = f"dcf wiring failed: {exc}"
@@ -1710,6 +1801,59 @@ def load_results_for_company(
             "missing_information": price_missing,
             "warnings": [],
         }
+    dcf_result = reverse_dcf.get("dcf")
+    if isinstance(dcf_result, dict):
+        missing = dcf_result.get("missing_information") or ()
+        failure_reason = next(iter(missing), None)
+        if dcf_result.get("available"):
+            result_status = DcfResultStatus.AVAILABLE
+            result_reason = None
+        else:
+            result_reason = (
+                reverse_dcf.get("dcf_error") or failure_reason
+                if dcf_failure_status is not None
+                else failure_reason or reverse_dcf.get("dcf_error")
+            )
+            result_status = dcf_failure_status or _dcf_failure_status(result_reason)
+        decision_warnings = tuple(
+            dcf_result.get("warnings")
+            or (dcf_policy_decision.warnings if dcf_policy_decision is not None else ())
+        )
+        result_version = dcf_result.get("policy_version") or (
+            dcf_policy_decision.policy_version if dcf_policy_decision is not None else None
+        )
+        reverse_dcf["dcf"] = serialize_dcf_result(
+            dcf_result,
+            DcfResultMetadata(result_status, result_reason, decision_warnings, result_version),
+            dcf_policy_decision.assumption_provenance
+            if dcf_result.get("available") and dcf_policy_decision is not None
+            else {},
+        )
+    for solve_name, solve_result in reverse_dcf_results.items():
+        result_status = _dcf_solve_status(
+            solve_result.get("solution_status"),
+            solve_result.get("reason"),
+            solve_result.get("error"),
+        )
+        solve_result_version = (
+            dcf_policy_decision.policy_version if dcf_policy_decision is not None else None
+        )
+        solve_reason = solve_result.get("reason") or solve_result.get("error")
+        if result_status in {
+            DcfResultStatus.INVALID_INPUT,
+            DcfResultStatus.NO_CROSSING,
+            DcfResultStatus.NONCONVERGENCE,
+        }:
+            solve_reason = solve_result.get("error") or solve_reason
+        reverse_dcf_results[solve_name] = serialize_dcf_result(
+            solve_result,
+            DcfResultMetadata(
+                result_status,
+                solve_reason,
+                tuple(dcf_policy_decision.warnings) if dcf_policy_decision is not None else (),
+                solve_result_version,
+            ),
+        )
     # Provide DCF artefacts at top level so callers can export them without
     # reaching into candidate.full_results, and keep provenance separate from
     # the heuristic valuation_score.

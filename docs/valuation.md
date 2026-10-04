@@ -47,7 +47,7 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v14-qualified-forward-reinvestment"`) — historical growth
+  (`VERSION = "reverse-dcf-v15-typed-result-contract"`) — historical growth
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
@@ -111,8 +111,13 @@ ranking never masquerades as a discounted-cash-flow.
   Rejected market inputs cannot drive valuation. DCF market cap, enterprise value, and
   the required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
-  `reverse_dcf` dict carries `dcf.available`, `assumptions`,
-  `assumption_sources`, `required_return {size_bucket, required_return}`,
+  `reverse_dcf` dict carries `dcf.available`, consistent `status`, `reason`,
+  `warnings`, and `version`, plus `assumptions`, legacy `assumption_sources`,
+  and typed per-field `assumption_provenance` (`fixed_default`, `company_history`,
+  `report_evidence`, or `qualified_calibration`) with evidence references and
+  explicit limitations. Evidence references point only to retained financial
+  periods or qualified calibration source records; no numeric confidence is added.
+  `required_return {size_bucket, required_return}`,
   `projected_cash_flows` with next-year profit, profit growth, incremental return,
   investment amount/ratio, plus the terminal cash-flow bridge. Implied margin is
   **unavailable** because changing it violates the constant-margin basis. Implied
@@ -138,7 +143,14 @@ ranking never masquerades as a discounted-cash-flow.
   `dcf` / `reverse_dcf` so callers do not need to reach into
   `candidate.full_results`. Every non-valued path emits a structured
   unavailable result (`dcf.available=false` with `missing_information` and
-  top-level `status="unavailable"`), including outer DCF wiring failures.
+  top-level `status="unavailable"`), including outer DCF wiring failures. The
+  pure `core/valuation/dcf_contract.py` serializer produces loader DCF records;
+  exports and replay preserve those same records. It rejects non-finite serialized
+  values. Its status
+  distinguishes unsupported, invalid input, insufficient evidence, domain
+  unavailable, no crossing and nonconvergence while preserving detailed reasons.
+  The result-contract version is part of the replay rules identity, so old
+  incompatible outputs are refused rather than reinterpreted.
 * **Provenance:** migration 019 adds append-only calibration records; trusted analyst
   admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.
   There is deliberately no public acquisition command. The loader reports rejected
