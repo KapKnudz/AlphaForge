@@ -821,9 +821,7 @@ def _adjusted_shares_with_splits(
     start = date.fromisoformat(period_end[:10])
     end = date.fromisoformat(comparison_date[:10])
     applicable = tuple(
-        row
-        for row in split_rows
-        if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
+        row for row in split_rows if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
     )
     if not applicable:
         return shares, applicable
@@ -1228,9 +1226,7 @@ def load_results_for_company(
     )
     dcf_split_refs = tuple(
         EvidenceReference(
-            source_id=(
-                f"stock-split:borsdata-{row['borsdata_id']}:date-{row['split_date']}"
-            ),
+            source_id=(f"stock-split:borsdata-{row['borsdata_id']}:date-{row['split_date']}"),
             observed_on=str(row["split_date"]),
             anchor="shares outstanding adjustment event",
         )

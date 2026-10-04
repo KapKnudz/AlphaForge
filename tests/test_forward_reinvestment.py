@@ -380,9 +380,7 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
         source["source_id"] for source in record_sources.values()
     }
     assert provenance["calibration_identity"]["evidence_references"] == calibration_refs
-    assert "synthetic:unqualified-extra" not in {
-        ref["source_id"] for ref in calibration_refs
-    }
+    assert "synthetic:unqualified-extra" not in {ref["source_id"] for ref in calibration_refs}
     assert provenance["reinvestment_return"]["limitations"]
     json.dumps(value, allow_nan=False)
     for axis, status in (("ebit_margin", "unavailable"), ("terminal_growth", "not_identifiable")):
@@ -519,10 +517,7 @@ def test_report_provenance_uses_exact_consumed_windows():
     provenance = value["assumption_provenance"]
 
     def expected(years):
-        return {
-            f"financial-period:company-{cid}:type-year:end-{year}-03-31"
-            for year in years
-        }
+        return {f"financial-period:company-{cid}:type-year:end-{year}-03-31" for year in years}
 
     growth_refs = provenance["revenue_growth"]["evidence_references"]
     margin_refs = provenance["ebit_margin"]["evidence_references"]
@@ -543,12 +538,8 @@ def test_report_provenance_identity_distinguishes_period_types():
 
     value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
     provenance = value["assumption_provenance"]
-    growth_ids = {
-        ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]
-    }
-    margin_ids = {
-        ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]
-    }
+    growth_ids = {ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]}
+    margin_ids = {ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]}
     annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
     r12_id = f"financial-period:company-{cid}:type-r12:end-2026-03-31"
     assert annual_id in growth_ids
