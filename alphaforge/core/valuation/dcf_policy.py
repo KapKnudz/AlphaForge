@@ -63,6 +63,8 @@ class DcfQualityPeriod:
     duration_days: int | None
     currency: str | None
     disposition: Literal["selected", "excluded", "valuation_input"]
+    revenue_operand_qualified: bool = False
+    ebit_operand_qualified: bool = False
     reported_period: int | None = None
     unknown_fields: tuple[str, ...] = ()
     evidence_id: str | None = None
@@ -149,7 +151,7 @@ class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
     VERSION = "reverse-dcf-v16-explicit-input-quality"
-    INPUT_QUALITY_VERSION = "dcf-input-quality-v1-two-consecutive-annual-periods"
+    INPUT_QUALITY_VERSION = "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
     REQUIRED_SELECTED_ANNUAL_PERIODS = 2
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
@@ -173,7 +175,12 @@ class DcfAssumptionPolicy:
     @classmethod
     def assess_input_quality(cls, view: DcfInputQualityView | None) -> DcfInputQualityDecision:
         """Require the existing consecutive-annual operand contract for a mature forecast."""
-        depth = len(view.selected_periods) if view is not None else 0
+        depth = 0
+        if view is not None:
+            for period in reversed(view.selected_periods):
+                if not period.revenue_operand_qualified or not period.ebit_operand_qualified:
+                    break
+                depth += 1
         reasons = (
             ()
             if depth >= cls.REQUIRED_SELECTED_ANNUAL_PERIODS

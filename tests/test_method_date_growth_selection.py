@@ -1593,6 +1593,85 @@ def test_valid_april_annual_history_keeps_qualified_dcf_and_quality_facts(monkey
     assert view["normalization"]["selected_window"]["ebit_margin"] == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize("defect", ["nonpositive_baseline_revenue", "missing_annual_ebit"])
+def test_dcf_quality_requires_qualified_annual_operands(defect):
+    if defect == "nonpositive_baseline_revenue":
+        periods = [annual(2025, 0), annual(2026, 110)]
+    else:
+        periods = [
+            annual(2025, 100, operating_Income=None),
+            annual(2026, 110, operating_Income=None),
+            annual(
+                2026,
+                110,
+                period_type="r12",
+                period_end="2026-05-31",
+                report_Date=CUTOFF,
+            ),
+        ]
+    conn, cid = setup(periods=periods)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    result = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
+    quality = result["dcf"]["input_quality"]["decision"]
+    assert result["status"] == "unavailable"
+    assert result["dcf"]["available"] is False
+    assert result["dcf"]["missing_information"] == [
+        "qualified_consecutive_annual_history_unavailable"
+    ]
+    assert quality["available"] is False
+    assert quality["selected_depth"] < 2
+
+
+def test_dcf_quality_period_identity_distinguishes_annual_and_r12_unknowns():
+    conn, cid = setup(
+        periods=[
+            annual(2025, period_start="2024-04-01"),
+            annual(2026),
+            annual(2026, period_type="r12"),
+        ]
+    )
+
+    quality = load_results_for_company(conn, cid, CUTOFF)["selection"]["dcf_input_quality"][
+        "view"
+    ]
+    selected_latest = quality["selected_periods"][-1]
+    valuation = quality["valuation_period"]
+    assert selected_latest["evidence_id"] == "year:2026:2026-03-31"
+    assert valuation["evidence_id"] == "r12:2026:2026-03-31"
+    assert quality["unknowns"] == (
+        "r12 period 2026 ending 2026-03-31: period_start_and_duration unknown",
+        "year period 2026 ending 2026-03-31: period_start_and_duration unknown",
+    )
+
+
+def test_rejected_annual_has_one_source_attributable_quality_anomaly():
+    conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
+    rejected = annual(2026, 121)
+    rejected.pop("period_end")
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    selection = load_results_for_company(conn, cid, CUTOFF)["selection"]
+    rejection = next(
+        item for item in selection["rejected_reports"] if item["raw_payload"] == rejected
+    )
+    matching = [
+        issue
+        for issue in selection["dcf_input_quality"]["view"]["evidenced_anomalies"]
+        if issue["reason"] == rejection["reason"]
+    ]
+    assert matching == [
+        {
+            "source": rejection["source"],
+            "fiscal_year": 2026,
+            "period_end": None,
+            "reason": rejection["reason"],
+            "evidence_id": str(rejection["id"]),
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "case",
     [

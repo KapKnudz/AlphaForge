@@ -465,19 +465,26 @@ def _dcf_quality_period(row, disposition: str, reason: str | None = None) -> Dcf
     end = _verified_fiscal_end(row)
     publication = _verified_publication(row)
     fiscal_year = _verified_fiscal_year(row)
+    period_type = str(row["period_type"])
+    revenue = _number(row["revenue"])
+    ebit = _number(row["ebit"])
+    if ebit is None:
+        ebit = _number(row["operating_profit"])
     unknown_fields = ("period_start_and_duration",) if not starts and not malformed_start else ()
     return DcfQualityPeriod(
         fiscal_year=fiscal_year,
-        period_type=row["period_type"],
+        period_type=period_type,
         period_start=start.isoformat() if start else None,
         period_end=end.isoformat() if end else None,
         published_on=publication.isoformat() if publication else None,
         duration_days=(end - start).days + 1 if start is not None and end is not None else None,
         currency=_currency_code(row["values_currency"]),
         disposition=disposition,
+        revenue_operand_qualified=revenue is not None and revenue > 0,
+        ebit_operand_qualified=ebit is not None,
         reported_period=_verified_report_period(row),
         unknown_fields=unknown_fields,
-        evidence_id=f"annual:{fiscal_year}:{end.isoformat() if end else None}",
+        evidence_id=f"{period_type}:{fiscal_year}:{end.isoformat() if end else None}",
         reason=reason,
     )
 
@@ -577,7 +584,7 @@ def _dcf_input_quality_view(
     issues = []
     for reason in history.get("reasons", []):
         issues.append(DcfQualityIssue("annual_history", None, None, reason))
-    for item in excluded:
+    for item in excluded_items:
         if item.reason:
             issues.append(
                 DcfQualityIssue(
@@ -585,7 +592,7 @@ def _dcf_input_quality_view(
                     item.fiscal_year,
                     item.period_end,
                     item.reason,
-                    f"annual:{item.fiscal_year}:{item.period_end}",
+                    item.evidence_id,
                 )
             )
     for item in selection.get("rejected_reports", []):
@@ -607,7 +614,8 @@ def _dcf_input_quality_view(
     unknowns = tuple(
         sorted(
             {
-                f"annual period {period.fiscal_year or period.period_end}: {field} unknown"
+                f"{period.period_type} period {period.fiscal_year or 'unknown-year'} "
+                f"ending {period.period_end or 'unknown-end'}: {field} unknown"
                 for period in (
                     *selected,
                     *excluded,
