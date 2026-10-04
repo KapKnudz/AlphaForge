@@ -233,7 +233,10 @@ def test_last_funding_endpoint_is_exact_even_with_return_cancellation(q):
 
 
 def test_one_year_horizon_converges_in_only_funding_interval():
-    value = ReverseDcfEngine().value(hand_inputs(q=0.2, years=1))
+    inputs = hand_inputs(q=0.2, years=1)
+    inputs = replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.08))
+    value = ReverseDcfEngine().value(inputs)
+    assert value.projected_cash_flows[0].revenue_growth == 0.04
     assert value.projected_cash_flows[0].incremental_return == 0.1
     assert value.terminal_cash_flow.incremental_return == 0.1
 

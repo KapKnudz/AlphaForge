@@ -195,7 +195,7 @@ class ReverseDcfEngine:
                 if year <= a.projection_years
                 else a.terminal_growth
             )
-            if year == a.projection_years and a.projection_years > 1:
+            if year == a.projection_years:
                 growth = a.terminal_growth
             revenue *= 1 + growth
             nopat = revenue * a.ebit_margin * (1 - a.tax_rate)
