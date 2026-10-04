@@ -29,6 +29,7 @@ class AssumptionOrigin(StrEnum):
     FIXED_DEFAULT = "fixed_default"
     COMPANY_HISTORY = "company_history"
     REPORT_EVIDENCE = "report_evidence"
+    MARKET_EVIDENCE = "market_evidence"
     QUALIFIED_CALIBRATION = "qualified_calibration"
 
 

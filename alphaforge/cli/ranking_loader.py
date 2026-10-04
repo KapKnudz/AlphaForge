@@ -864,6 +864,7 @@ def _price(row) -> StockPrice:
         close=float(row["close"]),
         volume=int(row["volume"]) if row["volume"] is not None else None,
         currency=_currency_code(row["currency"]),
+        company_id=int(row["company_id"]),
     )
 
 
@@ -1412,6 +1413,7 @@ def load_results_for_company(
                 as_of=cutoff,
                 currency=(dcf_current_report.currency if dcf_current_report is not None else None),
                 market_cap=market_cap_for_hurdle,
+                market_price=latest_price,
                 roic=roic_for_dcf,
                 calibration_record=calibration_record,
             )
@@ -1484,13 +1486,12 @@ def load_results_for_company(
                             "record": json.loads(dcf_policy_decision.calibration.record_json),
                         },
                         "required_return": {
-                            "size_bucket": dcf_policy_decision.required_return.size_bucket
-                            if dcf_policy_decision.required_return
-                            else None,
+                            "policy_version": dcf_policy_decision.required_return.policy_version,
+                            "market_cap": dcf_policy_decision.required_return.market_cap,
+                            "size_bucket": dcf_policy_decision.required_return.size_bucket,
+                            "required_return": dcf_policy_decision.required_return.required_return,
+                            "source_date": dcf_policy_decision.required_return.source_date,
                             "basis": "discount_rate_proxy_for_cost_of_capital",
-                            "required_return": dcf_policy_decision.required_return.required_return
-                            if dcf_policy_decision.required_return
-                            else None,
                         }
                         if dcf_policy_decision.required_return
                         else None,

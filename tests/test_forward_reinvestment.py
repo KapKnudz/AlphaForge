@@ -336,7 +336,14 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     value = exported[str(cid)]["dcf"]
     assert value["calibration"]["identity"] == identity
     assert value["assumptions"]["calibration_identity"] == identity
-    assert value["required_return"]["basis"] == "discount_rate_proxy_for_cost_of_capital"
+    assert value["required_return"] == {
+        "policy_version": "required-return-v2-market-cap-buckets",
+        "market_cap": 100_000_000,
+        "size_bucket": "below_sek_1bn",
+        "required_return": 0.15,
+        "source_date": CUTOFF,
+        "basis": "discount_rate_proxy_for_cost_of_capital",
+    }
     assert (
         value["projected_cash_flows"][-1]["incremental_return"]
         == value["assumptions"]["discount_rate"]
@@ -352,6 +359,20 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert provenance["revenue_growth"]["origin"] == "company_history"
     assert provenance["ebit_margin"]["origin"] == "report_evidence"
     assert provenance["tax_rate"]["origin"] == "fixed_default"
+    discount = provenance["discount_rate"]
+    assert discount["origin"] == "market_evidence"
+    discount_refs = {ref["anchor"]: ref for ref in discount["evidence_references"]}
+    assert discount_refs["close market-cap operand"] == {
+        "source_id": f"stock-price:company-{cid}:date-{CUTOFF}",
+        "source_url": None,
+        "published_on": None,
+        "observed_on": CUTOFF,
+        "anchor": "close market-cap operand",
+        "sha256": None,
+    }
+    assert discount_refs["shares outstanding market-cap operand"]["source_id"] == (
+        f"financial-period:company-{cid}:type-year:end-2026-03-31"
+    )
     calibration_refs = provenance["reinvestment_return"]["evidence_references"]
     record_sources = synthetic_record()["sources"]
     assert {ref["source_id"] for ref in calibration_refs} == {
@@ -373,6 +394,15 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     snapshot = conn.execute("SELECT body,rules FROM numerical_input_bodies").fetchone()
     body, rules = json.loads(snapshot["body"]), json.loads(snapshot["rules"])
     retained_record = json.loads(body["tables"]["reinvestment_calibrations"][0]["record_json"])
+    retained_prices = {
+        (row["company_id"], row["price_date"]): row for row in body["tables"]["prices"]
+    }
+    retained_reports = {
+        (row["company_id"], row["period_type"], row["period_end"]): row
+        for row in body["tables"]["financial_periods"]
+    }
+    assert retained_prices[(cid, CUTOFF)]["close"] == 10
+    assert retained_reports[(cid, "year", "2026-03-31")]["shares_outstanding"] == 10
     assert body["tables"]["reinvestment_calibrations"][0]["identity"] == identity
     assert {ref["source_id"] for ref in calibration_refs} == {
         retained_record["sources"][operand]["source_id"] for operand in record_sources

@@ -7,7 +7,7 @@ from statistics import mean, pstdev
 from typing import Literal
 
 from alphaforge.core.statistics import cagr
-from alphaforge.core.types import Report
+from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.dcf_contract import (
     AssumptionOrigin,
     AssumptionProvenance,
@@ -124,6 +124,7 @@ class DcfAssumptionPolicy:
         as_of: date | None = None,
         currency: str | None = "SEK",
         market_cap: float | None = None,
+        market_price: StockPrice | None = None,
         roic: float | None = None,
         calibration_record: dict | None = None,
     ) -> DcfPolicyDecision:
@@ -329,6 +330,7 @@ class DcfAssumptionPolicy:
             operating_reports,
             "revenue and EBIT operands",
         )
+        market_cap_refs = self._market_cap_evidence_references(current_report, market_price)
         calibration_refs = self._calibration_evidence_references(calibration_record)
         assumption_provenance = {
             "projection_years": AssumptionProvenance(
@@ -356,9 +358,10 @@ class DcfAssumptionPolicy:
                 limitations=("modeling assumption, not a forecast of issuer cash taxes",),
             ),
             "discount_rate": AssumptionProvenance(
-                AssumptionOrigin.FIXED_DEFAULT,
+                AssumptionOrigin.MARKET_EVIDENCE,
                 assumption_sources["discount_rate"],
-                limitations=("market-cap bucket hurdle is a proxy, not measured company WACC",),
+                market_cap_refs,
+                ("market-cap bucket hurdle is a proxy, not measured company WACC",),
             ),
             "terminal_growth": AssumptionProvenance(
                 AssumptionOrigin.FIXED_DEFAULT,
@@ -440,6 +443,27 @@ class DcfAssumptionPolicy:
                 anchor=anchor,
             )
         return tuple(references[key] for key in sorted(references))
+
+    @classmethod
+    def _market_cap_evidence_references(
+        cls,
+        report: Report,
+        price: StockPrice | None,
+    ) -> tuple[EvidenceReference, ...]:
+        references = list(
+            cls._report_evidence_references((report,), "shares outstanding market-cap operand")
+        )
+        if price is not None:
+            references.append(
+                EvidenceReference(
+                    source_id=(
+                        f"stock-price:company-{price.company_id}:date-{price.date.isoformat()}"
+                    ),
+                    observed_on=price.date.isoformat(),
+                    anchor="close market-cap operand",
+                )
+            )
+        return tuple(sorted(references, key=lambda reference: reference.source_id))
 
     @staticmethod
     def _calibration_evidence_references(

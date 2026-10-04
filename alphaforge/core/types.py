@@ -71,6 +71,7 @@ class StockPrice:
     close: float
     currency: str | None = None
     volume: int | None = None
+    company_id: int | None = None
 
 
 # --- Enums ---
