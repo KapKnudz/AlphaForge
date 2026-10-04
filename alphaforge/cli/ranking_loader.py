@@ -563,21 +563,21 @@ def _dcf_input_quality_view(
                 iter(history.get("reasons", ())), "outside selected consecutive annual suffix"
             )
         excluded_items.append(_dcf_quality_period(row, "excluded", reason))
-    excluded = tuple(
-        [*excluded_items]
-        + [
-            _dcf_rejected_quality_period(item)
-            for item in selection.get("rejected_reports", [])
-            if item.get("period_type") == "year" and item.get("current_refusal")
-        ]
+    rejected_items = tuple(
+        item
+        for item in selection.get("rejected_reports", [])
+        if item.get("period_type") in {"year", "r12"} and item.get("current_refusal")
     )
+    rejected_periods = tuple(_dcf_rejected_quality_period(item) for item in rejected_items)
+    excluded = (*excluded_items, *rejected_periods)
 
+    annual_periods = (
+        *selected,
+        *(period for period in excluded if period.period_type == "year"),
+    )
     years = {
-        period.fiscal_year for period in (*selected, *excluded) if period.fiscal_year is not None
+        period.fiscal_year for period in annual_periods if period.fiscal_year is not None
     }
-    for item in excluded:
-        if item.evidence_id and item.fiscal_year is not None:
-            years.add(item.fiscal_year)
     expected = tuple(range(min(years), max(years) + 1)) if years else ()
     missing = tuple(year for year in expected if year not in years)
 
@@ -595,16 +595,14 @@ def _dcf_input_quality_view(
                     item.evidence_id,
                 )
             )
-    for item in selection.get("rejected_reports", []):
-        if item.get("period_type") != "year" or not item.get("current_refusal"):
-            continue
+    for item, period in zip(rejected_items, rejected_periods, strict=True):
         issues.append(
             DcfQualityIssue(
                 str(item.get("source", "rejected_report")),
-                _fiscal_year(item.get("report_year")),
-                item.get("period_end"),
+                period.fiscal_year,
+                period.period_end,
                 str(item.get("reason", "annual report rejected")),
-                str(item.get("id")) if item.get("id") is not None else None,
+                period.evidence_id,
             )
         )
     unique_issues = {

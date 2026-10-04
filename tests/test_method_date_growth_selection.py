@@ -1672,6 +1672,50 @@ def test_rejected_annual_has_one_source_attributable_quality_anomaly():
     ]
 
 
+def test_rejected_r12_is_visible_without_expanding_annual_quality_span():
+    conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
+    rejected = annual(
+        2026,
+        121,
+        period_type="r12",
+        period=1,
+        period_end="2026-05-31",
+        report_Date=None,
+    )
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    selection = load_results_for_company(conn, cid, CUTOFF)["selection"]
+    rejection = next(
+        item for item in selection["rejected_reports"] if item["raw_payload"] == rejected
+    )
+    quality = selection["dcf_input_quality"]
+    excluded = next(
+        period
+        for period in quality["view"]["excluded_periods"]
+        if period["evidence_id"] == str(rejection["id"])
+    )
+    assert excluded["period_type"] == "r12"
+    assert excluded["period_end"] == "2026-05-31"
+    assert excluded["reason"] == rejection["reason"]
+    assert quality["view"]["expected_periods"] == (2024, 2025)
+    assert quality["view"]["missing_periods"] == ()
+    assert quality["decision"]["available"] is True
+    matching = [
+        issue
+        for issue in quality["view"]["evidenced_anomalies"]
+        if issue["evidence_id"] == str(rejection["id"])
+    ]
+    assert matching == [
+        {
+            "source": rejection["source"],
+            "fiscal_year": 2026,
+            "period_end": "2026-05-31",
+            "reason": rejection["reason"],
+            "evidence_id": str(rejection["id"]),
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "case",
     [

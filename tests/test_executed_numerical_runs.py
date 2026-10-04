@@ -138,7 +138,7 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     assert original["dcf"][str(cid)]["dcf"]["available"] is True
     quality_original = original["dcf"][str(cid)]["dcf"]["input_quality"]
     assert quality_original["decision"]["policy_version"] == (
-        "dcf-input-quality-v1-two-consecutive-annual-periods"
+        "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
     )
     assert quality_original["decision"]["selected_depth"] == 3
     assert len(quality_original["view"]["unknowns"]) == 3
