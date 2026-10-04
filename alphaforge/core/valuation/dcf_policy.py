@@ -125,6 +125,7 @@ class DcfAssumptionPolicy:
         currency: str | None = "SEK",
         market_cap: float | None = None,
         market_price: StockPrice | None = None,
+        market_split_references: tuple[EvidenceReference, ...] = (),
         roic: float | None = None,
         calibration_record: dict | None = None,
     ) -> DcfPolicyDecision:
@@ -330,7 +331,11 @@ class DcfAssumptionPolicy:
             operating_reports,
             "revenue and EBIT operands",
         )
-        market_cap_refs = self._market_cap_evidence_references(current_report, market_price)
+        market_cap_refs = self._market_cap_evidence_references(
+            current_report,
+            market_price,
+            market_split_references,
+        )
         calibration_refs = self._calibration_evidence_references(calibration_record)
         assumption_provenance = {
             "projection_years": AssumptionProvenance(
@@ -449,6 +454,7 @@ class DcfAssumptionPolicy:
         cls,
         report: Report,
         price: StockPrice | None,
+        split_references: tuple[EvidenceReference, ...],
     ) -> tuple[EvidenceReference, ...]:
         references = list(
             cls._report_evidence_references((report,), "shares outstanding market-cap operand")
@@ -463,6 +469,7 @@ class DcfAssumptionPolicy:
                     anchor="close market-cap operand",
                 )
             )
+        references.extend(split_references)
         return tuple(sorted(references, key=lambda reference: reference.source_id))
 
     @staticmethod

@@ -27,6 +27,7 @@ from alphaforge.core.valuation.reverse_dcf import (
 )
 from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
+from alphaforge.db.repositories import upsert_prices, upsert_stock_splits
 
 
 def hand_inputs(q=0.1, terminal=0.04, years=2):
@@ -434,6 +435,60 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     )
     with pytest.raises(ReplayRefusal, match="unsupported_rules_or_code"):
         replay_run(conn, executed["run_id"])
+
+
+def test_split_adjusted_discount_provenance_is_retained_and_replayed(monkeypatch, tmp_path):
+    periods = [
+        annual(2024, 100, number_Of_Shares=90),
+        annual(2025, 110, number_Of_Shares=90),
+        annual(2026, 121, number_Of_Shares=90),
+        annual(
+            2026,
+            30,
+            period_type="quarter",
+            period_end="2026-05-31",
+            report_Date=CUTOFF,
+            period=1,
+            number_Of_Shares=450,
+        ),
+    ]
+    conn, cid = setup(periods=periods)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3}], currency="SEK")
+    upsert_stock_splits(
+        conn,
+        [{"insId": 991, "splitDate": "2026-04-15", "splitType": "S", "ratio": "5:1"}],
+    )
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    value = result["dcf"]
+    assert result["current_shares"] == 450
+    assert value["required_return"]["market_cap"] == 1_350_000_000
+    assert value["required_return"]["size_bucket"] == "sek_1bn_to_below_5bn"
+    assert value["assumptions"]["discount_rate"] == 0.135
+    discount_refs = value["assumption_provenance"]["discount_rate"]["evidence_references"]
+    assert {ref["source_id"] for ref in discount_refs} == {
+        f"financial-period:company-{cid}:type-year:end-2026-03-31",
+        f"stock-price:company-{cid}:date-{CUTOFF}",
+        "stock-split:borsdata-991:date-2026-04-15",
+    }
+
+    executed = conn.execute("SELECT * FROM executed_numerical_runs").fetchone()
+    body = json.loads(conn.execute("SELECT body FROM numerical_input_bodies").fetchone()[0])
+    assert body["tables"]["stock_splits"] == [
+        {
+            "id": 1,
+            "company_id": cid,
+            "borsdata_id": 991,
+            "split_type": "S",
+            "ratio": "5:1",
+            "split_date": "2026-04-15",
+        }
+    ]
+    replayed = replay_run(conn, executed["run_id"])["outputs"]
+    assert replayed["dcf"][str(cid)]["dcf"] == value
 
 
 def test_report_provenance_uses_exact_consumed_windows():

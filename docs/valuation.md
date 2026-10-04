@@ -116,8 +116,9 @@ ranking never masquerades as a discounted-cash-flow.
   and typed per-field `assumption_provenance` (`fixed_default`, `company_history`,
   `report_evidence`, `market_evidence`, or `qualified_calibration`) with evidence
   references and explicit limitations. Evidence references point only to retained
-  financial periods, selected market prices, or qualified calibration source records;
-  no numeric confidence is added. `required_return {policy_version, market_cap,
+  financial periods, selected market prices, consumed stock-split events, or qualified
+  calibration source records; no numeric confidence is added. `required_return
+  {policy_version, market_cap,
   size_bucket, required_return, source_date}`,
   `projected_cash_flows` with next-year profit, profit growth, incremental return,
   investment amount/ratio, plus the terminal cash-flow bridge. Implied margin is

@@ -29,6 +29,7 @@ from alphaforge.core.valuation.calculator import ValuationCalculator
 from alphaforge.core.valuation.dcf_contract import (
     DcfResultMetadata,
     DcfResultStatus,
+    EvidenceReference,
     serialize_dcf_result,
 )
 from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
@@ -809,6 +810,30 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _adjusted_shares_with_splits(
+    shares: float | None,
+    period_end: str,
+    comparison_date: str,
+    split_rows,
+):
+    start = date.fromisoformat(period_end[:10])
+    end = date.fromisoformat(comparison_date[:10])
+    applicable = tuple(
+        row
+        for row in split_rows
+        if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
+    )
+    if shares is None or not applicable:
+        return shares, applicable
+    adjusted = adjust_historical_shares(
+        shares,
+        period_end,
+        comparison_date,
+        [(row["split_type"], row["ratio"], row["split_date"]) for row in applicable],
+    )
+    return adjusted, applicable
+
+
 def _report(row, *, shares_override: float | None = None) -> Report:
     # Prefer dedicated net_debt column when present; keep total_debt for compat.
     try:
@@ -1157,23 +1182,22 @@ def load_results_for_company(
     # the raw row in the database and adjust only historical calculation input
     # into the latest report's share basis.
     split_rows = conn.execute(
-        "SELECT split_type, ratio, split_date FROM stock_splits WHERE company_id=? ORDER BY split_date",
+        "SELECT borsdata_id, split_type, ratio, split_date "
+        "FROM stock_splits WHERE company_id=? ORDER BY split_date",
         (company_id,),
     ).fetchall()
-    split_events = [(row[0], row[1], row[2]) for row in split_rows]
     comparison_date = str(period_rows[-1]["period_end"])[:10]
     reports = []
-    for index, row in enumerate(period_rows):
-        raw_shares = _number(row["shares_outstanding"])
-        adjusted = raw_shares
-        if index < len(period_rows) - 1 and raw_shares is not None and split_events:
-            adjusted = adjust_historical_shares(
-                raw_shares,
-                str(row["period_end"])[:10],
-                comparison_date,
-                split_events,
-            )
+    applied_splits_by_report = {}
+    for row in period_rows:
+        adjusted, applied_splits = _adjusted_shares_with_splits(
+            _number(row["shares_outstanding"]),
+            str(row["period_end"]),
+            comparison_date,
+            split_rows,
+        )
         reports.append(_report(row, shares_override=adjusted))
+        applied_splits_by_report[(row["period_type"], row["period_end"])] = applied_splits
     current_report = reports[-1]
     historical_reports = reports[:-1]
     dcf_r12_reports = [
@@ -1192,14 +1216,33 @@ def load_results_for_company(
         dcf_current_report = dcf_annual_reports[-1]
     else:
         dcf_current_report = None
+    dcf_split_rows = (
+        applied_splits_by_report.get(
+            (dcf_current_report.period_type, dcf_current_report.period_end.isoformat()),
+            (),
+        )
+        if dcf_current_report is not None and dcf_current_report.period_end is not None
+        else ()
+    )
+    dcf_split_refs = tuple(
+        EvidenceReference(
+            source_id=(
+                f"stock-split:borsdata-{row['borsdata_id']}:date-{row['split_date']}"
+            ),
+            observed_on=str(row["split_date"]),
+            anchor="shares outstanding adjustment event",
+        )
+        for row in dcf_split_rows
+    )
     financial_mapper = FinancialMapper()
     annual_reports = []
     for row in annual_period_rows:
-        shares = _number(row["shares_outstanding"])
-        if shares is not None and split_events:
-            shares = adjust_historical_shares(
-                shares, str(row["period_end"])[:10], comparison_date, split_events
-            )
+        shares, _ = _adjusted_shares_with_splits(
+            _number(row["shares_outstanding"]),
+            str(row["period_end"]),
+            comparison_date,
+            split_rows,
+        )
         annual_reports.append(_report(row, shares_override=shares))
     latest_annual = annual_reports[-1] if annual_reports else None
     historical_annuals = annual_reports[:-1]
@@ -1414,6 +1457,7 @@ def load_results_for_company(
                 currency=(dcf_current_report.currency if dcf_current_report is not None else None),
                 market_cap=market_cap_for_hurdle,
                 market_price=latest_price,
+                market_split_references=dcf_split_refs,
                 roic=roic_for_dcf,
                 calibration_record=calibration_record,
             )
