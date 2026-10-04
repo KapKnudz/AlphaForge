@@ -345,6 +345,7 @@ _COMPOUND_ANNUAL_HEADING = re.compile(
     re.IGNORECASE,
 )
 _PUBLICATION_YEAR_CONTEXT = re.compile(r"\b(?:published|publication)\b", re.IGNORECASE)
+_EXPLICIT_COVERED_FISCAL_YEAR = re.compile(r"\bfor\s+fiscal\s+year\b", re.IGNORECASE)
 
 
 def _quarter_period(text: str) -> str | None:
@@ -469,7 +470,11 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
             continue
         heading = match.group(0)
-        if _COMPOUND_ANNUAL_HEADING.match(heading) and _PUBLICATION_YEAR_CONTEXT.search(heading):
+        if (
+            _COMPOUND_ANNUAL_HEADING.match(heading)
+            and _PUBLICATION_YEAR_CONTEXT.search(heading)
+            and not _EXPLICIT_COVERED_FISCAL_YEAR.search(heading)
+        ):
             continue
         period = None if annual else _quarter_period(heading)
         if not period:

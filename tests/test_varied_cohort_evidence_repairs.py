@@ -444,6 +444,16 @@ def test_forecast_inflections_through_public_evidence_cli(
             None,
         ),
         (
+            "publication-marked-covered-fiscal-year",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report publication for fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
             "covered-year-before-publication-date",
             "Annual and Sustainability Report",
             "Annual and Sustainability Report for 2025, published on 19 March 2026.",
