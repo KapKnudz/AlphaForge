@@ -820,6 +820,8 @@ def _adjusted_shares_with_splits(
         return None, ()
     start = date.fromisoformat(period_end[:10])
     end = date.fromisoformat(comparison_date[:10])
+    if start >= end:
+        return shares, ()
     applicable = tuple(
         row for row in split_rows if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
     )
