@@ -24,7 +24,7 @@ from alphaforge.evidence.mfn_taxonomy import (
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 16
+REPORT_RULES_VERSION = 17
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,11 @@ def report_rules_inputs() -> dict[str, Any]:
                 "heading_scope": "complete clause",
                 "publication_markers": ["published", "publication"],
                 "explicit_covered_year_cue": "for fiscal year <year>",
-                "covered_year_before_publication_cue": "for <year>",
+                "generic_covered_year_cue": {
+                    "pattern": "for <year>",
+                    "without_publication": "complete clause",
+                    "with_publication": "before first publication marker",
+                },
             },
         },
         "history_window": _history_window_values(),

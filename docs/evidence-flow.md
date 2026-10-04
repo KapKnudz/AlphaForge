@@ -432,7 +432,7 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v15 and evidence rules v15 deliberately
+confer current readiness. Report rules v17 and evidence rules v15 deliberately
 invalidate earlier annual range/fiscal interpretation, including the compound
 annual publication-year disambiguation, and off-feed rebuild behavior. A
 retained candidate with an older fingerprint is never selected or restamped:

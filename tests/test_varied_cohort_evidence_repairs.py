@@ -314,6 +314,88 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
         )
 
 
+def test_v16_retained_conflict_is_reinterpreted_without_mutating_history(
+    cli_lane, monkeypatch
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "UPGRADE",
+        "source_url": "https://mfn.se/a/upgrade/conflicting-covered-years",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": "Annual and Sustainability Report for 2025 and for fiscal year 2024.",
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    current_report_rules_inputs = report_rules.report_rules_inputs
+
+    def v16_report_rules_inputs():
+        inputs = current_report_rules_inputs()
+        inputs["version"] = 16
+        guard = inputs["fiscal_interpretation"]["compound_annual_publication_year_guard"]
+        generic_cue = guard.pop("generic_covered_year_cue")
+        guard["covered_year_before_publication_cue"] = generic_cue["pattern"]
+        return inputs
+
+    with monkeypatch.context() as historical:
+        historical.setattr(report_rules, "REPORT_RULES_VERSION", 16)
+        historical.setattr(report_rules, "report_rules_inputs", v16_report_rules_inputs)
+        historical.setattr(
+            ingest,
+            "resolve_fiscal_identity",
+            lambda _doc: ("2024", "covered_report_heading", None),
+        )
+        old_code, old_diagnostic, company_id = run(row)
+        old_packet = load_evidence_packet(conn, company_id, AS_OF)
+    assert old_code == 0 and old_diagnostic["status"] == "complete"
+    assert old_packet["report_rules"]["version"] == 16
+    old_fingerprint = old_packet["report_rules"]["fingerprint"]
+    old_observation = current_candidate_observations(
+        conn, company_id=company_id, as_of=AS_OF
+    )[0]
+    assert old_observation["fiscal_period"] == "2024"
+    assert old_observation["report_rules_fingerprint"] == old_fingerprint
+    old_observations = list(
+        conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id")
+    )
+    old_manifests = list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))
+    old_packets = list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))
+
+    code, diagnostic, _ = run(row, allow_pdf=False)
+    assert code == 0 and diagnostic["status"] == "complete"
+    assert diagnostic["pdf_fetch_attempts"] == 0
+    current_packet = load_evidence_packet(conn, company_id, AS_OF)
+    assert current_packet["report_rules"]["version"] == 17
+    assert current_packet["report_rules"]["fingerprint"] != old_fingerprint
+    assert current_packet["sources"][0]["fiscal_period"] is None
+    assert current_packet["sources"][0]["fiscal_period_source"] == "conflicting_covered_headings"
+    current_observation = current_candidate_observations(
+        conn, company_id=company_id, as_of=AS_OF
+    )[0]
+    assert current_observation["candidate_observation_id"] != old_observation[
+        "candidate_observation_id"
+    ]
+    assert current_observation["extraction_id"] == old_observation["extraction_id"]
+    assert (
+        current_observation["report_rules_fingerprint"]
+        == current_packet["report_rules"]["fingerprint"]
+    )
+    assert load_evidence_packet(
+        conn,
+        company_id,
+        AS_OF,
+        current_rules_fingerprint=old_fingerprint,
+    ) == old_packet
+    assert list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
+        : len(old_observations)
+    ] == old_observations
+    assert list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))[
+        : len(old_manifests)
+    ] == old_manifests
+    assert list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))[
+        : len(old_packets)
+    ] == old_packets
+
+
 @pytest.mark.parametrize("verb", ["forecasts", "forecasting"])
 @pytest.mark.parametrize(
     "title,body,expected,basis",
