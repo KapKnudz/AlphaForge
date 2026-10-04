@@ -95,6 +95,16 @@ def _dcf_unavailable_reason(missing_information: tuple[str, ...]) -> str | None:
     return None
 
 
+def _normalization_payload(normalization) -> dict[str, Any] | None:
+    if normalization is None:
+        return None
+    return {
+        "confidence": normalization.confidence,
+        "selected_window_years": normalization.selected_window_years,
+        "reasons": list(normalization.reasons),
+    }
+
+
 def _equity_qualification(equity_value: float) -> dict[str, Any]:
     negative = equity_value < 0
     return {
@@ -1331,6 +1341,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": ["net_debt"],
                     "warnings": list(dcf_policy_decision.warnings)
                     if dcf_policy_decision.warnings
@@ -1404,20 +1415,8 @@ def load_results_for_company(
                         ),
                         **_equity_qualification(dcf_value.equity_value),
                         "projected_cash_flows": [asdict(p) for p in dcf_value.projected_cash_flows],
-                        "normalization": (
-                            {
-                                "confidence": dcf_policy_decision.normalization.confidence
-                                if dcf_policy_decision.normalization
-                                else None,
-                                "selected_window_years": dcf_policy_decision.normalization.selected_window_years
-                                if dcf_policy_decision.normalization
-                                else None,
-                                "reasons": list(dcf_policy_decision.normalization.reasons)
-                                if dcf_policy_decision.normalization
-                                else None,
-                            }
-                            if dcf_policy_decision.normalization
-                            else None
+                        "normalization": _normalization_payload(
+                            dcf_policy_decision.normalization
                         ),
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
@@ -1644,6 +1643,7 @@ def load_results_for_company(
                     reverse_dcf["dcf"] = {
                         "available": False,
                         "policy_version": dcf_policy_decision.policy_version,
+                        "normalization": _normalization_payload(dcf_policy_decision.normalization),
                         "missing_information": [getattr(exc, "reason", "dcf_engine_failed")],
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
@@ -1655,6 +1655,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": ["current_revenue_or_shares"],
                     "warnings": list(dcf_policy_decision.warnings)
                     if dcf_policy_decision.warnings
@@ -1667,6 +1668,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": list(dcf_policy_decision.missing_information),
                     "unavailable_reason": _dcf_unavailable_reason(
                         dcf_policy_decision.missing_information
@@ -1687,6 +1689,9 @@ def load_results_for_company(
             reverse_dcf["dcf"] = {
                 "available": False,
                 "policy_version": decision.policy_version if decision is not None else None,
+                "normalization": _normalization_payload(
+                    decision.normalization if decision is not None else None
+                ),
                 "missing_information": list(decision.missing_information)
                 if decision is not None and decision.missing_information
                 else ["dcf_wiring_failed"],
@@ -1701,6 +1706,9 @@ def load_results_for_company(
         reverse_dcf["dcf"] = {
             "available": False,
             "policy_version": dcf_policy_decision.policy_version if dcf_policy_decision else None,
+            "normalization": _normalization_payload(
+                dcf_policy_decision.normalization if dcf_policy_decision else None
+            ),
             "missing_information": price_missing,
             "warnings": [],
         }
