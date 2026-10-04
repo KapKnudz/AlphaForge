@@ -816,6 +816,8 @@ def _adjusted_shares_with_splits(
     comparison_date: str,
     split_rows,
 ):
+    if shares is None:
+        return None, ()
     start = date.fromisoformat(period_end[:10])
     end = date.fromisoformat(comparison_date[:10])
     applicable = tuple(
@@ -823,7 +825,7 @@ def _adjusted_shares_with_splits(
         for row in split_rows
         if start < date.fromisoformat(str(row["split_date"])[:10]) <= end
     )
-    if shares is None or not applicable:
+    if not applicable:
         return shares, applicable
     adjusted = adjust_historical_shares(
         shares,

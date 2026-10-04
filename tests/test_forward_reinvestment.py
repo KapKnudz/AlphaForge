@@ -437,6 +437,24 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
         replay_run(conn, executed["run_id"])
 
 
+def test_missing_shares_do_not_parse_or_cite_unconsumed_split_dates():
+    conn, cid = setup(periods=[annual(2026, number_Of_Shares=None)])
+    upsert_stock_splits(
+        conn,
+        [{"insId": 991, "splitDate": "unknown", "splitType": "S", "ratio": "5:1"}],
+    )
+
+    result = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
+
+    assert result["current_shares"] is None
+    assert result["dcf"]["status"] == "insufficient_evidence"
+    assert result["dcf"]["missing_information"] == [
+        "positive market capitalization unavailable for required-return hurdle"
+    ]
+    assert result["dcf"]["assumption_provenance"] == {}
+    assert conn.execute("SELECT split_date FROM stock_splits").fetchone()[0] == "unknown"
+
+
 def test_split_adjusted_discount_provenance_is_retained_and_replayed(monkeypatch, tmp_path):
     periods = [
         annual(2024, 100, number_Of_Shares=90),
