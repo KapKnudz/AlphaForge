@@ -345,7 +345,10 @@ _COMPOUND_ANNUAL_HEADING = re.compile(
     re.IGNORECASE,
 )
 _PUBLICATION_YEAR_CONTEXT = re.compile(r"\b(?:published|publication)\b", re.IGNORECASE)
-_EXPLICIT_COVERED_FISCAL_YEAR = re.compile(r"\bfor\s+fiscal\s+year\b", re.IGNORECASE)
+_EXPLICIT_COVERED_FISCAL_YEAR = re.compile(
+    r"\bfor\s+fiscal\s+year\s+(20\d{2}(?:\s*/\s*(?:20)?\d{2})?)\b",
+    re.IGNORECASE,
+)
 
 
 def _quarter_period(text: str) -> str | None:
@@ -467,16 +470,29 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         # Match the heading itself and its own sentence prefix, not a preceding
         # independent forecast/comparator sentence. Use the label's delimiters.
         sentence_start = max(body.rfind(mark, 0, match.start()) for mark in ".!?\n") + 1
-        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
-            continue
         heading = match.group(0)
-        if (
-            _COMPOUND_ANNUAL_HEADING.match(heading)
-            and _PUBLICATION_YEAR_CONTEXT.search(heading)
-            and not _EXPLICIT_COVERED_FISCAL_YEAR.search(heading)
-        ):
+        explicit_period = None
+        evidence_end = match.end()
+        if _COMPOUND_ANNUAL_HEADING.match(heading):
+            sentence_end = min(
+                (
+                    position
+                    for mark in ".!?\n"
+                    if (position := body.find(mark, match.end())) >= 0
+                ),
+                default=len(body),
+            )
+            explicit_match = _EXPLICIT_COVERED_FISCAL_YEAR.search(
+                body[match.start() : sentence_end]
+            )
+            if explicit_match:
+                explicit_period = _year_period(explicit_match.group(1))
+                evidence_end = match.start() + explicit_match.end()
+            elif _PUBLICATION_YEAR_CONTEXT.search(heading):
+                continue
+        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start:evidence_end]):
             continue
-        period = None if annual else _quarter_period(heading)
+        period = explicit_period or (None if annual else _quarter_period(heading))
         if not period:
             period = _year_period(match.group(1))
         if period:

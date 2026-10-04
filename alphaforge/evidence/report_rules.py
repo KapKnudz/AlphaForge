@@ -89,7 +89,7 @@ def report_rules_inputs() -> dict[str, Any]:
             "forecast_context_guard": ["forecast", "forecasts", "forecasting"],
             "compound_annual_publication_year_guard": {
                 "publication_markers": ["published", "publication"],
-                "explicit_covered_year_cue": "for fiscal year",
+                "explicit_covered_year_cue": "for fiscal year <year>",
             },
         },
         "history_window": _history_window_values(),
