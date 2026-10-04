@@ -484,16 +484,35 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
                 default=len(body),
             )
             heading_clause = body[match.start() : sentence_end]
-            explicit_matches = list(_EXPLICIT_COVERED_FISCAL_YEAR.finditer(heading_clause))
+
+            def has_covered_context(cue: re.Match[str]) -> bool:
+                context_start = (
+                    max(
+                        heading_clause.rfind(delimiter, 0, cue.start())
+                        for delimiter in ",;"
+                    )
+                    + 1
+                )
+                return not _NON_COVERED_FISCAL_CONTEXT.search(
+                    heading_clause[context_start : cue.start()]
+                )
+
+            explicit_matches = [
+                cue
+                for cue in _EXPLICIT_COVERED_FISCAL_YEAR.finditer(heading_clause)
+                if has_covered_context(cue)
+            ]
             publication_match = _PUBLICATION_YEAR_CONTEXT.search(heading_clause)
-            covered_year_scope = (
-                heading_clause[: publication_match.start()]
-                if publication_match
-                else heading_clause
+            generic_context_end = (
+                publication_match.start() if publication_match else len(heading_clause)
             )
-            covered_matches = list(
-                _COVERED_YEAR_BEFORE_PUBLICATION.finditer(covered_year_scope)
-            )
+            covered_matches = [
+                cue
+                for cue in _COVERED_YEAR_BEFORE_PUBLICATION.finditer(
+                    heading_clause[:generic_context_end]
+                )
+                if has_covered_context(cue)
+            ]
             candidate_periods = {
                 period
                 for cue in (*explicit_matches, *covered_matches)
@@ -508,7 +527,11 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
                     conflicting_periods = candidate_periods
                 else:
                     explicit_period = next(iter(candidate_periods))
-        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start:evidence_end]):
+        if (
+            not explicit_period
+            and not conflicting_periods
+            and _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start:evidence_end])
+        ):
             continue
         if conflicting_periods:
             periods.update(conflicting_periods)

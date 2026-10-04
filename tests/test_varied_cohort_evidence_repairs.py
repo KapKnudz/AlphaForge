@@ -314,45 +314,79 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
         )
 
 
-def test_v16_retained_conflict_is_reinterpreted_without_mutating_history(
-    cli_lane, monkeypatch
+@pytest.mark.parametrize(
+    "historical_version,case,body,old_identity,current_period,current_basis",
+    [
+        (
+            16,
+            "conflicting-covered-years",
+            "Annual and Sustainability Report for 2025 and for fiscal year 2024.",
+            ("2024", "covered_report_heading", None),
+            None,
+            "conflicting_covered_headings",
+        ),
+        (
+            17,
+            "covered-year-before-outlook",
+            "Annual and Sustainability Report for 2025, outlook for fiscal year 2026.",
+            (None, "unresolved", "fiscal_identity_unresolved"),
+            "2025",
+            "covered_report_heading",
+        ),
+    ],
+)
+def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history(
+    cli_lane,
+    monkeypatch,
+    historical_version,
+    case,
+    body,
+    old_identity,
+    current_period,
+    current_basis,
 ):
     conn, run = cli_lane
     row = {
         "ticker": "UPGRADE",
-        "source_url": "https://mfn.se/a/upgrade/conflicting-covered-years",
+        "source_url": f"https://mfn.se/a/upgrade/{case}",
         "published_at": "2026-09-30T08:00:00Z",
-        "body": "Annual and Sustainability Report for 2025 and for fiscal year 2024.",
+        "body": body,
         "feed_tags": ["sub:report", "sub:report:annual"],
         "input": {"title": "Annual and Sustainability Report"},
     }
     current_report_rules_inputs = report_rules.report_rules_inputs
 
-    def v16_report_rules_inputs():
+    def historical_report_rules_inputs():
         inputs = current_report_rules_inputs()
-        inputs["version"] = 16
-        guard = inputs["fiscal_interpretation"]["compound_annual_publication_year_guard"]
-        generic_cue = guard.pop("generic_covered_year_cue")
-        guard["covered_year_before_publication_cue"] = generic_cue["pattern"]
+        inputs["version"] = historical_version
+        fiscal_rules = inputs["fiscal_interpretation"]
+        fiscal_rules.pop("non_covered_context_guard")
+        fiscal_rules["forecast_context_guard"] = ["forecast", "forecasts", "forecasting"]
+        if historical_version == 16:
+            guard = fiscal_rules["compound_annual_publication_year_guard"]
+            generic_cue = guard.pop("generic_covered_year_cue")
+            guard["covered_year_before_publication_cue"] = generic_cue["pattern"]
         return inputs
 
     with monkeypatch.context() as historical:
-        historical.setattr(report_rules, "REPORT_RULES_VERSION", 16)
-        historical.setattr(report_rules, "report_rules_inputs", v16_report_rules_inputs)
+        historical.setattr(report_rules, "REPORT_RULES_VERSION", historical_version)
+        historical.setattr(
+            report_rules, "report_rules_inputs", historical_report_rules_inputs
+        )
         historical.setattr(
             ingest,
             "resolve_fiscal_identity",
-            lambda _doc: ("2024", "covered_report_heading", None),
+            lambda _doc: old_identity,
         )
         old_code, old_diagnostic, company_id = run(row)
         old_packet = load_evidence_packet(conn, company_id, AS_OF)
     assert old_code == 0 and old_diagnostic["status"] == "complete"
-    assert old_packet["report_rules"]["version"] == 16
+    assert old_packet["report_rules"]["version"] == historical_version
     old_fingerprint = old_packet["report_rules"]["fingerprint"]
     old_observation = current_candidate_observations(
         conn, company_id=company_id, as_of=AS_OF
     )[0]
-    assert old_observation["fiscal_period"] == "2024"
+    assert old_observation["fiscal_period"] == old_identity[0]
     assert old_observation["report_rules_fingerprint"] == old_fingerprint
     old_observations = list(
         conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id")
@@ -364,10 +398,10 @@ def test_v16_retained_conflict_is_reinterpreted_without_mutating_history(
     assert code == 0 and diagnostic["status"] == "complete"
     assert diagnostic["pdf_fetch_attempts"] == 0
     current_packet = load_evidence_packet(conn, company_id, AS_OF)
-    assert current_packet["report_rules"]["version"] == 17
+    assert current_packet["report_rules"]["version"] == 18
     assert current_packet["report_rules"]["fingerprint"] != old_fingerprint
-    assert current_packet["sources"][0]["fiscal_period"] is None
-    assert current_packet["sources"][0]["fiscal_period_source"] == "conflicting_covered_headings"
+    assert current_packet["sources"][0]["fiscal_period"] == current_period
+    assert current_packet["sources"][0]["fiscal_period_source"] == current_basis
     current_observation = current_candidate_observations(
         conn, company_id=company_id, as_of=AS_OF
     )[0]
@@ -394,6 +428,46 @@ def test_v16_retained_conflict_is_reinterpreted_without_mutating_history(
     assert list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))[
         : len(old_packets)
     ] == old_packets
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "forecast",
+        "forecasts",
+        "forecasting",
+        "outlook",
+        "compared",
+        "comparison",
+        "previous",
+        "prognos",
+        "föregående",
+        "jämfört",
+        "jämförelse",
+    ],
+)
+@pytest.mark.parametrize(
+    "body_template",
+    [
+        "Annual and Sustainability Report for 2025, {marker} for fiscal year 2026.",
+        "Annual and Sustainability Report {marker} for fiscal year 2026, for 2025.",
+    ],
+)
+def test_non_covered_cue_preserves_covered_year(cli_lane, marker, body_template):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": "https://mfn.se/a/guard/non-covered-cue",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body_template.format(marker=marker),
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == "2025"
+    assert source["fiscal_period_source"] == "covered_report_heading"
 
 
 @pytest.mark.parametrize("verb", ["forecasts", "forecasting"])

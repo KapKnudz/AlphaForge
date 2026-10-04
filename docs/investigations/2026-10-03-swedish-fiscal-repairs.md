@@ -72,9 +72,10 @@ correctness certificate.
 annual class and recognizes compound annual body headings. `mfn_taxonomy.py`
 recognizes the compound English title as annual. Existing comparator,
 forecast, provider/title conflict, and contradictory-heading refusal remain.
-Published-head review also exposed inflected `forecasts` / `forecasting` in
-compound annual titles or headings; the fiscal-context guard now rejects those
-forecast years while retaining covered annual years and independent sentences.
+Published-head review also exposed non-covered forecast, outlook and comparator
+cues in compound annual titles or headings; the fiscal-context guard rejects
+year cues in each marker's local comma- or semicolon-delimited segment while
+retaining covered annual years in another segment and independent sentences.
 The initial repair advanced report and evidence interpretation so prior packets
 cannot confer current readiness. Current rule versions and later guards are
 owned by the
