@@ -486,14 +486,13 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
             heading_clause = body[match.start() : sentence_end]
             explicit_matches = list(_EXPLICIT_COVERED_FISCAL_YEAR.finditer(heading_clause))
             publication_match = _PUBLICATION_YEAR_CONTEXT.search(heading_clause)
-            covered_matches = (
-                list(
-                    _COVERED_YEAR_BEFORE_PUBLICATION.finditer(
-                        heading_clause[: publication_match.start()]
-                    )
-                )
+            covered_year_scope = (
+                heading_clause[: publication_match.start()]
                 if publication_match
-                else []
+                else heading_clause
+            )
+            covered_matches = list(
+                _COVERED_YEAR_BEFORE_PUBLICATION.finditer(covered_year_scope)
             )
             candidate_periods = {
                 period
