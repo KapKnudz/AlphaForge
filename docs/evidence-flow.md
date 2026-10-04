@@ -131,7 +131,9 @@ do not establish coverage. Only a year directly bound by the explicit phrase
 `for fiscal year <year>` identifies coverage when publication wording precedes
 it. A covered `for <year>` before later publication wording remains admissible,
 while publication-year-only headings remain unresolved regardless of whether
-the marker precedes or follows the date.
+the marker precedes or follows the date. All covered-year cues in the bounded
+clause are compared: contradictory years remain ambiguous rather than selecting
+one, while repeated cues for the same year preserve that identity.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use
