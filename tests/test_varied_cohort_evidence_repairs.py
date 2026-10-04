@@ -424,6 +424,16 @@ def test_forecast_inflections_through_public_evidence_cli(
             "fiscal_identity_unresolved",
         ),
         (
+            "publication-marker-after-date",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report 19 March 2026 publication.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
             "ordinary-annual-publication-label",
             "Annual Report publication",
             "Annual Report published on 19 March 2026.",

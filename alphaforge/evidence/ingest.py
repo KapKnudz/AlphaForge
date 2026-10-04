@@ -349,6 +349,10 @@ _EXPLICIT_COVERED_FISCAL_YEAR = re.compile(
     r"\bfor\s+fiscal\s+year\s+(20\d{2}(?:\s*/\s*(?:20)?\d{2})?)\b",
     re.IGNORECASE,
 )
+_COVERED_YEAR_BEFORE_PUBLICATION = re.compile(
+    r"\bfor\s+(20\d{2}(?:\s*/\s*(?:20)?\d{2})?)\b",
+    re.IGNORECASE,
+)
 
 
 def _quarter_period(text: str) -> str | None:
@@ -482,14 +486,24 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
                 ),
                 default=len(body),
             )
-            explicit_match = _EXPLICIT_COVERED_FISCAL_YEAR.search(
-                body[match.start() : sentence_end]
+            heading_clause = body[match.start() : sentence_end]
+            explicit_match = _EXPLICIT_COVERED_FISCAL_YEAR.search(heading_clause)
+            publication_match = _PUBLICATION_YEAR_CONTEXT.search(heading_clause)
+            covered_match = (
+                _COVERED_YEAR_BEFORE_PUBLICATION.search(
+                    heading_clause[: publication_match.start()]
+                )
+                if publication_match
+                else None
             )
             if explicit_match:
                 explicit_period = _year_period(explicit_match.group(1))
                 evidence_end = match.start() + explicit_match.end()
-            elif _PUBLICATION_YEAR_CONTEXT.search(heading):
-                continue
+            elif publication_match:
+                if not covered_match:
+                    continue
+                explicit_period = _year_period(covered_match.group(1))
+                evidence_end = match.start() + covered_match.end()
         if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start:evidence_end]):
             continue
         period = explicit_period or (None if annual else _quarter_period(heading))

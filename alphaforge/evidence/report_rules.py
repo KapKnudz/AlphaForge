@@ -88,8 +88,10 @@ def report_rules_inputs() -> dict[str, Any]:
             "compound_annual_heading": "annual-and-sustainability-report",
             "forecast_context_guard": ["forecast", "forecasts", "forecasting"],
             "compound_annual_publication_year_guard": {
+                "heading_scope": "complete clause",
                 "publication_markers": ["published", "publication"],
                 "explicit_covered_year_cue": "for fiscal year <year>",
+                "covered_year_before_publication_cue": "for <year>",
             },
         },
         "history_window": _history_window_values(),

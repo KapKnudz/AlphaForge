@@ -126,10 +126,12 @@ interpretation before the broad `report_kind` filter class: an English
 Compound `Annual and Sustainability Report` titles and guarded body headings
 identify the covered annual year/range under the same forecast, comparator and
 conflict safeguards as `Annual Report`. For that compound body heading,
-publication markers alone do not establish coverage: only a year directly
-bound by the explicit phrase `for fiscal year <year>` identifies coverage when
-publication wording precedes it. A covered year before a later publication date
-remains admissible, while a publication-year-only heading remains unresolved.
+the complete bounded heading clause is inspected, and publication markers alone
+do not establish coverage. Only a year directly bound by the explicit phrase
+`for fiscal year <year>` identifies coverage when publication wording precedes
+it. A covered `for <year>` before later publication wording remains admissible,
+while publication-year-only headings remain unresolved regardless of whether
+the marker precedes or follows the date.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use
