@@ -14,6 +14,7 @@ from alphaforge.core.valuation.dcf_contract import (
     EvidenceReference,
 )
 from alphaforge.core.valuation.reinvestment import (
+    CALIBRATION_EVIDENCE_OPERANDS,
     ECONOMIC_CONVENTION,
     ReinvestmentCalibration,
     qualify_calibration,
@@ -450,7 +451,8 @@ class DcfAssumptionPolicy:
         if not isinstance(sources, dict):
             return ()
         references = []
-        for operand, source in sorted(sources.items()):
+        for operand in CALIBRATION_EVIDENCE_OPERANDS:
+            source = sources.get(operand)
             if not isinstance(source, dict):
                 continue
             source_id = source.get("source_id")

@@ -317,7 +317,18 @@ def test_average_history_and_future_assumption_are_distinct():
 def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2024, 100), annual(2025, 110), annual(2026, 121)])
     packet(conn, cid)
-    identity = synthetic_calibration_fixture(conn, cid)
+    record = synthetic_record()
+    record["company_id"] = cid
+    record["sources"]["unused"] = {
+        "source_id": "synthetic:unqualified-extra",
+        "url": "https://example.invalid/unqualified-extra",
+    }
+    identity = append_reinvestment_calibration(
+        conn,
+        cid,
+        record,
+        as_of=date.fromisoformat(CUTOFF),
+    )
     live = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
     assert live["dcf"]["available"]
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
@@ -346,6 +357,10 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert {ref["source_id"] for ref in calibration_refs} == {
         source["source_id"] for source in record_sources.values()
     }
+    assert provenance["calibration_identity"]["evidence_references"] == calibration_refs
+    assert "synthetic:unqualified-extra" not in {
+        ref["source_id"] for ref in calibration_refs
+    }
     assert provenance["reinvestment_return"]["limitations"]
     json.dumps(value, allow_nan=False)
     for axis, status in (("ebit_margin", "unavailable"), ("terminal_growth", "not_identifiable")):
@@ -360,7 +375,7 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     retained_record = json.loads(body["tables"]["reinvestment_calibrations"][0]["record_json"])
     assert body["tables"]["reinvestment_calibrations"][0]["identity"] == identity
     assert {ref["source_id"] for ref in calibration_refs} == {
-        source["source_id"] for source in retained_record["sources"].values()
+        retained_record["sources"][operand]["source_id"] for operand in record_sources
     }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
