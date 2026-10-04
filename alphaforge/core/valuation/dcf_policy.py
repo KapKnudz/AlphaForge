@@ -614,7 +614,7 @@ class DcfAssumptionPolicy:
     ) -> NormalizationDiagnostics:
         if roic is not None:
             return diagnostics
-        reason = "positive Börsdata ROIC unavailable for reinvestment calibration"
+        reason = "qualified reinvestment calibration unavailable"
         return replace(
             diagnostics,
             confidence="low",
