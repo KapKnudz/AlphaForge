@@ -20,7 +20,7 @@ packet. Neither command currently generates a thesis.
 
 | Contract | Authority and implementation boundary |
 | --- | --- |
-| Acquisition, stored identities, cutoff selection, calculation wiring, ranking and exports | [Deterministic flow](deterministic-flow.md); [`cli/main.py`](../alphaforge/cli/main.py) composes providers, persistence and core calculators through [`cli/ranking_loader.py`](../alphaforge/cli/ranking_loader.py). |
+| Acquisition, stored identities, cutoff selection, calculation wiring, ranking and exports | [Deterministic flow](deterministic-flow.md); [`cli/main.py`](../alphaforge/cli/main.py) owns CLI composition, [`cli/kpi_sync.py`](../alphaforge/cli/kpi_sync.py) owns the synchronous per-company KPI workflow, and [`cli/ranking_loader.py`](../alphaforge/cli/ranking_loader.py) composes stored inputs with core calculators. |
 | Valuation formulas, assumptions, units at the valuation seam and policy versions | [Valuation](valuation.md); [`core/valuation/`](../alphaforge/core/valuation/). The heuristic score and auditable DCF remain separate outputs. |
 | MFN identity, retained artifacts, immutable observations, selection, completeness and packet hashing | [Textual-evidence flow](evidence-flow.md); [`evidence/flow.py`](../alphaforge/evidence/flow.py), [`evidence/manifest.py`](../alphaforge/evidence/manifest.py), [`evidence/manifest_store.py`](../alphaforge/evidence/manifest_store.py) and [`db/evidence_repository.py`](../alphaforge/db/evidence_repository.py). |
 | Live SQLite schema and upgrades | [`db/alphaforge.sqlite.sql`](../db/alphaforge.sqlite.sql), [`db/migrations/`](../db/migrations/) and [`db/migrations.py`](../alphaforge/db/migrations.py), not the historical plan's DDL sketch. |
