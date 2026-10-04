@@ -486,15 +486,17 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
             heading_clause = body[match.start() : sentence_end]
 
             def has_covered_context(cue: re.Match[str]) -> bool:
-                context_start = (
+                cue_start = match.start() + cue.start()
+                context_start = max(
+                    sentence_start,
                     max(
-                        heading_clause.rfind(delimiter, 0, cue.start())
+                        body.rfind(delimiter, sentence_start, cue_start)
                         for delimiter in ",;"
                     )
-                    + 1
+                    + 1,
                 )
                 return not _NON_COVERED_FISCAL_CONTEXT.search(
-                    heading_clause[context_start : cue.start()]
+                    body[context_start:cue_start]
                 )
 
             explicit_matches = [

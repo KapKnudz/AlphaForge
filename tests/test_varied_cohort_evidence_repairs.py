@@ -333,6 +333,14 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
             "2025",
             "covered_report_heading",
         ),
+        (
+            18,
+            "forecast-before-heading",
+            "Forecast Annual and Sustainability Report for fiscal year 2026.",
+            ("2026", "covered_report_heading", None),
+            None,
+            "unresolved",
+        ),
     ],
 )
 def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history(
@@ -360,8 +368,17 @@ def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history
         inputs = current_report_rules_inputs()
         inputs["version"] = historical_version
         fiscal_rules = inputs["fiscal_interpretation"]
-        fiscal_rules.pop("non_covered_context_guard")
-        fiscal_rules["forecast_context_guard"] = ["forecast", "forecasts", "forecasting"]
+        if historical_version <= 17:
+            fiscal_rules.pop("non_covered_context_guard")
+            fiscal_rules["forecast_context_guard"] = [
+                "forecast",
+                "forecasts",
+                "forecasting",
+            ]
+        else:
+            fiscal_rules["non_covered_context_guard"]["covered_cue_context"] = (
+                "comma-or-semicolon-delimited local segment"
+            )
         if historical_version == 16:
             guard = fiscal_rules["compound_annual_publication_year_guard"]
             generic_cue = guard.pop("generic_covered_year_cue")
@@ -398,7 +415,7 @@ def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history
     assert code == 0 and diagnostic["status"] == "complete"
     assert diagnostic["pdf_fetch_attempts"] == 0
     current_packet = load_evidence_packet(conn, company_id, AS_OF)
-    assert current_packet["report_rules"]["version"] == 18
+    assert current_packet["report_rules"]["version"] == 19
     assert current_packet["report_rules"]["fingerprint"] != old_fingerprint
     assert current_packet["sources"][0]["fiscal_period"] == current_period
     assert current_packet["sources"][0]["fiscal_period_source"] == current_basis
@@ -468,6 +485,60 @@ def test_non_covered_cue_preserves_covered_year(cli_lane, marker, body_template)
     source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
     assert source["fiscal_period"] == "2025"
     assert source["fiscal_period_source"] == "covered_report_heading"
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "forecast",
+        "forecasts",
+        "forecasting",
+        "outlook",
+        "compared",
+        "comparison",
+        "previous",
+        "prognos",
+        "föregående",
+        "jämfört",
+        "jämförelse",
+    ],
+)
+@pytest.mark.parametrize(
+    "body_template,expected,basis,limitation",
+    [
+        (
+            "{marker} Annual and Sustainability Report for fiscal year 2026.",
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "{marker}, Annual and Sustainability Report for fiscal year 2026.",
+            "2026",
+            "covered_report_heading",
+            None,
+        ),
+    ],
+)
+def test_non_covered_sentence_prefix_respects_local_delimiter(
+    cli_lane, marker, body_template, expected, basis, limitation
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": "https://mfn.se/a/guard/non-covered-prefix",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body_template.format(marker=marker),
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == expected
+    assert source["fiscal_period_source"] == basis
+    if limitation:
+        assert limitation in diagnostic["limitations"]
 
 
 @pytest.mark.parametrize("verb", ["forecasts", "forecasting"])

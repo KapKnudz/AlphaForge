@@ -24,7 +24,7 @@ from alphaforge.evidence.mfn_taxonomy import (
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 18
+REPORT_RULES_VERSION = 19
 
 
 @dataclass(frozen=True)
@@ -100,7 +100,7 @@ def report_rules_inputs() -> dict[str, Any]:
                     "jämfört",
                     "jämförelse",
                 ],
-                "covered_cue_context": "comma-or-semicolon-delimited local segment",
+                "covered_cue_context": "sentence-local comma-or-semicolon-delimited segment",
             },
             "compound_annual_publication_year_guard": {
                 "heading_scope": "complete clause",

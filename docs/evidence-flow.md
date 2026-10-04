@@ -132,9 +132,9 @@ do not establish coverage. Only a year directly bound by the explicit phrase
 it. A covered `for <year>` before later publication wording remains admissible,
 while publication-year-only headings remain unresolved regardless of whether
 the marker precedes or follows the date. Within the bounded clause, an outlook,
-forecast or comparator marker excludes year cues in its comma- or
-semicolon-delimited local segment without discarding covered cues in another
-segment. All remaining covered-year cues are compared:
+forecast or comparator marker excludes year cues in its sentence-local comma-
+or semicolon-delimited segment, including text before the report label, without
+discarding covered cues in another segment. All remaining covered-year cues are compared:
 contradictory years remain ambiguous rather than selecting one, while repeated
 cues for the same year preserve that identity.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
@@ -435,7 +435,7 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v18 and evidence rules v15 deliberately
+confer current readiness. Report rules v19 and evidence rules v15 deliberately
 invalidate earlier annual range/fiscal interpretation, including the compound
 annual publication-year disambiguation, and off-feed rebuild behavior. A
 retained candidate with an older fingerprint is never selected or restamped:

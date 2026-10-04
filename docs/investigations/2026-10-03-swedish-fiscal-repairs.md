@@ -74,8 +74,9 @@ recognizes the compound English title as annual. Existing comparator,
 forecast, provider/title conflict, and contradictory-heading refusal remain.
 Published-head review also exposed non-covered forecast, outlook and comparator
 cues in compound annual titles or headings; the fiscal-context guard rejects
-year cues in each marker's local comma- or semicolon-delimited segment while
-retaining covered annual years in another segment and independent sentences.
+year cues in each marker's sentence-local comma- or semicolon-delimited segment,
+including context before the report label, while retaining covered annual years
+in another segment and independent sentences.
 The initial repair advanced report and evidence interpretation so prior packets
 cannot confer current readiness. Current rule versions and later guards are
 owned by the
