@@ -42,29 +42,27 @@ fiscal repair. Financial selection, metrics and the entire reverse-DCF result
 remain equal, while observations/fingerprints/packet hashes change. This is a
 boundary regression, **not proof that the live DCF is correct**.
 
-Retained source reconciliation identifies remaining numerical questions for
-the separate DCF/source scout, without edits here:
+Retained source reconciliation identifies provider/source-definition questions
+outside this fiscal repair:
 
 - CLAS: source full-year operating margin is 12.2% (p1 year-end); current LTM
   is 12.7% (p1 Q1). Thus a 21.1% implied margin is not its observed margin.
-  This repair does not establish why that implied result arose.
 - EVO: p8 annual distinguishes net revenues 2,066.540 EURm from total
   operating revenues 2,118.207 EURm (including other income). The acquired
   revenue uses total operating revenues, converted into SEK; that is not
-  issuer EUR net-sales growth. The 3.84% terminal-growth output still needs
-  separate assumption/solve assessment.
+  issuer EUR net-sales growth.
 - MIPS: source FY EBIT 156 MSEK differs from adjusted EBIT 160 (Q4 p2);
   current LTM EBIT 229, revenue 665 (Q2 p2). Compound title identity does not
-  supply/overwrite these numerical rows or explain the no-solution result.
+  supply or overwrite these numerical rows.
 - BACTI: source annual total revenues 228.8 differ from net sales 215.9
   MSEK (year-end p1). Current RTM total revenue 217.9 and loss 8.8 are on
-  Q2 p1. These are provider/source definition issues, not repaired here;
-  no-solution direction/distance remains for the separate DCF audit.
+  Q2 p1. These are provider/source definition issues, not repaired here.
 
-Older provider Dec30 annual ends, exchange/share/price verification,
-terminal assumptions and solve-bound diagnostics remain outside this change.
-Exact replay is a determinism control, never an issuer-source or investment
-correctness certificate.
+Older provider Dec30 annual ends and exchange/share/price verification remain
+outside this fiscal repair. Reverse-DCF availability, assumptions and solve
+diagnostics are owned by [the valuation contract](../valuation.md). Exact
+replay is a determinism control, never an issuer-source or investment correctness
+certificate.
 
 ## Implementation and verification
 

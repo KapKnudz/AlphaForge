@@ -387,9 +387,7 @@ def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history
 
     with monkeypatch.context() as historical:
         historical.setattr(report_rules, "REPORT_RULES_VERSION", historical_version)
-        historical.setattr(
-            report_rules, "report_rules_inputs", historical_report_rules_inputs
-        )
+        historical.setattr(report_rules, "report_rules_inputs", historical_report_rules_inputs)
         historical.setattr(
             ingest,
             "resolve_fiscal_identity",
@@ -400,9 +398,7 @@ def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history
     assert old_code == 0 and old_diagnostic["status"] == "complete"
     assert old_packet["report_rules"]["version"] == historical_version
     old_fingerprint = old_packet["report_rules"]["fingerprint"]
-    old_observation = current_candidate_observations(
-        conn, company_id=company_id, as_of=AS_OF
-    )[0]
+    old_observation = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[0]
     assert old_observation["fiscal_period"] == old_identity[0]
     assert old_observation["report_rules_fingerprint"] == old_fingerprint
     old_observations = list(
@@ -419,32 +415,43 @@ def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history
     assert current_packet["report_rules"]["fingerprint"] != old_fingerprint
     assert current_packet["sources"][0]["fiscal_period"] == current_period
     assert current_packet["sources"][0]["fiscal_period_source"] == current_basis
-    current_observation = current_candidate_observations(
-        conn, company_id=company_id, as_of=AS_OF
-    )[0]
-    assert current_observation["candidate_observation_id"] != old_observation[
-        "candidate_observation_id"
+    current_observation = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[
+        0
     ]
+    assert (
+        current_observation["candidate_observation_id"]
+        != old_observation["candidate_observation_id"]
+    )
     assert current_observation["extraction_id"] == old_observation["extraction_id"]
     assert (
         current_observation["report_rules_fingerprint"]
         == current_packet["report_rules"]["fingerprint"]
     )
-    assert load_evidence_packet(
-        conn,
-        company_id,
-        AS_OF,
-        current_rules_fingerprint=old_fingerprint,
-    ) == old_packet
-    assert list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
-        : len(old_observations)
-    ] == old_observations
-    assert list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))[
-        : len(old_manifests)
-    ] == old_manifests
-    assert list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))[
-        : len(old_packets)
-    ] == old_packets
+    assert (
+        load_evidence_packet(
+            conn,
+            company_id,
+            AS_OF,
+            current_rules_fingerprint=old_fingerprint,
+        )
+        == old_packet
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
+            : len(old_observations)
+        ]
+        == old_observations
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))[
+            : len(old_manifests)
+        ]
+        == old_manifests
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))[: len(old_packets)]
+        == old_packets
+    )
 
 
 @pytest.mark.parametrize(
