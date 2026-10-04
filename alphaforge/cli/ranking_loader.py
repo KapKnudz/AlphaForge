@@ -848,6 +848,8 @@ def _report(row, *, shares_override: float | None = None) -> Report:
         conversion_mode=row["conversion_mode"],
         conversion_target_currency=_currency_code(row["conversion_target_currency"]),
         currency_ratio=_number(row["currency_ratio"]),
+        company_id=int(row["company_id"]),
+        period_type=str(row["period_type"]),
     )
 
 

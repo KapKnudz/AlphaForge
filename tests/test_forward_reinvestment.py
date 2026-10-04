@@ -391,6 +391,53 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
         replay_run(conn, executed["run_id"])
 
 
+def test_report_provenance_uses_exact_consumed_windows():
+    periods = [annual(year, 100 * 1.05 ** (year - 2017)) for year in range(2017, 2027)]
+    conn, cid = setup(periods=periods)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    provenance = value["assumption_provenance"]
+
+    def expected(years):
+        return {
+            f"financial-period:company-{cid}:type-year:end-{year}-03-31"
+            for year in years
+        }
+
+    growth_refs = provenance["revenue_growth"]["evidence_references"]
+    margin_refs = provenance["ebit_margin"]["evidence_references"]
+    assert {ref["source_id"] for ref in growth_refs} == expected(range(2023, 2027))
+    assert {ref["source_id"] for ref in margin_refs} == expected(range(2022, 2027))
+    assert provenance["ebit_margin_start"]["evidence_references"] == margin_refs
+
+
+def test_report_provenance_identity_distinguishes_period_types():
+    periods = [
+        annual(2025, 110, operating_Income=None),
+        annual(2026, 121, operating_Income=None),
+        annual(2026, 121, period_type="r12", operating_Income=24.2),
+    ]
+    conn, cid = setup(periods=periods)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    provenance = value["assumption_provenance"]
+    growth_ids = {
+        ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]
+    }
+    margin_ids = {
+        ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]
+    }
+    annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
+    r12_id = f"financial-period:company-{cid}:type-r12:end-2026-03-31"
+    assert annual_id in growth_ids
+    assert margin_ids == {r12_id}
+    assert annual_id != r12_id
+
+
 def test_v18_upgrade_adds_empty_calibration_lane_without_backfill():
     from alphaforge.db.migrations import migrate
 

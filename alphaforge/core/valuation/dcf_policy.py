@@ -153,7 +153,7 @@ class DcfAssumptionPolicy:
                 missing_information=required_return.missing_information,
             )
 
-        growth = self._historical_revenue_growth(
+        growth, growth_reports = self._historical_revenue_growth(
             latest_annual_report,
             historical_annual_reports,
         )
@@ -184,7 +184,14 @@ class DcfAssumptionPolicy:
                 required_return=required_return,
                 missing_information=("normalized EBIT history unavailable",),
             )
-        ebit_margin, fcf_margin, normalization, economics_source, economics_warnings = economics
+        (
+            ebit_margin,
+            fcf_margin,
+            normalization,
+            economics_source,
+            economics_warnings,
+            operating_reports,
+        ) = economics
         warnings.extend(economics_warnings)
         calibration = None
         if calibration_record is not None:
@@ -314,13 +321,8 @@ class DcfAssumptionPolicy:
             ),
         }
         annual_refs = self._report_evidence_references(
-            [*historical_annual_reports, latest_annual_report],
+            growth_reports,
             "annual revenue operands",
-        )
-        operating_reports = (
-            [current_report]
-            if economics_source == "current R12 EBIT margin fallback"
-            else [*historical_annual_reports, latest_annual_report]
         )
         operating_refs = self._report_evidence_references(
             operating_reports,
@@ -419,14 +421,15 @@ class DcfAssumptionPolicy:
 
     @staticmethod
     def _report_evidence_references(
-        reports: list[Report | None], anchor: str
+        reports: list[Report] | tuple[Report, ...], anchor: str
     ) -> tuple[EvidenceReference, ...]:
         references = {}
         for report in reports:
-            if report is None:
-                continue
             period = report.period_end.isoformat() if report.period_end else f"year-{report.year}"
-            source_id = f"financial-period:{period}:period-{report.period}"
+            source_id = (
+                f"financial-period:company-{report.company_id}:type-{report.period_type}:"
+                f"end-{period}"
+            )
             raw = report.raw_payload or {}
             source_url = raw.get("source_url") or raw.get("url")
             references[source_id] = EvidenceReference(
@@ -562,6 +565,7 @@ class DcfAssumptionPolicy:
             NormalizationDiagnostics,
             str,
             tuple[str, ...],
+            tuple[Report, ...],
         ]
         | None
     ):
@@ -621,6 +625,7 @@ class DcfAssumptionPolicy:
             warning
             + ("reported FCF includes aggregate investing cash flow and is diagnostic only",)
             + diagnostics.reasons,
+            tuple(selected),
         )
 
     @staticmethod
@@ -781,9 +786,9 @@ class DcfAssumptionPolicy:
         cls,
         latest: Report | None,
         history: list[Report],
-    ) -> float | None:
+    ) -> tuple[float | None, tuple[Report, ...]]:
         if latest is None or latest.revenue is None or latest.revenue <= 0:
-            return None
+            return None, ()
 
         suffix = [latest]
         for report in reversed(history):
@@ -798,11 +803,11 @@ class DcfAssumptionPolicy:
             if len(suffix) == 4:
                 break
         if len(suffix) < 2:
-            return None
+            return None, ()
 
         baseline = suffix[-1]
         periods = latest.year - baseline.year if latest.year is not None else len(suffix) - 1
-        return cagr(baseline.revenue, latest.revenue, periods)
+        return cagr(baseline.revenue, latest.revenue, periods), tuple(suffix)
 
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:

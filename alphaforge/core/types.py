@@ -44,6 +44,8 @@ class Report:
     conversion_target_currency: str | None = None
     currency_ratio: float | None = None
     raw_payload: dict | None = None
+    company_id: int | None = None
+    period_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.ebit is None:
