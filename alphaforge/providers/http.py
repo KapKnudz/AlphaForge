@@ -11,6 +11,16 @@ import requests
 MAX_RETRIES = 3
 
 
+def sanitize_provider_error(exc: BaseException) -> str:
+    """Keep provider failures useful without exposing response bodies or URLs."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    name = type(exc).__name__
+    if status is None:
+        return name
+    return f"{name} status={status}"
+
+
 def request_with_retry(
     method: str,
     url: str,

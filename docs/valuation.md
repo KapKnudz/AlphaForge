@@ -135,9 +135,10 @@ with ≥5 positive history points; before the `net_debt` fix they were always
 
 Live `GET /v1/instruments/{id}/kpis/{kpiId}/{reportType}/{priceType}/history`
 returns 10 rows for 37/42, but `GET /v1/instruments/{id}/kpis/{reportType}/summary`
-omits them (Clas live: 42 ids, no 37/42). `alphaforge/cli/main.py:cmd_sync`
-now fetches `history` for `KpiIds.ROIC` + `NET_DEBT_EBITDA` directly even when
-summary omits them; genuinely unavailable KPIs (400/empty) remain missing
+omits them (Clas live: 42 ids, no 37/42). The per-company workflow in
+`alphaforge/cli/kpi_sync.py` fetches `history` for `KpiIds.ROIC` +
+`NET_DEBT_EBITDA` directly even when summary omits them; genuinely unavailable
+KPIs (400/empty) remain missing
 without error.
 
 ## Integrity
