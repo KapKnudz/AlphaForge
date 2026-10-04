@@ -177,9 +177,7 @@ class ReverseDcfEngine:
         )
 
     @staticmethod
-    def solve_availability(inputs: ReverseDcfInputs, assumption: ImpliedAssumption) -> str | None:
-        if inputs.assumptions.economic_convention != ECONOMIC_CONVENTION:
-            return None
+    def solve_availability(_inputs: ReverseDcfInputs, assumption: ImpliedAssumption) -> str | None:
         if assumption == "ebit_margin":
             return "unavailable_constant_margin_only"
         if assumption == "terminal_growth":
