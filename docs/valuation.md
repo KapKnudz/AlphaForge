@@ -12,9 +12,9 @@ ranking never masquerades as a discounted-cash-flow.
   `pe`/`ev_ebit` percentiles, and historical guardrails
   (`ev_ebit_guardrail_low/high` requiring ≥5 positive `ev_ebit` history).
   The margin-of-safety is a yield spread, not a DCF.
-* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-10-03-dcf-availability-diagnostics-v18"`
-  (v18 records the dated-positive-ROIC availability contract and reverse-DCF
-  diagnostic output; `valuation_score` remains heuristic and DCF separate).
+* **Model version:** `RankingEngine.RANKING_MODEL_VERSION = "2026-10-04-dcf-forward-reinvestment-v19"`
+  (v19 records qualified forward reinvestment and restricted solve availability;
+  `valuation_score` remains heuristic and DCF separate).
   Financial selection is `verified-dates-consecutive-annual-denomination-v1` in the loader;
   [the deterministic flow](deterministic-flow.md#3-cutoff-selection-and-calculation-wiring)
   owns its date, freshness, refusal-provenance and export contract.
@@ -47,7 +47,7 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v13-dated-roic-availability-diagnostics"`) — historical growth
+  (`VERSION = "reverse-dcf-v14-qualified-forward-reinvestment"`) — historical growth
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
@@ -55,26 +55,56 @@ ranking never masquerades as a discounted-cash-flow.
   in assumption sources, never a CAGR across that uncertain span.
   5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
-  EBIT margin revenue-weighted over 3–5 annuals, reinvestment from
-  **usable dated finite positive Börsdata ROIC (KPI 37, percent)** divided by 100 internally, discount
-  from `RequiredReturnPolicy` market-cap buckets in **absolute SEK**
-  (market cap from `price × shares` is in MSEK — scaled ×1e6 for bucket
-  selection). Without usable dated finite positive ROIC, ordinary growth-based
-  FCFF is unavailable with `missing_information=("dated_positive_roic",)`;
-  no zero-reinvestment value or implied roots are emitted. Negative NOPAT with
-  ROIC-based reinvestment is unavailable rather than described as cash released
-  by negative investment. Report `currency` at calculation is verified
+  EBIT margin revenue-weighted over 3–5 annuals. This slice requires constant
+  positive margins: the current and normalized margin must agree; it does not
+  price margin expansion from revenue growth. Reinvestment requires a **qualified
+  own-company operating-capital/earnings calibration**. Dated provider ROIC alone
+  is insufficient. `reinvestment.py` validates fiscal coverage, source content
+  hashes/anchors, publication/observation dates, denomination, normalized EBIT,
+  tax and operating-capital endpoints, own-company identity, consolidation perimeter,
+  matching reported IFRS16 EBIT/debt basis and explicit accounting review.
+  The initial disclosure lane requires matched original currency (SEK for this
+  hurdle policy); capital/earnings FX conversion is not inferred or implemented. Historical average return is NOPAT / average beginning-and-ending
+  operating capital. Initial future marginal return equals that ratio but is
+  explicitly a `company_history_calibrated_assumption`, never an observed future
+  return. This numerical consistency check cannot authenticate an analyst's
+  source interpretation. There is no automatic extraction, sector prior or backfill.
+  Discount comes from `RequiredReturnPolicy` market-cap buckets in **absolute SEK**
+  (market cap is MSEK, scaled ×1e6). It is labeled
+  `discount_rate_proxy_for_cost_of_capital`, not measured company WACC.
+  Without calibration, FCFF remains unavailable: `dated_positive_roic` is the
+  retained missing-evidence reason when no usable provider return exists;
+  `admissible_reinvestment_calibration` marks scalar-only or rejected calibration
+  cases. Neither produces values or roots. Zero/negative profits, varying margins,
+  capital contraction and unsupported external financing are refused; negative
+  profits do not receive cash-tax refunds or negative-investment cash releases. Report `currency` at calculation is verified
   values currency; original currency, conversion mode/target and original→target
   ratio remain separate provenance. Compatible non-SEK raw multiples may be
   available, but DCF retains its SEK-only required-return refusal and does not
   convert report values or ratios.
 * **Engine:** `alphaforge/core/valuation/reverse_dcf.py`
-  (`ReverseDcfEngine.value/solve`) — projects `revenue → ebit → nopat → fcff`
-  with linear fade of `revenue_growth` and `ebit_margin`, then
-  `terminal_value = terminal_fcff / (discount - terminal_growth)`.
+  (`ReverseDcfEngine.value/solve`) — convention
+  `forward-funded-constant-margin-hurdle-convergence-v1`. Year t spends
+  `I_t=(NOPAT_(t+1)-NOPAT_t)/q_(t+1)` at year end to fund the next year;
+  `FCFF_t=NOPAT_t-I_t`. Year-one operating capital is already installed at the
+  valuation boundary, a required reviewed premise. No investment cap or automatic
+  capital release is applied. Replacement capacity must be evidenced in calibration;
+  net growth investment does not mean replacement assets are free.
+  Returns fade linearly over the five explicit funding intervals to the discount
+  hurdle proxy, reaching it in the final interval and remaining equal thereafter.
+  Year n funds n+1 using qT=r. Terminal year n+1 funds n+2:
+  `I_(n+1)=NOPAT_(n+1)*gT/r`, `TV_n=FCFF_(n+1)/(r-gT)`.
+  Thus `TV_n=NOPAT_(n+1)/r`, but still refuse gT≥r or nonfinite/nonpositive
+  rates before division. Export terminal NOPAT, investment and FCFF separately,
+  along with distance to the Gordon pole; guard finite outputs.
+  Converging to the hurdle is deliberately conservative and can understate
+  high-return companies such as Mips and Evolution.
+  The direct engine's explicitly named `legacy-capped-revenue-growth-v13`
+  convention remains solely for historical arithmetic controls, never the public
+  loader. Current exact replay cannot reinterpret incompatible old runs.
 * **Wiring:** `alphaforge/cli/ranking_loader.py:load_results_for_company`
   builds `DcfPolicyDecision` from validated consecutive annual fiscal history
-  and dated `kpi_observations` (37), then `ReverseDcfEngine` → `DcfValue`
+  and analyst-reviewed `reinvestment_calibrations`, then `ReverseDcfEngine` → `DcfValue`
   (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
   with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
   cutoff-filtered verified-date contract, **not historical-known-then PIT**.
@@ -83,18 +113,22 @@ ranking never masquerades as a discounted-cash-flow.
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, `assumptions`,
   `assumption_sources`, `required_return {size_bucket, required_return}`,
-  `projected_cash_flows`, plus `implied` diagnostics for
-  `revenue_growth / ebit_margin / terminal_growth` within
-  `SOLVE_BOUNDS (-10..30%, 0..50%, -1..4%)`. Exports include the operative
-  growth-fade endpoint and label each candidate as a conditional one-variable
-  solve. Sign-changing brackets remain distinct from isolated tolerance matches
-  and contiguous tolerance-match regions; a sampled region is neither a finite
-  root list nor proof of a continuous equivalence interval. Endpoint prices,
-  deterministic sampled ranges, above/below direction, target-denominated boundary
-  gaps, and sampled monotonicity/interior extrema are reported without claiming
-  that a finite scan proves the full range or analytical exactness. Terminal-growth
-  candidates near the upper cap and discounted-terminal-value dependence are
-  qualifications, not economic conclusions. Base and candidate results also flag
+  `projected_cash_flows` with next-year profit, profit growth, incremental return,
+  investment amount/ratio, plus the terminal cash-flow bridge. Implied margin is
+  **unavailable** because changing it violates the constant-margin basis. Implied
+  terminal growth is **not identifiable** and is not solved: mature growth creates
+  no excess-return value once q=r. A linked explicit transition endpoint can still
+  change cash flows **before convergence**; this is not a claim that the whole
+  forecast is mathematically invariant. Both axes export empty root lists without
+  endpoint prices or implied assumptions. A direct terminal-growth scenario must
+  link the explicit growth endpoint to gT; it does not re-enable solving.
+  Original bounds remain recorded `(-10..30%, 0..50%, -1..4%)`. The revenue-growth
+  range contains unsupported contraction/financing candidates, so automatic range
+  diagnostics refuse with `invalid_candidate_economics`, no endpoint prices or roots.
+  Bounds are not narrowed to manufacture an admissible solution. Direct arithmetic
+  calls on a fully admissible positive-growth range retain deterministic sampled
+  diagnostics with the explicit limitation that roots/extrema between points are
+  not excluded; finite scans are not full-range proofs. Base and candidate results also flag
   negative modeled equity as non-tradable; limited-liability and turnaround option
   value remain outside this FCFF model.
 * **Export:** `alphaforge rank` retains original outputs, then writes
@@ -105,7 +139,18 @@ ranking never masquerades as a discounted-cash-flow.
   `candidate.full_results`. Every non-valued path emits a structured
   unavailable result (`dcf.available=false` with `missing_information` and
   top-level `status="unavailable"`), including outer DCF wiring failures.
-* **Provenance:** `policy_version`, `size_bucket`, `market_cap`, `reinvestment_return`,
+* **Provenance:** migration 019 adds append-only calibration records; trusted analyst
+  admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.
+  There is deliberately no public acquisition command. The loader reports rejected
+  candidate identities/reasons and refuses conflicting reviews for the same latest
+  period. Capture retains **all** calibration candidates, their exact source/accounting
+  record JSON and content identity, not just the selected one. Numerical encoding v2
+  binds calibration/economic-policy identities and source digests; older incompatible
+  runs refuse `unsupported_rules_or_code` without changing their stored artifacts.
+  No actual calibration was admitted for Evolution, Clas Ohlson, Mips or Bactiguard;
+  see the [bounded evidence investigation](plans/dcf-positive-profit-economic-decision.md).
+  Synthetic test disclosures are not issuer evidence.
+  `policy_version`, `size_bucket`, `market_cap`, `reinvestment_return`,
   `normalization {confidence, selected_window_years, reasons}`, `warnings`,
   `missing_information` are persisted; heuristic score and DCF are never merged.
 
@@ -145,8 +190,8 @@ without error.
 
 * No guessed fundamentals: absent `ebitda`, gross `total_Debt`, or KPI history
   stays `NULL` / missing, surfaced in `missing_data` and `dcf.missing_information`.
-  Missing usable dated positive ROIC makes growth-based FCFF unavailable; no
-  zero-reinvestment valuation or implied roots are emitted.
+  Missing qualified operating-return/capital calibration makes growth-based FCFF
+  unavailable; no zero-reinvestment valuation or implied roots are emitted.
 * Deterministic: identical selected inputs under identical supported rules →
   identical `DcfValue` and `valuation_score`. New executed ranking runs retain
   immutable numerical bodies, exact code/rules and original outputs for

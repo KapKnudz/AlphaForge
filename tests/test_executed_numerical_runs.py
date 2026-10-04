@@ -8,6 +8,7 @@ from dataclasses import make_dataclass
 from pathlib import Path
 
 import pytest
+from dcf_calibration_fixtures import synthetic_calibration_fixture
 from test_method_date_growth_selection import (
     CUTOFF,
     annual,
@@ -45,6 +46,7 @@ def seeded(reverse=False, branch=None, multiple=False):
     reports = [annual(2024, 100), annual(2025, 110), annual(2026, 121)]
     conn, cid = setup(branch=branch, periods=list(reversed(reports)) if reverse else reports)
     packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
     prices = [{"d": f"{year}-03-31", "c": 8 + year - 2024} for year in range(2024, 2027)]
     upsert_prices(conn, cid, list(reversed(prices)) if reverse else prices, currency="SEK")
     upsert_kpi_observations(
@@ -166,9 +168,10 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     assert len(set(outputs)) == 4
     assert len(set(text_hashes)) == 1
     assert (artefact / "outputs.json").read_text() == canonical(original)
-    # Leave only retained run records. Also prove replay never attempts numerical SELECT.
+    # Remove mutable inputs; analyst calibrations are deliberately append-only.
+    # Also prove replay never attempts live numerical SELECT.
     for table in reversed(TABLES):
-        if table != "companies":
+        if table not in {"companies", "reinvestment_calibrations"}:
             conn.execute(f"DELETE FROM {table}")
     conn.commit()
     forbidden = set(TABLES)

@@ -23,7 +23,12 @@ paired historical prices with currencies and raw date facts; selected KPI
 period/price/date values and rejected/missing-selection provenance; split facts;
 and consumed dividend amounts/currencies/verification and exact window assurance.
 Reports/rejections examined by chronology/refusal are part of the selected input
-domain. Unselected intervening daily prices and superseded admissible KPI rows
+domain. Encoding `executed-numerical-v2` also retains every analyst calibration
+candidate from [migration 019](../db/migrations/019_reinvestment_calibrations.sql),
+including rejected/conflicting choices, exact operand/source/accounting records
+and content identities. Rules bind the calibration and forward-funding/convergence
+policies; immutable old v1 runs are not reinterpreted under v2 and refuse honestly
+when their implementation/rules are incompatible. Unselected intervening daily prices and superseded admissible KPI rows
 are excluded. Raw values survive beside canonical stored transformations; NULL
 and zero remain distinct. No liquidity, realized returns or thesis inputs are
 added. Provider scale, split adjustment, selection/refusals and formulas retain
@@ -128,7 +133,10 @@ removal of live rows, retained-only reconstructed memory databases and forbidden
 live-table reads. It covers missing/zero, non-calendar fiscal histories, splits,
 sector branches, dividends, denominations, rule/code changes, tamper/conflicts,
 legacy refusal, atomic second-reader visibility and persistence failure before
-consumption. Fixtures require no live provider acquisition or model call. Additional
+consumption. [Forward-reinvestment coverage](../tests/test_forward_reinvestment.py)
+adds independent Decimal/hand bridge cases, qualification/domain refusals,
+unavailable margin and not-identifiable terminal growth, immutable calibrations,
+retained replay after a conflicting live review, and economic-policy mismatch refusal. Fixtures require no live provider acquisition or model call. Additional
 [hosted-review regressions](../tests/test_numerical_retention_review_regressions.py)
 exercise real two-connection insertion interleaving through rank/export/replay,
 contradictory concurrent retention refusal, original-source/snapshot rejection-ID

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 from math import isfinite
 from types import SimpleNamespace
@@ -31,6 +31,7 @@ from alphaforge.core.valuation.dividend_yield import (
     trailing_dividend_window,
 )
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
+from alphaforge.core.valuation.reinvestment import qualify_calibration
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
 
@@ -38,11 +39,53 @@ SELECTION_VERSION = "verified-dates-consecutive-annual-denomination-v1"
 MAX_PRICE_AGE_DAYS = 7
 
 
+def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, currency: str | None):
+    """Retain rejection reasons; deterministic choice by fiscal end/content identity."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reinvestment_calibrations'"
+    ).fetchone():
+        return None, {"selected_identity": None, "candidates": []}
+    rows = conn.execute(
+        "SELECT identity,record_json FROM reinvestment_calibrations WHERE company_id=? ORDER BY identity",
+        (company_id,),
+    ).fetchall()
+    candidates = []
+    admitted = []
+    for row in rows:
+        try:
+            record = json.loads(row["record_json"])
+            if not isinstance(record, dict) or record.get("company_id") != company_id:
+                raise ValueError("calibration company identity mismatch")
+            qualified = qualify_calibration(record, as_of=cutoff, currency=currency, tax_rate=0.21)
+            if qualified.identity != row["identity"]:
+                raise ValueError("calibration content identity mismatch")
+            admitted.append((record["period_end"], qualified.identity, record))
+            reason = None
+        except (ValueError, TypeError, KeyError, OverflowError, AttributeError) as exc:
+            reason = str(exc)
+        candidates.append({"identity": row["identity"], "rejection_reason": reason})
+    selected = max(admitted, key=lambda x: (x[0], x[1])) if admitted else None
+    # Conflicting reviews for the same latest fiscal period require a new review,
+    # not a hash-order business choice.
+    if selected and sum(x[0] == selected[0] for x in admitted) > 1:
+        return None, {
+            "selected_identity": None,
+            "candidates": candidates,
+            "refusal": "ambiguous_calibration",
+        }
+    return (selected[2] if selected else None), {
+        "selected_identity": selected[1] if selected else None,
+        "candidates": candidates,
+    }
+
+
 def _dcf_unavailable_reason(missing_information: tuple[str, ...]) -> str | None:
+    if "admissible_reinvestment_calibration" in missing_information:
+        return "Qualified operating-capital/earnings calibration unavailable; a dated scalar ROIC alone is insufficient."
     if "dated_positive_roic" in missing_information:
         return (
-            "Growth-based FCFF requires a usable dated finite positive ROIC to model "
-            "reinvestment; no ordinary value or implied roots were produced."
+            "Growth-based FCFF requires qualified dated operating-return/capital evidence; "
+            "no ordinary value or implied roots were produced. A provider ROIC alone is insufficient."
         )
     if "negative_nopat_unsupported_reinvestment" in missing_information:
         return (
@@ -50,6 +93,16 @@ def _dcf_unavailable_reason(missing_information: tuple[str, ...]) -> str | None:
             "treat negative investment as cash released."
         )
     return None
+
+
+def _normalization_payload(normalization) -> dict[str, Any] | None:
+    if normalization is None:
+        return None
+    return {
+        "confidence": normalization.confidence,
+        "selected_window_years": normalization.selected_window_years,
+        "reasons": list(normalization.reasons),
+    }
 
 
 def _equity_qualification(equity_value: float) -> dict[str, Any]:
@@ -1212,13 +1265,20 @@ def load_results_for_company(
     try:
         # Use the same validated annual chronology for policy; R12/current
         # valuation remains distinct from the annual growth anchor.
-        roic_for_dcf = kpis.get(37)  # KPI 37 = ROIC (now reliably persisted)
-        # Börsdata ROIC is percent (e.g. 22.9 means 22.9%); DcfAssumptionPolicy
-        # expects percent and divides by 100 internally, so pass raw percent.
+        # Provider ROIC remains a percentage-point diagnostic; it no longer
+        # supplies a naked future return. Qualified capital records own that input.
+        roic_for_dcf = kpis.get(37)
         from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy, DcfPolicyDecision
         from alphaforge.core.valuation.reverse_dcf import ReverseDcfEngine, ReverseDcfInputs
 
         policy = DcfAssumptionPolicy()
+        calibration_record, calibration_selection = _select_reinvestment_calibration(
+            conn,
+            company_id,
+            cutoff,
+            dcf_current_report.currency if dcf_current_report is not None else None,
+        )
+        selection["reinvestment_calibration"] = calibration_selection
         # market_cap from raw valuation is in report-currency millions (SEK MSEK)
         # because Börsdata reports and shares are in millions; required-return
         # buckets are in absolute SEK, so scale to SEK for the hurdle.
@@ -1260,7 +1320,17 @@ def load_results_for_company(
                 currency=(dcf_current_report.currency if dcf_current_report is not None else None),
                 market_cap=market_cap_for_hurdle,
                 roic=roic_for_dcf,
+                calibration_record=calibration_record,
             )
+            if (
+                calibration_record is None
+                and calibration_selection["candidates"]
+                and dcf_policy_decision.missing_information == ("dated_positive_roic",)
+            ):
+                dcf_policy_decision = replace(
+                    dcf_policy_decision,
+                    missing_information=("admissible_reinvestment_calibration",),
+                )
         if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
             if price_missing:
                 reverse_dcf["status"] = "unavailable"
@@ -1271,6 +1341,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": ["net_debt"],
                     "warnings": list(dcf_policy_decision.warnings)
                     if dcf_policy_decision.warnings
@@ -1309,12 +1380,21 @@ def load_results_for_company(
                             "net_reinvestment_rate": dcf_policy_decision.assumptions.net_reinvestment_rate,
                             "reinvestment_return": dcf_policy_decision.assumptions.reinvestment_return,
                             "ebit_margin_start": dcf_policy_decision.assumptions.ebit_margin_start,
+                            "economic_convention": dcf_policy_decision.assumptions.economic_convention,
+                            "calibration_identity": dcf_policy_decision.assumptions.calibration_identity,
                         },
                         "assumption_sources": dcf_policy_decision.assumption_sources,
+                        "calibration": {
+                            "identity": dcf_policy_decision.calibration.identity,
+                            "historical_average_roic": dcf_policy_decision.calibration.historical_average_roic,
+                            "future_incremental_return": dcf_policy_decision.calibration.future_incremental_return,
+                            "record": json.loads(dcf_policy_decision.calibration.record_json),
+                        },
                         "required_return": {
                             "size_bucket": dcf_policy_decision.required_return.size_bucket
                             if dcf_policy_decision.required_return
                             else None,
+                            "basis": "discount_rate_proxy_for_cost_of_capital",
                             "required_return": dcf_policy_decision.required_return.required_return
                             if dcf_policy_decision.required_return
                             else None,
@@ -1324,6 +1404,8 @@ def load_results_for_company(
                         "enterprise_value": dcf_value.enterprise_value,
                         "equity_value": dcf_value.equity_value,
                         "value_per_share": dcf_value.value_per_share,
+                        "terminal_cash_flow": asdict(dcf_value.terminal_cash_flow),
+                        "terminal_pole_distance": dcf_value.terminal_pole_distance,
                         "terminal_value": dcf_value.terminal_value,
                         "discounted_terminal_value": dcf_value.discounted_terminal_value,
                         "terminal_value_share_of_enterprise_value": (
@@ -1332,34 +1414,8 @@ def load_results_for_company(
                             else None
                         ),
                         **_equity_qualification(dcf_value.equity_value),
-                        "projected_cash_flows": [
-                            {
-                                "year": p.year,
-                                "revenue": p.revenue,
-                                "revenue_growth": p.revenue_growth,
-                                "ebit_margin": p.ebit_margin,
-                                "ebit": p.ebit,
-                                "nopat": p.nopat,
-                                "fcff": p.fcff,
-                                "discounted_fcff": p.discounted_fcff,
-                            }
-                            for p in dcf_value.projected_cash_flows
-                        ],
-                        "normalization": (
-                            {
-                                "confidence": dcf_policy_decision.normalization.confidence
-                                if dcf_policy_decision.normalization
-                                else None,
-                                "selected_window_years": dcf_policy_decision.normalization.selected_window_years
-                                if dcf_policy_decision.normalization
-                                else None,
-                                "reasons": list(dcf_policy_decision.normalization.reasons)
-                                if dcf_policy_decision.normalization
-                                else None,
-                            }
-                            if dcf_policy_decision.normalization
-                            else None
-                        ),
+                        "projected_cash_flows": [asdict(p) for p in dcf_value.projected_cash_flows],
+                        "normalization": _normalization_payload(dcf_policy_decision.normalization),
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
                         else [],
@@ -1370,6 +1426,27 @@ def load_results_for_company(
                     for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
                         _bounds = dcf_policy_decision.solve_bounds.get(_assump)
                         if _bounds is None:
+                            continue
+                        _refusal = engine.solve_availability(dcf_inputs, _assump)
+                        if _refusal:
+                            reverse_dcf_results[_assump] = {
+                                "available": False,
+                                "solution_status": (
+                                    "not_identifiable"
+                                    if _assump == "terminal_growth"
+                                    else "unavailable"
+                                ),
+                                "reason": _refusal,
+                                "candidate_roots": [],
+                                "candidate_solution_count": 0,
+                                "qualification": (
+                                    "mature returns equal the hurdle: terminal growth creates no "
+                                    "excess-return value; a linked transition can still change "
+                                    "pre-convergence cash flows, so the full forecast is not invariant"
+                                    if _assump == "terminal_growth"
+                                    else "a changed margin violates this slice's constant-margin capital basis"
+                                ),
+                            }
                             continue
                         try:
                             _diagnostics, _brackets, _sample_matches = engine.diagnose_solve_range(
@@ -1549,7 +1626,14 @@ def load_results_for_company(
                                 ),
                             }
                         except Exception as exc:
-                            reverse_dcf_results[_assump] = {"error": str(exc)}
+                            reverse_dcf_results[_assump] = {
+                                "available": False,
+                                "solution_status": "unavailable",
+                                "reason": "invalid_candidate_economics",
+                                "error": str(exc),
+                                "candidate_roots": [],
+                                "candidate_solution_count": 0,
+                            }
                     reverse_dcf["implied"] = reverse_dcf_results
                     reverse_dcf["status"] = "available"
                 except Exception as exc:
@@ -1557,7 +1641,8 @@ def load_results_for_company(
                     reverse_dcf["dcf"] = {
                         "available": False,
                         "policy_version": dcf_policy_decision.policy_version,
-                        "missing_information": ["dcf_engine_failed"],
+                        "normalization": _normalization_payload(dcf_policy_decision.normalization),
+                        "missing_information": [getattr(exc, "reason", "dcf_engine_failed")],
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
                         else [],
@@ -1568,6 +1653,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": ["current_revenue_or_shares"],
                     "warnings": list(dcf_policy_decision.warnings)
                     if dcf_policy_decision.warnings
@@ -1580,6 +1666,7 @@ def load_results_for_company(
                 reverse_dcf["dcf"] = {
                     "available": False,
                     "policy_version": dcf_policy_decision.policy_version,
+                    "normalization": _normalization_payload(dcf_policy_decision.normalization),
                     "missing_information": list(dcf_policy_decision.missing_information),
                     "unavailable_reason": _dcf_unavailable_reason(
                         dcf_policy_decision.missing_information
@@ -1600,6 +1687,9 @@ def load_results_for_company(
             reverse_dcf["dcf"] = {
                 "available": False,
                 "policy_version": decision.policy_version if decision is not None else None,
+                "normalization": _normalization_payload(
+                    decision.normalization if decision is not None else None
+                ),
                 "missing_information": list(decision.missing_information)
                 if decision is not None and decision.missing_information
                 else ["dcf_wiring_failed"],
@@ -1614,6 +1704,9 @@ def load_results_for_company(
         reverse_dcf["dcf"] = {
             "available": False,
             "policy_version": dcf_policy_decision.policy_version if dcf_policy_decision else None,
+            "normalization": _normalization_payload(
+                dcf_policy_decision.normalization if dcf_policy_decision else None
+            ),
             "missing_information": price_missing,
             "warnings": [],
         }

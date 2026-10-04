@@ -2,10 +2,12 @@ from dataclasses import replace
 
 import pytest
 
+from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION, LEGACY_CONVENTION
 from alphaforge.core.valuation.reverse_dcf import (
     DcfAssumptions,
     ReverseDcfEngine,
     ReverseDcfInputs,
+    UnsupportedEconomicPolicy,
     UnsupportedValuationModel,
 )
 
@@ -24,6 +26,7 @@ def _inputs(
         current_revenue=100.0,
         net_debt=5.0,
         assumptions=DcfAssumptions(
+            economic_convention=LEGACY_CONVENTION,
             projection_years=5,
             revenue_growth=revenue_growth,
             ebit_margin=ebit_margin,
@@ -48,16 +51,32 @@ def test_value_rejects_negative_nopat_roic_reinvestment(ebit_margin, ebit_margin
         )
 
 
-def test_solve_rejects_negative_ebit_margin_candidates():
-    with pytest.raises(UnsupportedValuationModel, match="negative NOPAT"):
-        ReverseDcfEngine().solve(_inputs(), "ebit_margin", -0.10, 0.30)
+@pytest.mark.parametrize("convention", [ECONOMIC_CONVENTION, LEGACY_CONVENTION])
+@pytest.mark.parametrize(
+    ("assumption", "reason"),
+    [
+        ("ebit_margin", "unavailable_constant_margin_only"),
+        ("terminal_growth", "not_identifiable"),
+    ],
+)
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+def test_solve_policy_applies_to_every_convention_and_operation(
+    convention, assumption, reason, operation
+):
+    inputs = _inputs()
+    inputs = replace(
+        inputs,
+        assumptions=replace(inputs.assumptions, economic_convention=convention),
+    )
+
+    with pytest.raises(UnsupportedEconomicPolicy, match=reason):
+        getattr(ReverseDcfEngine(), operation)(inputs, assumption, -0.10, 0.30)
 
 
-def test_range_diagnostics_reject_negative_ebit_margin_candidates():
-    with pytest.raises(UnsupportedValuationModel, match="negative NOPAT"):
-        ReverseDcfEngine().diagnose_solve_range(
-            _inputs(), "ebit_margin", -0.10, 0.30, sample_intervals=4
-        )
+class _DiagnosticEngine(ReverseDcfEngine):
+    @staticmethod
+    def solve_availability(_inputs, _assumption):
+        return None
 
 
 def _target_at(inputs, assumption, value):
@@ -71,7 +90,7 @@ def _target_at(inputs, assumption, value):
 
 
 def test_range_diagnostics_classify_endpoint_match_without_crossing():
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         _target_at(_inputs(), "terminal_growth", -0.01),
         "terminal_growth",
         -0.01,
@@ -90,7 +109,7 @@ def test_range_diagnostics_classify_endpoint_match_without_crossing():
 
 def test_range_diagnostics_classify_no_sign_change_match_without_crossing():
     inputs = _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02)
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         _target_at(inputs, "terminal_growth", 0.0),
         "terminal_growth",
         -0.01,
@@ -106,7 +125,7 @@ def test_range_diagnostics_classify_no_sign_change_match_without_crossing():
 
 
 def test_range_diagnostics_convert_sampled_straddle_to_crossing_bracket():
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         _target_at(_inputs(), "terminal_growth", 0.01),
         "terminal_growth",
         -0.01,
@@ -124,7 +143,7 @@ def test_range_diagnostics_convert_sampled_straddle_to_crossing_bracket():
 
 def test_range_diagnostics_preserve_crossing_across_tolerance_match_region():
     inputs = _target_at(_inputs(), "terminal_growth", 0.01)
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         inputs,
         "terminal_growth",
         -0.01,
@@ -139,7 +158,7 @@ def test_range_diagnostics_preserve_crossing_across_tolerance_match_region():
     region = diagnostics["sampled_match_regions"][0]
     assert region["lower_sample_assumption"] < 0.01 < region["upper_sample_assumption"]
     assert region["associated_sign_change_bracket_count"] == 1
-    result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[0])
+    result = _DiagnosticEngine().solve(inputs, "terminal_growth", *brackets[0])
     assert result.implied_assumption == pytest.approx(0.01)
 
 
@@ -148,7 +167,7 @@ def test_range_diagnostics_preserve_two_crossings_around_tolerance_match():
     center_target = _target_at(inputs, "terminal_growth", 0.0)
     inputs = replace(center_target, current_price=center_target.current_price - 0.5e-6)
 
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         inputs,
         "terminal_growth",
         -0.01,
@@ -163,14 +182,14 @@ def test_range_diagnostics_preserve_two_crossings_around_tolerance_match():
     assert matches[0]["associated_sign_change_bracket_count"] == 2
     assert diagnostics["sign_change_bracket_count"] == 2
     assert diagnostics["sampled_match_point_count"] == 1
-    left_result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[0])
-    right_result = ReverseDcfEngine().solve(inputs, "terminal_growth", *brackets[1])
+    left_result = _DiagnosticEngine().solve(inputs, "terminal_growth", *brackets[0])
+    right_result = _DiagnosticEngine().solve(inputs, "terminal_growth", *brackets[1])
     assert left_result.implied_assumption < 0.0 < right_result.implied_assumption
 
 
 def test_range_diagnostics_classify_contiguous_plateau_samples_as_region():
     inputs = _inputs(revenue_growth=0.0, discount_rate=0.15, reinvestment_return=0.02)
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         _target_at(inputs, "terminal_growth", 0.02),
         "terminal_growth",
         -0.01,
@@ -201,7 +220,7 @@ def test_range_diagnostics_do_not_turn_plateau_roundoff_into_a_crossing():
         assumptions=assumptions,
     )
 
-    diagnostics, brackets, matches = ReverseDcfEngine().diagnose_solve_range(
+    diagnostics, brackets, matches = _DiagnosticEngine().diagnose_solve_range(
         inputs,
         "terminal_growth",
         -0.01,

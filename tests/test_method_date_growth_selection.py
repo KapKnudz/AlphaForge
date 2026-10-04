@@ -10,6 +10,7 @@ from dataclasses import asdict
 from datetime import date, timedelta
 
 import pytest
+from dcf_calibration_fixtures import synthetic_calibration_fixture
 
 from alphaforge.cli.main import cmd_rank
 from alphaforge.cli.ranking_loader import _annual_series, load_results_for_company
@@ -136,6 +137,8 @@ def packet(conn, cid, cutoff=CUTOFF):
 
 
 def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_date=CUTOFF):
+    # Separate synthetic qualified capital record: provider KPI alone is insufficient.
+    synthetic_calibration_fixture(conn, company_id)
     upsert_kpi_observations(
         conn,
         company_id,
@@ -1301,7 +1304,11 @@ def test_missing_versus_zero_current_inputs_survive_selection(value):
     result = load_results_for_company(conn, cid, CUTOFF)
     assert result["financial"].fcf_margin == (None if value is None else 0)
     assert result["financial"].net_debt == value
-    assert (result["reverse_dcf"]["status"] == "available") == (value == 0)
+    # A dated scalar ROIC is no longer enough to admit a DCF.
+    assert result["reverse_dcf"]["status"] == "unavailable"
+    assert result["reverse_dcf"]["dcf"]["missing_information"] == [
+        "admissible_reinvestment_calibration"
+    ]
 
 
 @pytest.mark.parametrize("candidate_present", [False, True])
@@ -1355,7 +1362,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
         assert score[f"{metric}_years"] == 0
         assert row[metric] == ""
         assert row[f"{metric}_years"] == "0"
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-10-03-dcf-availability-diagnostics-v18"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-10-04-dcf-forward-reinvestment-v19"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
@@ -1423,11 +1430,15 @@ def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path)
     assert roic["raw_value"] == 0.3 and roic["available"]
     assert "roic" not in row["missing_data"]
     assert "roic" not in dcf[str(cid)]["dcf"]["missing_information"]
-    assert dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] > 0
+    assert dcf[str(cid)]["dcf"]["missing_information"] == ["admissible_reinvestment_calibration"]
+    assert (
+        "qualified reinvestment calibration unavailable"
+        in dcf[str(cid)]["dcf"]["normalization"]["reasons"]
+    )
     rejected = score["input_selection"]["rejected_kpis"][0]
     assert rejected["raw_payload"]["v"] == 40
     assert not rejected["current_refusal"]
-    assert score["readiness_status"] == "ready"
+    assert score["readiness_status"] == "valuation_blocked"
     upsert_kpi_observations(
         conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 50, "observationDate": CUTOFF}]
     )
@@ -1438,7 +1449,9 @@ def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path)
         if component["name"] == "roic"
     )
     assert dated_roic["raw_value"] == 0.5 and dated_roic["available"]
-    assert dated_dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] > 0
+    assert dated_dcf[str(cid)]["dcf"]["missing_information"] == [
+        "admissible_reinvestment_calibration"
+    ]
 
 
 @pytest.mark.parametrize("roic", [None, 0.0, -5.0])
@@ -1462,15 +1475,18 @@ def test_rank_export_refuses_growth_based_dcf_without_dated_positive_roic(
     assert result["status"] == "unavailable"
     assert result["dcf"]["available"] is False
     assert result["dcf"]["missing_information"] == ["dated_positive_roic"]
-    assert "dated finite positive ROIC" in result["dcf"]["unavailable_reason"]
+    assert (
+        "qualified dated operating-return/capital evidence" in result["dcf"]["unavailable_reason"]
+    )
     assert not result.get("implied")
     assert "value_per_share" not in result["dcf"]
     assert "projected_cash_flows" not in result["dcf"]
 
 
-def test_measured_roic_exports_fade_and_nonmonotonic_reverse_diagnostics(monkeypatch, tmp_path):
+def test_qualified_calibration_exports_fade_and_refused_solve_axes(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid, future_return=0.10)
     upsert_kpi_observations(
         conn,
         cid,
@@ -1490,38 +1506,21 @@ def test_measured_roic_exports_fade_and_nonmonotonic_reverse_diagnostics(monkeyp
     assert dcf["negative_modeled_equity"] is False
 
     growth = result["implied"]["revenue_growth"]
-    assert growth["lower_bound"] == pytest.approx(-0.10)
-    assert growth["upper_bound"] == pytest.approx(0.30)
-    assert growth["lower_endpoint_price"] is not None
-    assert growth["upper_endpoint_price"] is not None
-    assert growth["monotonicity"] == "sampled_non_monotonic"
-    assert growth["interior_extrema"]
-    assert growth["solve_scope"] == (
-        "one-variable conditional solve; all other assumptions held fixed"
-    )
-    assert growth["candidate_solution_count"] == 1
-    assert growth["crossing_count_on_grid"] == 1
-    assert growth["sample_match_candidate_count"] == 0
-    assert "conditional numerical evidence only" in growth["solution_qualification"]
-
+    assert growth["reason"] == "invalid_candidate_economics"
+    assert "unsupported_capital_release" in growth["error"]
+    assert "lower_endpoint_price" not in growth
     terminal = result["implied"]["terminal_growth"]
-    assert terminal["error"]
-    assert terminal["target_position"] == "below_sampled_range"
-    assert terminal["no_solution_direction"] == "below"
-    assert terminal["sampled_maximum_assumption"] == pytest.approx(0.0)
-    assert terminal["sampled_maximum_price"] > max(
-        terminal["lower_endpoint_price"], terminal["upper_endpoint_price"]
-    )
-    assert terminal["nearest_boundary_gap"] > 0
-    assert terminal["nearest_boundary_gap_denominator"] == "target_price"
-    assert terminal["nearest_boundary_gap_denominator_value"] == pytest.approx(10.0)
-    assert terminal["nearest_boundary_gap_pct_target"] == pytest.approx(
-        terminal["nearest_boundary_gap"] / 10.0 * 100
-    )
-    assert "not excluded" in terminal["range_qualification"]
+    assert terminal["solution_status"] == "not_identifiable"
+    assert terminal["candidate_roots"] == []
+    assert "full forecast is not invariant" in terminal["qualification"]
+    margin = result["implied"]["ebit_margin"]
+    assert margin["solution_status"] == "unavailable"
+    assert margin["candidate_roots"] == []
+    assert "implied_assumption" not in margin
+    assert "implied_assumption" not in terminal
 
 
-def test_near_bound_terminal_solve_is_qualified_and_terminal_dependence_exported(
+def test_legacy_near_bound_terminal_price_is_not_reissued_without_calibration(
     monkeypatch, tmp_path
 ):
     conn, cid = setup(periods=[annual(2026, 121)])
@@ -1540,19 +1539,13 @@ def test_near_bound_terminal_solve_is_qualified_and_terminal_dependence_exported
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
     result = exported[str(cid)]
-    assert result["dcf"]["available"] is True
-    terminal = result["implied"]["terminal_growth"]
-    assert terminal["implied_assumption"] == pytest.approx(0.039, abs=1e-6)
-    assert terminal["near_bound"] is True
-    assert terminal["near_bound_side"] == "upper"
-    assert "conditional and assumption-sensitive" in terminal["interpretation"]
-    assert terminal["terminal_value_share_of_enterprise_value"] > 0.5
-    assert result["dcf"]["terminal_value_share_of_enterprise_value"] is not None
+    # The old independently computed scalar-ROIC price is not a current valuation.
+    assert result["dcf"]["available"] is False
+    assert result["dcf"]["missing_information"] == ["admissible_reinvestment_calibration"]
+    assert not result.get("implied")
 
 
-def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
-    monkeypatch, tmp_path
-):
+def test_legacy_two_root_terminal_price_is_not_reissued_without_calibration(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.853213549541081}], currency="SEK")
@@ -1566,26 +1559,13 @@ def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
     )
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
-    terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["candidate_solution_count"] == 2
-    assert terminal["crossing_count_on_grid"] == 2
-    assert terminal["implied_assumption"] == pytest.approx(-0.00714154, abs=1e-6)
-    assert terminal["near_bound"] is False
-    assert terminal["near_bound_side"] is None
-    assert terminal["near_cap_candidate_present"] is True
-    assert "upper solve cap" in terminal["near_cap_warning"]
-    lower_root, upper_root = terminal["candidate_roots"]
-    assert lower_root["near_bound"] is False
-    assert lower_root["near_bound_side"] is None
-    assert upper_root["implied_assumption"] == pytest.approx(0.039, abs=1e-6)
-    assert upper_root["near_bound"] is True
-    assert upper_root["near_bound_side"] == "upper"
-    assert "conditional and assumption-sensitive" in upper_root["interpretation"]
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is False
+    assert result["dcf"]["missing_information"] == ["admissible_reinvestment_calibration"]
+    assert not result.get("implied")
 
 
-def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
-    monkeypatch, tmp_path
-):
+def test_legacy_terminal_maximum_is_not_reissued_without_calibration(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 9.830675428653587}], currency="SEK")
@@ -1599,24 +1579,12 @@ def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
     )
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
-    terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["sign_change_bracket_count"] == 2
-    assert terminal["crossing_count_on_grid"] == 2
-    assert terminal["candidate_solution_count"] == 2
-    assert terminal["sample_match_candidate_count"] == 0
-    assert terminal["sampled_match_point_count"] == 1
-    match = terminal["sampled_match_points"][0]
-    assert match["classification"] == "sampled_match_with_sign_change"
-    assert match["associated_sign_change_bracket_count"] == 2
-    assert all(
-        candidate["solution_evidence"] == "sign_change_bracket"
-        for candidate in terminal["candidate_roots"]
-    )
-    left_root, right_root = terminal["candidate_roots"]
-    assert left_root["implied_assumption"] < 0.0 < right_root["implied_assumption"]
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is False
+    assert not result.get("implied")
 
 
-def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(monkeypatch, tmp_path):
+def test_legacy_terminal_crossing_is_not_reissued_without_calibration(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121, number_Of_Shares=10_000_000)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 1.257757952557623e-05}], currency="SEK")
@@ -1630,20 +1598,12 @@ def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(monkeypa
     )
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
-    terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["solution_status"] == "candidate_solutions"
-    assert terminal["sign_change_bracket_count"] == 1
-    assert terminal["crossing_count_on_grid"] == 1
-    assert terminal["candidate_solution_count"] == 1
-    assert terminal["sample_match_candidate_count"] == 0
-    assert terminal["implied_assumption"] == pytest.approx(0.01)
-    assert len(terminal["sampled_match_regions"]) == 1
-    region = terminal["sampled_match_regions"][0]
-    assert region["lower_sample_assumption"] < 0.01 < region["upper_sample_assumption"]
-    assert region["associated_sign_change_bracket_count"] == 1
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is False
+    assert not result.get("implied")
 
 
-def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(monkeypatch, tmp_path):
+def test_legacy_terminal_plateau_is_not_reissued_without_calibration(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3.171574253715503}], currency="SEK")
@@ -1657,21 +1617,14 @@ def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(mon
     )
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
-    terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["solution_status"] == "sampled_match_region"
-    assert terminal["candidate_roots"] == []
-    assert terminal["candidate_solution_count"] == 0
-    assert terminal["sign_change_bracket_count"] == 0
-    assert "no finite root list" in terminal["solution_evidence"]
-    assert "implied_assumption" not in terminal
-    assert len(terminal["sampled_match_regions"]) == 1
-    region = terminal["sampled_match_regions"][0]
-    assert region["lower_sample_assumption"] == pytest.approx(0.02)
-    assert region["upper_sample_assumption"] == pytest.approx(0.04)
-    assert "not established" in region["qualification"]
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is False
+    assert not result.get("implied")
 
 
-def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp_path):
+def test_legacy_lower_bound_terminal_price_is_not_reissued_without_calibration(
+    monkeypatch, tmp_path
+):
     conn, cid = setup(periods=[annual(2026, 121)])
     packet(conn, cid)
     upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.957417027608026}], currency="SEK")
@@ -1685,17 +1638,15 @@ def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp
     )
 
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
-    terminal = exported[str(cid)]["implied"]["terminal_growth"]
-    assert terminal["implied_assumption"] == pytest.approx(-0.009, abs=1e-6)
-    assert terminal["near_bound"] is False
-    assert terminal["near_bound_side"] is None
-    assert terminal["lower_endpoint_price"] is not None
-    assert terminal["upper_endpoint_price"] is not None
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is False
+    assert not result.get("implied")
 
 
 def test_negative_modeled_equity_is_not_exported_as_tradable_negative_price(monkeypatch, tmp_path):
     conn, cid = setup(periods=[annual(2026, 121, net_Debt=1_000)])
     packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
     upsert_kpi_observations(
         conn,
         cid,
@@ -1718,6 +1669,7 @@ def test_negative_nopat_with_measured_roic_is_unavailable_not_negative_investmen
     loss_year = annual(2026, 121, operating_Income=-12.1, ebit=-12.1)
     conn, cid = setup(periods=[loss_year])
     packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
     upsert_kpi_observations(
         conn,
         cid,
@@ -1893,7 +1845,10 @@ def test_interior_annual_rejection_blocks_growth_and_exports(
     assert loaded["selection"]["annual_history"]["period_ends"] == []
     assert loaded["financial"].revenue_growth is None
     assert loaded["financial"].revenue_growth_years == 0
-    # Preserve the existing explicit fallback, never a CAGR across the uncertain span.
+    # Preserve the existing explicit fallback with independent capital calibration,
+    # never a CAGR across the uncertain span.
+    synthetic_calibration_fixture(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
     policy = loaded["dcf"]["policy"]
     assert policy.assumptions.revenue_growth == 0
     assert "historical revenue growth unavailable" in policy.assumption_sources["revenue_growth"]
@@ -1962,7 +1917,9 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     )
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    expected = "reverse-dcf-v13-dated-roic-availability-diagnostics"
+    synthetic_calibration_fixture(conn, cid)
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    expected = "reverse-dcf-v14-qualified-forward-reinvestment"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected
@@ -3196,7 +3153,10 @@ def test_metric_spans_use_latest_contiguous_complete_suffix(interior_revenue):
     assert financial.share_count_growth_years == 3
     assert financial.positive_fcf_ratio == 0.5
     assert financial.operating_margin_volatility == pytest.approx(0.1)
-    assert result["reverse_dcf"]["dcf"]["assumptions"]["revenue_growth"] == pytest.approx(0.15)
+    assert result["reverse_dcf"]["dcf"]["available"] is False
+    assert result["reverse_dcf"]["dcf"]["missing_information"] == [
+        "admissible_reinvestment_calibration"
+    ]
     assert any(
         "clamped from 0.2000" in warning for warning in result["reverse_dcf"]["dcf"]["warnings"]
     )
