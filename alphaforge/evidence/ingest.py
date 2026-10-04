@@ -479,20 +479,14 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         evidence_end = match.end()
         if _COMPOUND_ANNUAL_HEADING.match(heading):
             sentence_end = min(
-                (
-                    position
-                    for mark in ".!?\n"
-                    if (position := body.find(mark, match.end())) >= 0
-                ),
+                (position for mark in ".!?\n" if (position := body.find(mark, match.end())) >= 0),
                 default=len(body),
             )
             heading_clause = body[match.start() : sentence_end]
             explicit_match = _EXPLICIT_COVERED_FISCAL_YEAR.search(heading_clause)
             publication_match = _PUBLICATION_YEAR_CONTEXT.search(heading_clause)
             covered_match = (
-                _COVERED_YEAR_BEFORE_PUBLICATION.search(
-                    heading_clause[: publication_match.start()]
-                )
+                _COVERED_YEAR_BEFORE_PUBLICATION.search(heading_clause[: publication_match.start()])
                 if publication_match
                 else None
             )
