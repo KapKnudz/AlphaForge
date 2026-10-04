@@ -528,8 +528,8 @@ def test_report_provenance_uses_exact_consumed_windows():
 
 def test_report_provenance_identity_distinguishes_period_types():
     periods = [
-        annual(2025, 110, operating_Income=None),
-        annual(2026, 121, operating_Income=None),
+        annual(2025, 110, operating_Income=22),
+        annual(2026, 121, operating_Income=24.2),
         annual(2026, 121, period_type="r12", operating_Income=24.2),
     ]
     conn, cid = setup(periods=periods)
@@ -540,11 +540,19 @@ def test_report_provenance_identity_distinguishes_period_types():
     provenance = value["assumption_provenance"]
     growth_ids = {ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]}
     margin_ids = {ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]}
-    annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
+    discount_ids = {
+        ref["source_id"] for ref in provenance["discount_rate"]["evidence_references"]
+    }
+    annual_ids = {
+        f"financial-period:company-{cid}:type-year:end-{year}-03-31"
+        for year in (2025, 2026)
+    }
+    latest_annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
     r12_id = f"financial-period:company-{cid}:type-r12:end-2026-03-31"
-    assert annual_id in growth_ids
-    assert margin_ids == {r12_id}
-    assert annual_id != r12_id
+    assert growth_ids == annual_ids
+    assert margin_ids == {latest_annual_id}
+    assert r12_id in discount_ids
+    assert latest_annual_id not in discount_ids
 
 
 def test_v18_upgrade_adds_empty_calibration_lane_without_backfill():
