@@ -262,7 +262,7 @@ def test_dcf_wired_and_distinguished_from_heuristic_score():
     rd = results["reverse_dcf"]
     assert "dcf" in rd, f"reverse_dcf missing dcf key: {rd}"
     assert rd["dcf"]["available"] is True, f"dcf not available: {rd.get('dcf')}"
-    assert rd["dcf"]["policy_version"] == "reverse-dcf-v15-typed-result-contract"
+    assert rd["dcf"]["policy_version"] == "reverse-dcf-v16-explicit-input-quality"
     assert rd["dcf"]["assumptions"]["discount_rate"] is not None
     assert rd["dcf"]["assumptions"]["terminal_growth"] == 0.02
     assert len(rd["dcf"]["projected_cash_flows"]) == 5

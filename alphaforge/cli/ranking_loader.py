@@ -32,7 +32,13 @@ from alphaforge.core.valuation.dcf_contract import (
     EvidenceReference,
     serialize_dcf_result,
 )
-from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
+from alphaforge.core.valuation.dcf_policy import (
+    DcfAssumptionPolicy,
+    DcfInputQualityView,
+    DcfNormalizedFinancialView,
+    DcfQualityIssue,
+    DcfQualityPeriod,
+)
 from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
@@ -451,6 +457,179 @@ def _annual_series(rows) -> tuple[list, list[str], list[dict]]:
     if len(selected) < 2:
         reasons = [boundary_reason or "fewer than two consecutive annual periods"]
     return [item[0] for item in selected], reasons, omitted
+
+
+def _dcf_quality_period(row, disposition: str, reason: str | None = None) -> DcfQualityPeriod:
+    starts, malformed_start = report_date_aliases(_payload(row), "period_start")
+    start = next(iter(starts)) if not malformed_start and len(starts) == 1 else None
+    end = _verified_fiscal_end(row)
+    publication = _verified_publication(row)
+    fiscal_year = _verified_fiscal_year(row)
+    unknown_fields = ("period_start_and_duration",) if not starts and not malformed_start else ()
+    return DcfQualityPeriod(
+        fiscal_year=fiscal_year,
+        period_type=row["period_type"],
+        period_start=start.isoformat() if start else None,
+        period_end=end.isoformat() if end else None,
+        published_on=publication.isoformat() if publication else None,
+        duration_days=(end - start).days + 1 if start is not None and end is not None else None,
+        currency=_currency_code(row["values_currency"]),
+        disposition=disposition,
+        reported_period=_verified_report_period(row),
+        unknown_fields=unknown_fields,
+        evidence_id=f"annual:{fiscal_year}:{end.isoformat() if end else None}",
+        reason=reason,
+    )
+
+
+def _dcf_rejected_quality_period(item: dict) -> DcfQualityPeriod:
+    raw = item.get("raw_payload") or {}
+    ends, malformed_end = report_date_aliases(raw, "period_end")
+    starts, malformed_start = report_date_aliases(raw, "period_start")
+    publications, malformed_publication = report_date_aliases(raw, "report_date")
+    years, malformed_year = report_integer_aliases(raw, "report_year")
+    periods, malformed_period = report_integer_aliases(raw, "report_period")
+    fiscal_year = _fiscal_year(item.get("report_year"))
+    period_end = next(iter(ends)) if not malformed_end and len(ends) == 1 else None
+    period_start = next(iter(starts)) if not malformed_start and len(starts) == 1 else None
+    published_on = (
+        next(iter(publications)) if not malformed_publication and len(publications) == 1 else None
+    )
+    denomination = item.get("denomination") or {}
+    currency = _currency_code(denomination.get("values_currency"))
+    if currency is None:
+        currency = _currency_code(raw.get("values_currency"))
+    unknown_fields = []
+    if not starts and not malformed_start:
+        unknown_fields.append("period_start_and_duration")
+    if (
+        currency is None
+        and not denomination.get("values_currency")
+        and not raw.get("values_currency")
+    ):
+        unknown_fields.append("values_currency")
+    return DcfQualityPeriod(
+        fiscal_year=fiscal_year
+        if fiscal_year is not None and not malformed_year and years == {fiscal_year}
+        else None,
+        period_type=str(item.get("period_type", "year")),
+        period_start=period_start.isoformat() if period_start else None,
+        period_end=period_end.isoformat() if period_end else None,
+        published_on=published_on.isoformat() if published_on else None,
+        duration_days=(
+            (period_end - period_start).days + 1
+            if period_start is not None and period_end is not None
+            else None
+        ),
+        currency=currency,
+        disposition="excluded",
+        reported_period=(
+            next(iter(periods)) if not malformed_period and len(periods) == 1 else None
+        ),
+        unknown_fields=tuple(unknown_fields),
+        evidence_id=str(item.get("id")) if item.get("id") is not None else None,
+        reason=str(item.get("reason", "annual report rejected")),
+    )
+
+
+def _dcf_input_quality_view(
+    annual_rows, selected_rows, selection, valuation_row
+) -> DcfInputQualityView:
+    history = selection.get("annual_history", {})
+    selected_ids = {row["id"] for row in selected_rows}
+    excluded_reason = {
+        (str(item.get("period_end")), str(item.get("report_year"))): item.get("reason")
+        for item in history.get("excluded", [])
+    }
+    valuation_period = (
+        _dcf_quality_period(valuation_row, "valuation_input") if valuation_row is not None else None
+    )
+    selected = tuple(_dcf_quality_period(row, "selected") for row in selected_rows)
+    excluded_items = []
+    for row in annual_rows:
+        if row["id"] in selected_ids:
+            continue
+        key = (str(row["period_end"]), str(row["report_year"]))
+        reason = excluded_reason.get(key)
+        if reason is None:
+            reason = next(
+                iter(history.get("reasons", ())), "outside selected consecutive annual suffix"
+            )
+        excluded_items.append(_dcf_quality_period(row, "excluded", reason))
+    excluded = tuple(
+        [*excluded_items]
+        + [
+            _dcf_rejected_quality_period(item)
+            for item in selection.get("rejected_reports", [])
+            if item.get("period_type") == "year" and item.get("current_refusal")
+        ]
+    )
+
+    years = {
+        period.fiscal_year for period in (*selected, *excluded) if period.fiscal_year is not None
+    }
+    for item in excluded:
+        if item.evidence_id and item.fiscal_year is not None:
+            years.add(item.fiscal_year)
+    expected = tuple(range(min(years), max(years) + 1)) if years else ()
+    missing = tuple(year for year in expected if year not in years)
+
+    issues = []
+    for reason in history.get("reasons", []):
+        issues.append(DcfQualityIssue("annual_history", None, None, reason))
+    for item in excluded:
+        if item.reason:
+            issues.append(
+                DcfQualityIssue(
+                    "annual_history",
+                    item.fiscal_year,
+                    item.period_end,
+                    item.reason,
+                    f"annual:{item.fiscal_year}:{item.period_end}",
+                )
+            )
+    for item in selection.get("rejected_reports", []):
+        if item.get("period_type") != "year" or not item.get("current_refusal"):
+            continue
+        issues.append(
+            DcfQualityIssue(
+                str(item.get("source", "rejected_report")),
+                _fiscal_year(item.get("report_year")),
+                item.get("period_end"),
+                str(item.get("reason", "annual report rejected")),
+                str(item.get("id")) if item.get("id") is not None else None,
+            )
+        )
+    unique_issues = {
+        (issue.source, issue.fiscal_year, issue.period_end, issue.reason, issue.evidence_id): issue
+        for issue in issues
+    }
+    unknowns = tuple(
+        sorted(
+            {
+                f"annual period {period.fiscal_year or period.period_end}: {field} unknown"
+                for period in (
+                    *selected,
+                    *excluded,
+                    *((valuation_period,) if valuation_period else ()),
+                )
+                for field in period.unknown_fields
+            }
+        )
+    )
+    return DcfInputQualityView(
+        expected_periods=expected,
+        valuation_period=valuation_period,
+        selected_periods=selected,
+        excluded_periods=excluded,
+        missing_periods=missing,
+        evidenced_anomalies=tuple(
+            unique_issues[key]
+            for key in sorted(unique_issues, key=lambda value: tuple(str(x) for x in value))
+        ),
+        unknowns=unknowns,
+        selection_reasons=tuple(history.get("reasons", ())),
+    )
 
 
 def _date_facts(payload: dict[str, Any], aliases: tuple[str, ...]) -> dict[str, Any]:
@@ -1045,6 +1224,25 @@ def load_results_for_company(
         "reasons": annual_reasons,
         "excluded": excluded_annuals,
     }
+    quality_valuation_rows = [row for row in period_rows if row["period_type"] == "r12"]
+    quality_valuation_row = (
+        quality_valuation_rows[-1]
+        if quality_valuation_rows
+        else (admitted_annuals[-1] if admitted_annuals else None)
+    )
+    input_quality_view = _dcf_input_quality_view(
+        admitted_annuals,
+        annual_period_rows,
+        selection,
+        quality_valuation_row,
+    )
+    input_quality_decision = DcfAssumptionPolicy.assess_input_quality(input_quality_view)
+    normalized_financial_view = DcfNormalizedFinancialView(input_quality_view, None)
+    input_quality_payload = {
+        "view": asdict(input_quality_view),
+        "decision": asdict(input_quality_decision),
+    }
+    selection["dcf_input_quality"] = input_quality_payload
     stored_price_rows = conn.execute(
         "SELECT * FROM prices WHERE company_id=? ORDER BY price_date ASC",
         (company_id,),
@@ -1139,6 +1337,8 @@ def load_results_for_company(
                 "available": False,
                 "policy_version": DcfAssumptionPolicy.VERSION,
                 "missing_information": _missing,
+                "input_quality": input_quality_payload,
+                "normalized_financial_view": asdict(normalized_financial_view),
             },
             DcfResultMetadata(
                 DcfResultStatus.INSUFFICIENT_EVIDENCE,
@@ -1460,6 +1660,7 @@ def load_results_for_company(
                 market_split_references=dcf_split_refs,
                 roic=roic_for_dcf,
                 calibration_record=calibration_record,
+                input_quality=input_quality_view,
             )
             if (
                 calibration_record is None
@@ -1850,8 +2051,19 @@ def load_results_for_company(
             "missing_information": price_missing,
             "warnings": [],
         }
+    normalized_financial_view = DcfNormalizedFinancialView(
+        input_quality_view,
+        dcf_policy_decision.normalization if dcf_policy_decision is not None else None,
+    )
+    input_quality_payload = {
+        "view": asdict(input_quality_view),
+        "decision": asdict(input_quality_decision),
+    }
+    selection["dcf_input_quality"] = input_quality_payload
     dcf_result = reverse_dcf.get("dcf")
     if isinstance(dcf_result, dict):
+        dcf_result["input_quality"] = input_quality_payload
+        dcf_result["normalized_financial_view"] = asdict(normalized_financial_view)
         missing = dcf_result.get("missing_information") or ()
         failure_reason = next(iter(missing), None)
         if dcf_result.get("available"):

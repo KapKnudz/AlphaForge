@@ -27,7 +27,7 @@ def test_empty_history_early_refusal_uses_the_same_result_contract():
     assert result["status"] == "unavailable"
     assert result["dcf"]["status"] == "insufficient_evidence"
     assert result["dcf"]["reason"] == "financial_period"
-    assert result["dcf"]["version"] == "reverse-dcf-v15-typed-result-contract"
+    assert result["dcf"]["version"] == "reverse-dcf-v16-explicit-input-quality"
     assert result["dcf"]["contract_version"] == DCF_RESULT_CONTRACT_VERSION
     json.dumps(result["dcf"], allow_nan=False)
 

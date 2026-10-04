@@ -354,7 +354,7 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     )
     assert value["status"] == "available"
     assert value["reason"] is None
-    assert value["version"] == "reverse-dcf-v15-typed-result-contract"
+    assert value["version"] == "reverse-dcf-v16-explicit-input-quality"
     provenance = value["assumption_provenance"]
     assert set(provenance) == set(value["assumptions"])
     assert provenance["revenue_growth"]["origin"] == "company_history"
@@ -608,7 +608,7 @@ def test_public_missing_invalid_or_unsupported_inputs_never_leak_values(case):
         assert dcf["dcf"]["status"] == "insufficient_evidence"
     else:
         assert dcf["dcf"]["status"] == "domain_unavailable"
-    assert dcf["dcf"]["version"] == "reverse-dcf-v15-typed-result-contract"
+    assert dcf["dcf"]["version"] == "reverse-dcf-v16-explicit-input-quality"
     if case in {"basis", "future", "hash", "company"}:
         candidates = result["selection"]["reinvestment_calibration"]["candidates"]
         assert candidates[0]["rejection_reason"]

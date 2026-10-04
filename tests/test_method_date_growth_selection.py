@@ -166,7 +166,10 @@ def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF):
 )
 @pytest.mark.parametrize("has_financials", [False, True])
 def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch, tmp_path):
-    conn, cid = setup(branch, periods=None if has_financials else [])
+    conn, cid = setup(
+        branch,
+        periods=[annual(2025), annual(2026)] if has_financials else [],
+    )
     if has_financials:
         measured_roic_fixture(conn, cid)
         packet(conn, cid)
@@ -187,7 +190,10 @@ def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch,
 @pytest.mark.parametrize("age,available", [(0, True), (7, True), (8, False), (334, False)])
 def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_path):
     price_date = (date.fromisoformat(CUTOFF) - timedelta(days=age)).isoformat()
-    conn, cid = setup(price_date=price_date)
+    conn, cid = setup(
+        periods=[annual(2025), annual(2026)],
+        price_date=price_date,
+    )
     measured_roic_fixture(conn, cid)
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
@@ -1085,7 +1091,12 @@ def test_price_ingestion_parses_complete_iso_dates(raw_date, expected_count, sto
 def test_report_publication_is_a_separate_verified_date(
     publication, admitted, monkeypatch, tmp_path
 ):
-    conn, cid = setup(periods=[annual(2026, report_Date=publication)])
+    periods = (
+        [annual(2025), annual(2026, report_Date=publication)]
+        if admitted
+        else [annual(2026, report_Date=publication)]
+    )
+    conn, cid = setup(periods=periods)
     measured_roic_fixture(conn, cid)
     packet(conn, cid)
     result = load_results_for_company(conn, cid, CUTOFF)
@@ -1098,7 +1109,10 @@ def test_report_publication_is_a_separate_verified_date(
     )
     assert (dcf[str(cid)]["status"] == "available") == admitted
     if admitted:
-        assert result["selection"]["annual_history"]["period_ends"] == ["2026-03-31"]
+        assert result["selection"]["annual_history"]["period_ends"] == [
+            "2025-03-31",
+            "2026-03-31",
+        ]
     else:
         assert dcf[str(cid)]["missing_information"]
 
@@ -1246,7 +1260,8 @@ def test_conflicting_publication_aliases_block_rank_exports(monkeypatch, tmp_pat
     assert any(item.get("current_refusal") for item in exported["rejected_reports"])
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
-    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+    assert dcf[str(cid)]["dcf"]["available"] is False
+    assert dcf[str(cid)]["dcf"]["input_quality"]["decision"]["available"] is False
 
 
 def test_latest_r12_values_do_not_replace_the_annual_growth_anchor():
@@ -1499,7 +1514,7 @@ def test_rank_export_refuses_growth_based_dcf_without_dated_positive_roic(
 
 
 def test_qualified_calibration_exports_fade_and_refused_solve_axes(monkeypatch, tmp_path):
-    conn, cid = setup(periods=[annual(2026, 121)])
+    conn, cid = setup(periods=[annual(2025, 110), annual(2026, 121)])
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid, future_return=0.10)
     upsert_kpi_observations(
@@ -1533,6 +1548,104 @@ def test_qualified_calibration_exports_fade_and_refused_solve_axes(monkeypatch, 
     assert margin["candidate_roots"] == []
     assert "implied_assumption" not in margin
     assert "implied_assumption" not in terminal
+
+
+def test_valid_april_annual_history_keeps_qualified_dcf_and_quality_facts(monkeypatch, tmp_path):
+    conn, cid = setup(
+        periods=[
+            annual(
+                2025,
+                100,
+                period_end="2025-04-30",
+                period_start="2024-05-01",
+                report_Date="2025-05-01",
+            ),
+            annual(
+                2026,
+                110,
+                period_end="2026-04-30",
+                period_start="2025-05-01",
+                report_Date="2026-05-01",
+            ),
+        ]
+    )
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is True
+    quality = result["dcf"]["input_quality"]
+    assert quality["decision"]["available"] is True
+    assert quality["decision"]["selected_depth"] == 2
+    assert quality["view"]["expected_periods"] == [2025, 2026]
+    assert [p["period_end"] for p in quality["view"]["selected_periods"]] == [
+        "2025-04-30",
+        "2026-04-30",
+    ]
+    assert [p["duration_days"] for p in quality["view"]["selected_periods"]] == [365, 365]
+    assert all(p["currency"] == "SEK" for p in quality["view"]["selected_periods"])
+    assert quality["view"]["unknowns"] == []
+    assert quality["view"]["valuation_period"]["period_end"] == "2026-04-30"
+    assert quality["view"]["valuation_period"]["duration_days"] == 365
+    view = result["dcf"]["normalized_financial_view"]
+    assert view["normalization"]["selected_window"]["years"] == 1
+    assert view["normalization"]["selected_window"]["ebit_margin"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_history",
+        "malformed_start",
+        "malformed_period",
+        "conflicting_alias",
+        "duplicate_slot",
+        "missing_period",
+        "mixed_currency",
+        "truncated_prefix",
+    ],
+)
+def test_dcf_quality_refuses_unqualified_annual_history(case):
+    if case == "missing_history":
+        rows = []
+    elif case == "malformed_start":
+        rows = [annual(2025), annual(2026, period_start="2025-10-01")]
+    elif case == "malformed_period":
+        rows = [annual(2025), annual(2026, report_period="not-a-period")]
+    elif case == "conflicting_alias":
+        rows = [annual(2025), annual(2026, periodEnd="2026-04-30")]
+    elif case == "duplicate_slot":
+        rows = [
+            annual(2025),
+            annual(2025, period_end="2026-03-31", report_Date="2026-05-01"),
+        ]
+    elif case == "missing_period":
+        rows = [annual(2024), annual(2026)]
+    elif case == "mixed_currency":
+        rows = [annual(2025), annual(2026, currency="USD")]
+    else:
+        rows = [annual(2020), annual(2023)]
+    conn, cid = setup(periods=rows)
+    packet(conn, cid)
+    synthetic_calibration_fixture(conn, cid)
+
+    loaded = load_results_for_company(conn, cid, CUTOFF)
+    result = loaded["reverse_dcf"]
+    quality = result["dcf"]["input_quality"]
+    assert result["status"] == "unavailable", case
+    assert result["dcf"]["available"] is False, case
+    assert quality["decision"]["available"] is False, case
+    assert quality["decision"]["selected_depth"] < 2, case
+    assert quality["decision"]["reasons"] == ["qualified_consecutive_annual_history_unavailable"]
+    assert not result.get("implied"), case
+    assert "value_per_share" not in result["dcf"], case
+    if case == "malformed_start":
+        assert not any("2026" in value for value in quality["view"]["unknowns"])
+    if case in {"missing_period", "truncated_prefix"}:
+        assert quality["view"]["missing_periods"], case
+    if case not in {"missing_history"}:
+        assert quality["view"]["evidenced_anomalies"], case
 
 
 def test_legacy_near_bound_terminal_price_is_not_reissued_without_calibration(
@@ -1659,7 +1772,7 @@ def test_legacy_lower_bound_terminal_price_is_not_reissued_without_calibration(
 
 
 def test_negative_modeled_equity_is_not_exported_as_tradable_negative_price(monkeypatch, tmp_path):
-    conn, cid = setup(periods=[annual(2026, 121, net_Debt=1_000)])
+    conn, cid = setup(periods=[annual(2025, 110), annual(2026, 121, net_Debt=1_000)])
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid)
     upsert_kpi_observations(
@@ -1860,13 +1973,13 @@ def test_interior_annual_rejection_blocks_growth_and_exports(
     assert loaded["selection"]["annual_history"]["period_ends"] == []
     assert loaded["financial"].revenue_growth is None
     assert loaded["financial"].revenue_growth_years == 0
-    # Preserve the existing explicit fallback with independent capital calibration,
-    # never a CAGR across the uncertain span.
+    # Unresolved annual chronology cannot become a mature forecast via zero-growth fallback.
     synthetic_calibration_fixture(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     policy = loaded["dcf"]["policy"]
-    assert policy.assumptions.revenue_growth == 0
-    assert "historical revenue growth unavailable" in policy.assumption_sources["revenue_growth"]
+    assert policy.assumptions is None
+    assert policy.missing_information == ("qualified_consecutive_annual_history_unavailable",)
+    assert not loaded["selection"]["dcf_input_quality"]["decision"]["available"]
 
     score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
     assert score["growth_score"] == 0
@@ -1883,7 +1996,10 @@ def test_interior_annual_rejection_blocks_growth_and_exports(
     assert any("unresolved applicable annual rejection" in item for item in score["missing_data"])
     assert json.loads(row["input_selection"]) == score["input_selection"]
     assert dcf[str(cid)]["selection"] == score["input_selection"]
-    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+    assert dcf[str(cid)]["dcf"]["available"] is False
+    assert dcf[str(cid)]["dcf"]["missing_information"] == [
+        "qualified_consecutive_annual_history_unavailable"
+    ]
     exported = next(
         item
         for item in score["input_selection"]["rejected_reports"]
@@ -1934,7 +2050,7 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     loaded = load_results_for_company(conn, cid, CUTOFF)
     synthetic_calibration_fixture(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    expected = "reverse-dcf-v15-typed-result-contract"
+    expected = "reverse-dcf-v16-explicit-input-quality"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected
@@ -2028,7 +2144,10 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
     )
     assert json.loads(row["input_selection"]) == exported
     assert dcf[str(cid)]["selection"] == exported
-    assert dcf[str(cid)]["dcf"]["assumptions"]["revenue_growth"] == 0
+    assert dcf[str(cid)]["dcf"]["available"] is False
+    assert dcf[str(cid)]["dcf"]["missing_information"] == [
+        "qualified_consecutive_annual_history_unavailable"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2360,11 +2479,11 @@ def test_legacy_nonobject_annual_peer_is_excluded_from_contextual_audit(
     "defect,expected_reason,expected_dcf_status",
     [
         ("currency", "annual currency comparability unverified", "unavailable"),
-        ("duplicate_year", "duplicate annual fiscal slot", "available"),
+        ("duplicate_year", "duplicate annual fiscal slot", "unavailable"),
         (
             "future_year",
             "annual periods are not consecutive fiscal anniversaries",
-            "available",
+            "unavailable",
         ),
     ],
 )
