@@ -581,6 +581,9 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
     from alphaforge.cli.main import cmd_sync
 
     class RejectedKpiAdapter:
+        fail_prices = False
+        summary_calls = 0
+
         def get_instruments(self):
             return [
                 {
@@ -624,9 +627,12 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
             return []
 
         def get_stock_prices(self, ins_id, *, max_count=None):
+            if self.fail_prices:
+                raise RuntimeError("synthetic price failure")
             return []
 
         def get_kpi_summary(self, ins_id, report_type):
+            type(self).summary_calls += 1
             if report_type in {"year", "r12"}:
                 return {
                     "kpis": [
@@ -735,7 +741,7 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
         } == {"success"}
 
         with patch(
-            "alphaforge.db.repositories.upsert_kpi_observations",
+            "alphaforge.cli.kpi_sync.upsert_kpi_observations",
             side_effect=RuntimeError("synthetic KPI persistence failure"),
         ):
             assert cmd_sync(args) == 1
@@ -753,6 +759,11 @@ def test_sync_counts_durable_kpi_rejections_and_retries_write_failures():
             "SELECT status FROM jobs WHERE job_type='sync_kpis_37_year'"
         ).fetchone()
         assert retried["status"] == "success"
+
+        summary_calls_before_price_failure = RejectedKpiAdapter.summary_calls
+        with patch.object(RejectedKpiAdapter, "fail_prices", True):
+            assert cmd_sync(args) == 1
+        assert RejectedKpiAdapter.summary_calls == summary_calls_before_price_failure + 3
 
 
 @pytest.mark.integration
