@@ -1431,9 +1431,10 @@ def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path)
     assert "roic" not in row["missing_data"]
     assert "roic" not in dcf[str(cid)]["dcf"]["missing_information"]
     assert dcf[str(cid)]["dcf"]["missing_information"] == ["admissible_reinvestment_calibration"]
-    assert "qualified reinvestment calibration unavailable" in dcf[str(cid)]["dcf"][
-        "normalization"
-    ]["reasons"]
+    assert (
+        "qualified reinvestment calibration unavailable"
+        in dcf[str(cid)]["dcf"]["normalization"]["reasons"]
+    )
     rejected = score["input_selection"]["rejected_kpis"][0]
     assert rejected["raw_payload"]["v"] == 40
     assert not rejected["current_refusal"]

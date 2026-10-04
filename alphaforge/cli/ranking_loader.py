@@ -1415,9 +1415,7 @@ def load_results_for_company(
                         ),
                         **_equity_qualification(dcf_value.equity_value),
                         "projected_cash_flows": [asdict(p) for p in dcf_value.projected_cash_flows],
-                        "normalization": _normalization_payload(
-                            dcf_policy_decision.normalization
-                        ),
+                        "normalization": _normalization_payload(dcf_policy_decision.normalization),
                         "warnings": list(dcf_policy_decision.warnings)
                         if dcf_policy_decision.warnings
                         else [],
