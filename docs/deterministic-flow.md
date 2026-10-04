@@ -142,8 +142,9 @@ fundamentals. A numeric diagnostic score can still be emitted for an ineligible
 company. Yield availability/window/currency/coverage facts are returned by the
 loader as `dividend_yield` and retained in every model's `scoring_audit`, including
 ranking JSON and persisted scores; CSV carries the resulting score consequences,
-not a standalone yield column. DCF unavailability and provisional inputs have their own structured
-`missing_information`/warnings contract in [valuation.md](valuation.md).
+not a standalone yield column. DCF unavailability and assumption diagnostics have
+an explicit structured `missing_information`/warnings contract in
+[valuation.md](valuation.md).
 
 ## 3. Cutoff selection and calculation wiring
 

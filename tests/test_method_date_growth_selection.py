@@ -85,7 +85,8 @@ def setup(branch=None, periods=None, price_date=CUTOFF):
         "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) VALUES (?,?,?,?)",
         (cid, "FIX", "fixture", "fixed"),
     )
-    upsert_financial_periods(conn, cid, periods if periods is not None else [annual(2026)])
+    periods = periods if periods is not None else [annual(2026)]
+    upsert_financial_periods(conn, cid, periods)
     if price_date:
         upsert_prices(conn, cid, [{"d": price_date, "c": 10}], currency="SEK")
     conn.commit()
@@ -134,6 +135,17 @@ def packet(conn, cid, cutoff=CUTOFF):
     return body
 
 
+def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_date=CUTOFF):
+    upsert_kpi_observations(
+        conn,
+        company_id,
+        37,
+        "year",
+        "mean",
+        [{"y": year, "p": 5, "v": value, "observationDate": observation_date}],
+    )
+
+
 def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF):
     monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
     monkeypatch.chdir(tmp_path)
@@ -153,6 +165,7 @@ def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF):
 def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch, tmp_path):
     conn, cid = setup(branch, periods=None if has_financials else [])
     if has_financials:
+        measured_roic_fixture(conn, cid)
         packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert loaded["candidate"].ranking_model == model
@@ -172,6 +185,7 @@ def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch,
 def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_path):
     price_date = (date.fromisoformat(CUTOFF) - timedelta(days=age)).isoformat()
     conn, cid = setup(price_date=price_date)
+    measured_roic_fixture(conn, cid)
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert (loaded["valuation"].raw_market_cap is not None) == available
@@ -1069,6 +1083,7 @@ def test_report_publication_is_a_separate_verified_date(
     publication, admitted, monkeypatch, tmp_path
 ):
     conn, cid = setup(periods=[annual(2026, report_Date=publication)])
+    measured_roic_fixture(conn, cid)
     packet(conn, cid)
     result = load_results_for_company(conn, cid, CUTOFF)
     assert (result["financial"] is not None) == admitted
@@ -1210,6 +1225,7 @@ def test_conflicting_publication_aliases_block_rank_exports(monkeypatch, tmp_pat
         )
     )
     conn, cid = setup(periods=rows)
+    measured_roic_fixture(conn, cid)
     packet(conn, cid)
 
     loaded = load_results_for_company(conn, cid, CUTOFF)
@@ -1279,6 +1295,9 @@ def test_valid_annual_split_history_has_no_false_dilution():
 @pytest.mark.parametrize("value", [None, 0])
 def test_missing_versus_zero_current_inputs_survive_selection(value):
     conn, cid = setup(periods=[annual(2026, free_Cash_Flow=value, net_Debt=value)])
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 20, "observationDate": CUTOFF}]
+    )
     result = load_results_for_company(conn, cid, CUTOFF)
     assert result["financial"].fcf_margin == (None if value is None else 0)
     assert result["financial"].net_debt == value
@@ -1336,7 +1355,7 @@ def test_unavailable_annual_reason_survives_json_csv_and_dcf(monkeypatch, tmp_pa
         assert score[f"{metric}_years"] == 0
         assert row[metric] == ""
         assert row[f"{metric}_years"] == "0"
-    assert RankingEngine.RANKING_MODEL_VERSION == "2026-09-30-report-denomination-v17"
+    assert RankingEngine.RANKING_MODEL_VERSION == "2026-10-03-dcf-availability-diagnostics-v18"
 
 
 @pytest.mark.parametrize("baseline", [None, 0, -100])
@@ -1383,7 +1402,7 @@ def test_future_report_and_placeholder_do_not_change_selected_growth():
 
 def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path):
     conn, cid = setup(
-        periods=[annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
+        periods=[annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)],
     )
     packet(conn, cid)
     upsert_kpi_observations(
@@ -1420,6 +1439,303 @@ def test_rejected_kpi_replacement_preserves_verified_roic(monkeypatch, tmp_path)
     )
     assert dated_roic["raw_value"] == 0.5 and dated_roic["available"]
     assert dated_dcf[str(cid)]["dcf"]["assumptions"]["net_reinvestment_rate"] > 0
+
+
+@pytest.mark.parametrize("roic", [None, 0.0, -5.0])
+def test_rank_export_refuses_growth_based_dcf_without_dated_positive_roic(
+    roic, monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    if roic is not None:
+        upsert_kpi_observations(
+            conn,
+            cid,
+            37,
+            "year",
+            "mean",
+            [{"y": 2026, "p": 5, "v": roic, "observationDate": CUTOFF}],
+        )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    assert result["status"] == "unavailable"
+    assert result["dcf"]["available"] is False
+    assert result["dcf"]["missing_information"] == ["dated_positive_roic"]
+    assert "dated finite positive ROIC" in result["dcf"]["unavailable_reason"]
+    assert not result.get("implied")
+    assert "value_per_share" not in result["dcf"]
+    assert "projected_cash_flows" not in result["dcf"]
+
+
+def test_measured_roic_exports_fade_and_nonmonotonic_reverse_diagnostics(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 10.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    dcf = result["dcf"]
+    assert result["status"] == "available"
+    assert dcf["available"] is True
+    assert dcf["assumptions"]["reinvestment_return"] == pytest.approx(0.10)
+    assert dcf["assumptions"]["revenue_growth_fade_to"] == pytest.approx(0.02)
+    assert dcf["negative_modeled_equity"] is False
+
+    growth = result["implied"]["revenue_growth"]
+    assert growth["lower_bound"] == pytest.approx(-0.10)
+    assert growth["upper_bound"] == pytest.approx(0.30)
+    assert growth["lower_endpoint_price"] is not None
+    assert growth["upper_endpoint_price"] is not None
+    assert growth["monotonicity"] == "sampled_non_monotonic"
+    assert growth["interior_extrema"]
+    assert growth["solve_scope"] == (
+        "one-variable conditional solve; all other assumptions held fixed"
+    )
+    assert growth["candidate_solution_count"] == 1
+    assert growth["crossing_count_on_grid"] == 1
+    assert growth["sample_match_candidate_count"] == 0
+    assert "conditional numerical evidence only" in growth["solution_qualification"]
+
+    terminal = result["implied"]["terminal_growth"]
+    assert terminal["error"]
+    assert terminal["target_position"] == "below_sampled_range"
+    assert terminal["no_solution_direction"] == "below"
+    assert terminal["sampled_maximum_assumption"] == pytest.approx(0.0)
+    assert terminal["sampled_maximum_price"] > max(
+        terminal["lower_endpoint_price"], terminal["upper_endpoint_price"]
+    )
+    assert terminal["nearest_boundary_gap"] > 0
+    assert terminal["nearest_boundary_gap_denominator"] == "target_price"
+    assert terminal["nearest_boundary_gap_denominator_value"] == pytest.approx(10.0)
+    assert terminal["nearest_boundary_gap_pct_target"] == pytest.approx(
+        terminal["nearest_boundary_gap"] / 10.0 * 100
+    )
+    assert "not excluded" in terminal["range_qualification"]
+
+
+def test_near_bound_terminal_solve_is_qualified_and_terminal_dependence_exported(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    # Independent hand calculation for this fixture gives SEK 13.258324834639302
+    # at 3.9% terminal growth with 20% ROIC and a 15% discount rate.
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 13.258324834639302}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    assert result["dcf"]["available"] is True
+    terminal = result["implied"]["terminal_growth"]
+    assert terminal["implied_assumption"] == pytest.approx(0.039, abs=1e-6)
+    assert terminal["near_bound"] is True
+    assert terminal["near_bound_side"] == "upper"
+    assert "conditional and assumption-sensitive" in terminal["interpretation"]
+    assert terminal["terminal_value_share_of_enterprise_value"] > 0.5
+    assert result["dcf"]["terminal_value_share_of_enterprise_value"] is not None
+
+
+def test_near_cap_terminal_candidate_is_qualified_when_lower_root_is_selected(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.853213549541081}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 12.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["candidate_solution_count"] == 2
+    assert terminal["crossing_count_on_grid"] == 2
+    assert terminal["implied_assumption"] == pytest.approx(-0.00714154, abs=1e-6)
+    assert terminal["near_bound"] is False
+    assert terminal["near_bound_side"] is None
+    assert terminal["near_cap_candidate_present"] is True
+    assert "upper solve cap" in terminal["near_cap_warning"]
+    lower_root, upper_root = terminal["candidate_roots"]
+    assert lower_root["near_bound"] is False
+    assert lower_root["near_bound_side"] is None
+    assert upper_root["implied_assumption"] == pytest.approx(0.039, abs=1e-6)
+    assert upper_root["near_bound"] is True
+    assert upper_root["near_bound_side"] == "upper"
+    assert "conditional and assumption-sensitive" in upper_root["interpretation"]
+
+
+def test_tolerance_match_at_terminal_maximum_preserves_two_exported_crossings(
+    monkeypatch, tmp_path
+):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 9.830675428653587}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 2.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["sign_change_bracket_count"] == 2
+    assert terminal["crossing_count_on_grid"] == 2
+    assert terminal["candidate_solution_count"] == 2
+    assert terminal["sample_match_candidate_count"] == 0
+    assert terminal["sampled_match_point_count"] == 1
+    match = terminal["sampled_match_points"][0]
+    assert match["classification"] == "sampled_match_with_sign_change"
+    assert match["associated_sign_change_bracket_count"] == 2
+    assert all(
+        candidate["solution_evidence"] == "sign_change_bracket"
+        for candidate in terminal["candidate_roots"]
+    )
+    left_root, right_root = terminal["candidate_roots"]
+    assert left_root["implied_assumption"] < 0.0 < right_root["implied_assumption"]
+
+
+def test_terminal_tolerance_region_with_opposite_signs_exports_crossing(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121, number_Of_Shares=10_000_000)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 1.257757952557623e-05}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["solution_status"] == "candidate_solutions"
+    assert terminal["sign_change_bracket_count"] == 1
+    assert terminal["crossing_count_on_grid"] == 1
+    assert terminal["candidate_solution_count"] == 1
+    assert terminal["sample_match_candidate_count"] == 0
+    assert terminal["implied_assumption"] == pytest.approx(0.01)
+    assert len(terminal["sampled_match_regions"]) == 1
+    region = terminal["sampled_match_regions"][0]
+    assert region["lower_sample_assumption"] < 0.01 < region["upper_sample_assumption"]
+    assert region["associated_sign_change_bracket_count"] == 1
+
+
+def test_terminal_growth_plateau_exports_sampled_region_without_finite_roots(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 3.171574253715503}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 2.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["solution_status"] == "sampled_match_region"
+    assert terminal["candidate_roots"] == []
+    assert terminal["candidate_solution_count"] == 0
+    assert terminal["sign_change_bracket_count"] == 0
+    assert "no finite root list" in terminal["solution_evidence"]
+    assert "implied_assumption" not in terminal
+    assert len(terminal["sampled_match_regions"]) == 1
+    region = terminal["sampled_match_regions"][0]
+    assert region["lower_sample_assumption"] == pytest.approx(0.02)
+    assert region["upper_sample_assumption"] == pytest.approx(0.04)
+    assert "not established" in region["qualification"]
+
+
+def test_lower_bound_terminal_solve_is_not_reported_as_near_cap(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121)])
+    packet(conn, cid)
+    upsert_prices(conn, cid, [{"d": CUTOFF, "c": 11.957417027608026}], currency="SEK")
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    terminal = exported[str(cid)]["implied"]["terminal_growth"]
+    assert terminal["implied_assumption"] == pytest.approx(-0.009, abs=1e-6)
+    assert terminal["near_bound"] is False
+    assert terminal["near_bound_side"] is None
+    assert terminal["lower_endpoint_price"] is not None
+    assert terminal["upper_endpoint_price"] is not None
+
+
+def test_negative_modeled_equity_is_not_exported_as_tradable_negative_price(monkeypatch, tmp_path):
+    conn, cid = setup(periods=[annual(2026, 121, net_Debt=1_000)])
+    packet(conn, cid)
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    dcf = exported[str(cid)]["dcf"]
+    assert dcf["available"] is True
+    assert dcf["negative_modeled_equity"] is True
+    assert "not a tradable negative share price" in dcf["equity_value_qualification"]
+
+
+def test_negative_nopat_with_measured_roic_is_unavailable_not_negative_investment(
+    monkeypatch, tmp_path
+):
+    loss_year = annual(2026, 121, operating_Income=-12.1, ebit=-12.1)
+    conn, cid = setup(periods=[loss_year])
+    packet(conn, cid)
+    upsert_kpi_observations(
+        conn,
+        cid,
+        37,
+        "year",
+        "mean",
+        [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
+    )
+
+    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    result = exported[str(cid)]
+    assert result["status"] == "unavailable"
+    assert result["dcf"]["available"] is False
+    assert result["dcf"]["missing_information"] == ["negative_nopat_unsupported_reinvestment"]
+    assert (
+        "does not treat negative investment as cash released" in result["dcf"]["unavailable_reason"]
+    )
+    assert not exported[str(cid)].get("implied")
 
 
 @pytest.mark.parametrize(
@@ -1562,6 +1878,9 @@ def test_interior_annual_rejection_blocks_growth_and_exports(
         rejected["periodEnd"] = "2025-05-31"  # An unresolved, conflicting fiscal slot.
     rows.append(rejected)
     conn, cid = setup(periods=list(reversed(rows)) if reverse else rows)
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 20, "observationDate": CUTOFF}]
+    )
     upsert_prices(conn, cid, [{"d": f"{year}-03-31", "c": 10} for year in range(2024, 2027)])
     packet(conn, cid)
 
@@ -1618,6 +1937,7 @@ def test_nonblocking_annual_rejections_preserve_selected_span(case, reverse, mon
         rows = [annual(2022, 80), *rows[1:]]
     conn, cid = setup(periods=[rejected])
     upsert_financial_periods(conn, cid, list(reversed(rows)) if reverse else rows)
+    measured_roic_fixture(conn, cid)
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     rejection = next(
@@ -1637,9 +1957,12 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     conn, cid = setup(
         periods=[annual(2023, 50), annual(2024, 0), annual(2025, 110), annual(2026, 121)]
     )
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 20, "observationDate": CUTOFF}]
+    )
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
-    expected = "reverse-dcf-v12-consecutive-annual-growth"
+    expected = "reverse-dcf-v13-dated-roic-availability-diagnostics"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected
@@ -1701,6 +2024,7 @@ def test_same_year_distinct_fiscal_end_rejection_blocks_rank_exports(
 ):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
+    measured_roic_fixture(conn, cid)
     transition = annual(
         report_year,
         140,
@@ -1754,6 +2078,7 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
         revenue = 100 * 1.1 ** (year - 2023)
         annuals.append(annual(year, revenue, ebit=revenue * 0.2))
     conn, cid = setup(periods=annuals)
+    measured_roic_fixture(conn, cid)
     if defect == "r12_publication":
         rejected = annual(
             2026,
@@ -2076,6 +2401,7 @@ def test_contextually_incompatible_same_slot_correction_remains_authoritative(
 ):
     rows = [annual(year, 100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)]
     conn, cid = setup(periods=rows)
+    measured_roic_fixture(conn, cid)
     packet(conn, cid)
     correction = annual(2026, 200)
     if defect == "currency":
@@ -2320,6 +2646,7 @@ def test_exact_slot_year_correction_supersedes_old_label_audit(
     if reverse_initial:
         initial.reverse()
     conn, cid = setup(periods=initial, price_date=cutoff)
+    measured_roic_fixture(conn, cid)
     correction = annual(2027, 121)
 
     assert upsert_financial_periods(conn, cid, [correction]) == 1
@@ -2855,6 +3182,9 @@ def test_metric_spans_use_latest_contiguous_complete_suffix(interior_revenue):
     ]
     rows[1]["revenues"] = interior_revenue
     conn, cid = setup(periods=rows)
+    upsert_kpi_observations(
+        conn, cid, 37, "year", "mean", [{"y": 2026, "p": 5, "v": 20, "observationDate": CUTOFF}]
+    )
     result = load_results_for_company(conn, cid, CUTOFF)
     financial = result["financial"]
 

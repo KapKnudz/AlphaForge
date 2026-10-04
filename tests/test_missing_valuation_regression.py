@@ -244,13 +244,16 @@ def test_dcf_wired_and_distinguished_from_heuristic_score():
         KpiIds.ROIC,
         "year",
         "mean",
-        [{"y": 2025, "p": 5, "v": 12.0}, {"y": 2024, "p": 5, "v": 11.0}],
+        [
+            {"y": 2025, "p": 5, "v": 12.0, "observationDate": "2026-02-01"},
+            {"y": 2024, "p": 5, "v": 11.0, "observationDate": "2025-02-01"},
+        ],
     )
     results = load_results_for_company(conn, cid, "2026-02-03")
     rd = results["reverse_dcf"]
     assert "dcf" in rd, f"reverse_dcf missing dcf key: {rd}"
     assert rd["dcf"]["available"] is True, f"dcf not available: {rd.get('dcf')}"
-    assert rd["dcf"]["policy_version"] == "reverse-dcf-v12-consecutive-annual-growth"
+    assert rd["dcf"]["policy_version"] == "reverse-dcf-v13-dated-roic-availability-diagnostics"
     assert rd["dcf"]["assumptions"]["discount_rate"] is not None
     assert rd["dcf"]["assumptions"]["terminal_growth"] == 0.02
     assert len(rd["dcf"]["projected_cash_flows"]) == 5

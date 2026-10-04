@@ -82,7 +82,7 @@ class DcfPolicyDecision:
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v12-consecutive-annual-growth"
+    VERSION = "reverse-dcf-v13-dated-roic-availability-diagnostics"
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
     TERMINAL_GROWTH = 0.02
@@ -175,19 +175,61 @@ class DcfAssumptionPolicy:
         warnings.extend(economics_warnings)
         roic_fraction = self._roic_fraction(roic)
         if roic_fraction is None:
-            raw_reinvestment = 0.0
             warnings.append(
-                "positive ROIC unavailable; net reinvestment set to 0% and confidence lowered"
+                "growth-based FCFF is unavailable without a usable dated finite positive ROIC; "
+                "no ordinary valuation or implied-growth results were produced"
             )
-            roic_missing = ("roic",)
-        else:
-            roic_missing = ()
-            reinvestment_share_of_nopat = self._clamp(
-                growth / roic_fraction if growth > 0 else 0.0,
-                0.0,
-                1.0,
+            return DcfPolicyDecision(
+                available=False,
+                policy_version=self.VERSION,
+                assumptions=None,
+                solve_bounds=dict(self.SOLVE_BOUNDS),
+                assumption_sources={
+                    "reinvestment_return": (
+                        "requires a usable dated finite positive Börsdata ROIC observation"
+                    )
+                },
+                normalized_fcf_margin=fcf_margin,
+                normalization=self._with_reinvestment_confidence(normalization, None),
+                required_return=required_return,
+                missing_information=("dated_positive_roic",),
+                warnings=tuple(warnings),
             )
-            raw_reinvestment = ebit_margin * (1.0 - self.TAX_RATE) * reinvestment_share_of_nopat
+
+        current_margin = (
+            current_report.ebit / current_report.revenue
+            if current_report.ebit is not None and current_report.revenue
+            else None
+        )
+        if ebit_margin < 0 or (current_margin is not None and current_margin < 0):
+            warnings.append(
+                "ROIC-based reinvestment is unsupported while modeled NOPAT is negative; "
+                "negative investment is not treated as cash released"
+            )
+            return DcfPolicyDecision(
+                available=False,
+                policy_version=self.VERSION,
+                assumptions=None,
+                solve_bounds=dict(self.SOLVE_BOUNDS),
+                assumption_sources={
+                    "reinvestment_return": (
+                        "negative-NOPAT operating paths are outside the supported reinvestment domain"
+                    )
+                },
+                normalized_fcf_margin=fcf_margin,
+                normalization=normalization,
+                reinvestment_roic=roic_fraction,
+                required_return=required_return,
+                missing_information=("negative_nopat_unsupported_reinvestment",),
+                warnings=tuple(warnings),
+            )
+
+        reinvestment_share_of_nopat = self._clamp(
+            growth / roic_fraction if growth > 0 else 0.0,
+            0.0,
+            1.0,
+        )
+        raw_reinvestment = ebit_margin * (1.0 - self.TAX_RATE) * reinvestment_share_of_nopat
         reinvestment = self._clamp(raw_reinvestment, *self.NET_REINVESTMENT_RANGE)
         if reinvestment != raw_reinvestment:
             warnings.append(
@@ -249,7 +291,7 @@ class DcfAssumptionPolicy:
             ),
             reinvestment_roic=roic_fraction,
             required_return=required_return,
-            missing_information=roic_missing,
+            missing_information=(),
             warnings=tuple(warnings),
         )
 

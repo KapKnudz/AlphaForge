@@ -340,6 +340,19 @@ _NON_COVERED_FISCAL_CONTEXT = re.compile(
     r"\b(?:forecast(?:s|ing)?|outlook|compared|comparison|previous|prognos|föregående|jämfört|jämförelse)\b",
     re.IGNORECASE,
 )
+_COMPOUND_ANNUAL_HEADING = re.compile(
+    r"^annual\s+and\s+sustainability\s+report\b",
+    re.IGNORECASE,
+)
+_PUBLICATION_YEAR_CONTEXT = re.compile(r"\b(?:published|publication)\b", re.IGNORECASE)
+_EXPLICIT_COVERED_FISCAL_YEAR = re.compile(
+    r"\bfor\s+fiscal\s+year\s+(20\d{2}(?:\s*/\s*(?:20)?\d{2})?)\b",
+    re.IGNORECASE,
+)
+_COVERED_YEAR_BEFORE_PUBLICATION = re.compile(
+    r"\bfor\s+(20\d{2}(?:\s*/\s*(?:20)?\d{2})?)\b",
+    re.IGNORECASE,
+)
 
 
 def _quarter_period(text: str) -> str | None:
@@ -403,7 +416,7 @@ def _year_period(text: str) -> str | None:
 
 
 def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str | None]:
-    """Resolve covered identity, never a forecast/comparator or publication year.
+    """Resolve covered identity, refusing publication years in compound annual headings.
 
     Provider fields outrank report titles; body fallback requires a report-labelled
     heading. Previously derived fields are outputs, not new provider assertions.
@@ -461,10 +474,72 @@ def resolve_fiscal_identity(doc: dict[str, Any]) -> tuple[str | None, str, str |
         # Match the heading itself and its own sentence prefix, not a preceding
         # independent forecast/comparator sentence. Use the label's delimiters.
         sentence_start = max(body.rfind(mark, 0, match.start()) for mark in ".!?\n") + 1
-        if _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start : match.end()]):
-            continue
         heading = match.group(0)
-        period = None if annual else _quarter_period(heading)
+        explicit_period = None
+        conflicting_periods: set[str] = set()
+        evidence_end = match.end()
+        if _COMPOUND_ANNUAL_HEADING.match(heading):
+            sentence_end = min(
+                (position for mark in ".!?\n" if (position := body.find(mark, match.end())) >= 0),
+                default=len(body),
+            )
+            heading_clause = body[match.start() : sentence_end]
+
+            def has_covered_context(
+                cue: re.Match[str],
+                heading_start: int = match.start(),
+                local_sentence_start: int = sentence_start,
+            ) -> bool:
+                cue_start = heading_start + cue.start()
+                context_start = max(
+                    local_sentence_start,
+                    max(
+                        body.rfind(delimiter, local_sentence_start, cue_start) for delimiter in ",;"
+                    )
+                    + 1,
+                )
+                return not _NON_COVERED_FISCAL_CONTEXT.search(body[context_start:cue_start])
+
+            explicit_matches = [
+                cue
+                for cue in _EXPLICIT_COVERED_FISCAL_YEAR.finditer(heading_clause)
+                if has_covered_context(cue)
+            ]
+            publication_match = _PUBLICATION_YEAR_CONTEXT.search(heading_clause)
+            generic_context_end = (
+                publication_match.start() if publication_match else len(heading_clause)
+            )
+            covered_matches = [
+                cue
+                for cue in _COVERED_YEAR_BEFORE_PUBLICATION.finditer(
+                    heading_clause[:generic_context_end]
+                )
+                if has_covered_context(cue)
+            ]
+            candidate_periods = {
+                period
+                for cue in (*explicit_matches, *covered_matches)
+                if (period := _year_period(cue.group(1)))
+            }
+            if publication_match and not candidate_periods:
+                continue
+            if candidate_periods:
+                evidence_matches = [*explicit_matches, *covered_matches]
+                evidence_end = match.start() + max(cue.end() for cue in evidence_matches)
+                if len(candidate_periods) > 1:
+                    conflicting_periods = candidate_periods
+                else:
+                    explicit_period = next(iter(candidate_periods))
+        if (
+            not explicit_period
+            and not conflicting_periods
+            and _NON_COVERED_FISCAL_CONTEXT.search(body[sentence_start:evidence_end])
+        ):
+            continue
+        if conflicting_periods:
+            periods.update(conflicting_periods)
+            continue
+        period = explicit_period or (None if annual else _quarter_period(heading))
         if not period:
             period = _year_period(match.group(1))
         if period:

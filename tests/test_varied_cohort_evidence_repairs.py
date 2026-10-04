@@ -17,10 +17,16 @@ from test_post26_evidence_repairs import pdf
 
 from alphaforge.cli.main import main
 from alphaforge.config import Settings
+from alphaforge.core.kpi_taxonomy import KpiIds
 from alphaforge.db.connection import get_connection
 from alphaforge.db.evidence_repository import current_candidate_observations
 from alphaforge.db.migrations import migrate
-from alphaforge.db.repositories import load_evidence_packet, upsert_company, upsert_prices
+from alphaforge.db.repositories import (
+    load_evidence_packet,
+    upsert_company,
+    upsert_kpi_observations,
+    upsert_prices,
+)
 from alphaforge.evidence import ingest, report_rules
 from alphaforge.evidence.ingest import resolve_fiscal_identity
 
@@ -69,11 +75,20 @@ def cli_lane(tmp_path, monkeypatch, capsys):
                 ),
             )
             # Synthetic numerical controls, not claimed issuer financial facts.
-            # Use a non-calendar chronology to exercise the real DCF loader.
+            # Use a non-calendar chronology and dated positive ROIC to exercise
+            # the real DCF loader's available path.
             upsert_financial_periods(
                 conn,
                 company_id,
                 [annual(year, revenue=100 * 1.1 ** (year - 2023)) for year in range(2023, 2027)],
+            )
+            upsert_kpi_observations(
+                conn,
+                company_id,
+                KpiIds.ROIC,
+                "year",
+                "mean",
+                [{"y": 2026, "p": 5, "v": 12.0, "observationDate": AS_OF}],
             )
             upsert_prices(conn, company_id, [{"d": AS_OF, "c": 10}], currency="SEK")
         conn.commit()
@@ -206,10 +221,21 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     assert main(["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]) == 0
     old_replay = json.loads(capsys.readouterr().out)
     old_summary = json.loads(old_run["inputs_summary"])
-    old_text_hash = conn.execute(
-        "SELECT textual_context_hash FROM executed_numerical_runs WHERE run_id=?",
-        (old_run["id"],),
-    ).fetchone()[0]
+    old_input_body = tuple(
+        conn.execute(
+            "SELECT financial_inputs_hash,body,rules FROM numerical_input_bodies "
+            "WHERE numerical_identity=?",
+            (old_summary["numerical_identity"],),
+        ).fetchone()
+    )
+    old_output_body = tuple(
+        conn.execute(
+            "SELECT numerical_identity,textual_context,textual_context_hash,outputs,outputs_hash "
+            "FROM executed_numerical_runs WHERE run_id=?",
+            (old_run["id"],),
+        ).fetchone()
+    )
+    old_text_hash = old_output_body[2]
     assert old_replay["outputs"]["dcf"][str(company_id)]["dcf"]["available"] is True
     manifests = list(
         conn.execute("SELECT manifest_id, manifest_json FROM evidence_selection_manifests")
@@ -224,6 +250,11 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
     assert current["report_rules_fingerprint"] != old["report_rules_fingerprint"]
     assert current["extraction_id"] == old["extraction_id"]
     assert load_evidence_packet(conn, company_id, AS_OF)["packet_hash"] != old_hash
+    # Acquisition above uses synthetic HTTP, but this is the native retained-run
+    # replay command: it must consume the original immutable bodies after upgrade.
+    assert main(["--dsn", dsn, "replay", "--run-id", str(old_run["id"])]) == 0
+    post_upgrade_old_replay = json.loads(capsys.readouterr().out)
+    assert post_upgrade_old_replay["outputs"] == old_replay["outputs"]
     assert main(["--dsn", dsn, "rank", "--as-of", AS_OF]) == 0
     capsys.readouterr()
     repaired_run = conn.execute(
@@ -248,6 +279,26 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
         == old_outputs["scores"][0]["input_selection"]
     )
     assert (
+        tuple(
+            conn.execute(
+                "SELECT financial_inputs_hash,body,rules FROM numerical_input_bodies "
+                "WHERE numerical_identity=?",
+                (old_summary["numerical_identity"],),
+            ).fetchone()
+        )
+        == old_input_body
+    )
+    assert (
+        tuple(
+            conn.execute(
+                "SELECT numerical_identity,textual_context,textual_context_hash,outputs,outputs_hash "
+                "FROM executed_numerical_runs WHERE run_id=?",
+                (old_run["id"],),
+            ).fetchone()
+        )
+        == old_output_body
+    )
+    assert (
         list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
             : len(old_rows)
         ]
@@ -261,6 +312,240 @@ def test_actual_fiscal_change_appends_new_interpretation_not_restamp(
             ).fetchone()[0]
             == manifest_json
         )
+
+
+@pytest.mark.parametrize(
+    "historical_version,case,body,old_identity,current_period,current_basis",
+    [
+        (
+            16,
+            "conflicting-covered-years",
+            "Annual and Sustainability Report for 2025 and for fiscal year 2024.",
+            ("2024", "covered_report_heading", None),
+            None,
+            "conflicting_covered_headings",
+        ),
+        (
+            17,
+            "covered-year-before-outlook",
+            "Annual and Sustainability Report for 2025, outlook for fiscal year 2026.",
+            (None, "unresolved", "fiscal_identity_unresolved"),
+            "2025",
+            "covered_report_heading",
+        ),
+        (
+            18,
+            "forecast-before-heading",
+            "Forecast Annual and Sustainability Report for fiscal year 2026.",
+            ("2026", "covered_report_heading", None),
+            None,
+            "unresolved",
+        ),
+    ],
+)
+def test_retained_fiscal_interpretation_is_reclassified_without_mutating_history(
+    cli_lane,
+    monkeypatch,
+    historical_version,
+    case,
+    body,
+    old_identity,
+    current_period,
+    current_basis,
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "UPGRADE",
+        "source_url": f"https://mfn.se/a/upgrade/{case}",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body,
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    current_report_rules_inputs = report_rules.report_rules_inputs
+
+    def historical_report_rules_inputs():
+        inputs = current_report_rules_inputs()
+        inputs["version"] = historical_version
+        fiscal_rules = inputs["fiscal_interpretation"]
+        if historical_version <= 17:
+            fiscal_rules.pop("non_covered_context_guard")
+            fiscal_rules["forecast_context_guard"] = [
+                "forecast",
+                "forecasts",
+                "forecasting",
+            ]
+        else:
+            fiscal_rules["non_covered_context_guard"]["covered_cue_context"] = (
+                "comma-or-semicolon-delimited local segment"
+            )
+        if historical_version == 16:
+            guard = fiscal_rules["compound_annual_publication_year_guard"]
+            generic_cue = guard.pop("generic_covered_year_cue")
+            guard["covered_year_before_publication_cue"] = generic_cue["pattern"]
+        return inputs
+
+    with monkeypatch.context() as historical:
+        historical.setattr(report_rules, "REPORT_RULES_VERSION", historical_version)
+        historical.setattr(report_rules, "report_rules_inputs", historical_report_rules_inputs)
+        historical.setattr(
+            ingest,
+            "resolve_fiscal_identity",
+            lambda _doc: old_identity,
+        )
+        old_code, old_diagnostic, company_id = run(row)
+        old_packet = load_evidence_packet(conn, company_id, AS_OF)
+    assert old_code == 0 and old_diagnostic["status"] == "complete"
+    assert old_packet["report_rules"]["version"] == historical_version
+    old_fingerprint = old_packet["report_rules"]["fingerprint"]
+    old_observation = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[0]
+    assert old_observation["fiscal_period"] == old_identity[0]
+    assert old_observation["report_rules_fingerprint"] == old_fingerprint
+    old_observations = list(
+        conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id")
+    )
+    old_manifests = list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))
+    old_packets = list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))
+
+    code, diagnostic, _ = run(row, allow_pdf=False)
+    assert code == 0 and diagnostic["status"] == "complete"
+    assert diagnostic["pdf_fetch_attempts"] == 0
+    current_packet = load_evidence_packet(conn, company_id, AS_OF)
+    assert current_packet["report_rules"]["version"] == 19
+    assert current_packet["report_rules"]["fingerprint"] != old_fingerprint
+    assert current_packet["sources"][0]["fiscal_period"] == current_period
+    assert current_packet["sources"][0]["fiscal_period_source"] == current_basis
+    current_observation = current_candidate_observations(conn, company_id=company_id, as_of=AS_OF)[
+        0
+    ]
+    assert (
+        current_observation["candidate_observation_id"]
+        != old_observation["candidate_observation_id"]
+    )
+    assert current_observation["extraction_id"] == old_observation["extraction_id"]
+    assert (
+        current_observation["report_rules_fingerprint"]
+        == current_packet["report_rules"]["fingerprint"]
+    )
+    assert (
+        load_evidence_packet(
+            conn,
+            company_id,
+            AS_OF,
+            current_rules_fingerprint=old_fingerprint,
+        )
+        == old_packet
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_candidate_observations ORDER BY id"))[
+            : len(old_observations)
+        ]
+        == old_observations
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_selection_manifests ORDER BY id"))[
+            : len(old_manifests)
+        ]
+        == old_manifests
+    )
+    assert (
+        list(conn.execute("SELECT * FROM evidence_packets ORDER BY id"))[: len(old_packets)]
+        == old_packets
+    )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "forecast",
+        "forecasts",
+        "forecasting",
+        "outlook",
+        "compared",
+        "comparison",
+        "previous",
+        "prognos",
+        "föregående",
+        "jämfört",
+        "jämförelse",
+    ],
+)
+@pytest.mark.parametrize(
+    "body_template",
+    [
+        "Annual and Sustainability Report for 2025, {marker} for fiscal year 2026.",
+        "Annual and Sustainability Report {marker} for fiscal year 2026, for 2025.",
+    ],
+)
+def test_non_covered_cue_preserves_covered_year(cli_lane, marker, body_template):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": "https://mfn.se/a/guard/non-covered-cue",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body_template.format(marker=marker),
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == "2025"
+    assert source["fiscal_period_source"] == "covered_report_heading"
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "forecast",
+        "forecasts",
+        "forecasting",
+        "outlook",
+        "compared",
+        "comparison",
+        "previous",
+        "prognos",
+        "föregående",
+        "jämfört",
+        "jämförelse",
+    ],
+)
+@pytest.mark.parametrize(
+    "body_template,expected,basis,limitation",
+    [
+        (
+            "{marker} Annual and Sustainability Report for fiscal year 2026.",
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "{marker}, Annual and Sustainability Report for fiscal year 2026.",
+            "2026",
+            "covered_report_heading",
+            None,
+        ),
+    ],
+)
+def test_non_covered_sentence_prefix_respects_local_delimiter(
+    cli_lane, marker, body_template, expected, basis, limitation
+):
+    conn, run = cli_lane
+    row = {
+        "ticker": "GUARD",
+        "source_url": "https://mfn.se/a/guard/non-covered-prefix",
+        "published_at": "2026-09-30T08:00:00Z",
+        "body": body_template.format(marker=marker),
+        "feed_tags": ["sub:report", "sub:report:annual"],
+        "input": {"title": "Annual and Sustainability Report"},
+    }
+    code, diagnostic, company_id = run(row)
+    assert code == 0 and diagnostic["status"] == "complete"
+    source = load_evidence_packet(conn, company_id, AS_OF)["sources"][0]
+    assert source["fiscal_period"] == expected
+    assert source["fiscal_period_source"] == basis
+    if limitation:
+        assert limitation in diagnostic["limitations"]
 
 
 @pytest.mark.parametrize("verb", ["forecasts", "forecasting"])
@@ -351,6 +636,146 @@ def test_forecast_inflections_through_public_evidence_cli(
             None,
             "conflicting_covered_headings",
             "fiscal_identity_ambiguous",
+        ),
+        (
+            "published-year-heading",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report published on 19 March 2026. The report covers fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "publication-year-heading",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report publication 19 March 2026.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "publication-marker-after-date",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report 19 March 2026 publication.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "ordinary-annual-publication-label",
+            "Annual Report publication",
+            "Annual Report published on 19 March 2026.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2026",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "interim-publication-label",
+            "Interim Report publication",
+            "Interim report published 30 April 2026.",
+            ["sub:report", "sub:report:interim:q1"],
+            None,
+            "2026",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "publication-marked-covered-fiscal-year",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report publication for fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "publication-year-before-covered-fiscal-year",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report published 19 March 2026 for fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "conflicting-covered-years-without-publication",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025 and for fiscal year 2024.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "conflicting_covered_headings",
+            "fiscal_identity_ambiguous",
+        ),
+        (
+            "conflicting-generic-covered-years-without-publication",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025 and for 2024.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "conflicting_covered_headings",
+            "fiscal_identity_ambiguous",
+        ),
+        (
+            "matching-covered-years-without-publication",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025 and for fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "conflicting-published-covered-years",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025, published 19 March 2026 for fiscal year 2024.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "conflicting_covered_headings",
+            "fiscal_identity_ambiguous",
+        ),
+        (
+            "matching-covered-years-around-publication",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025, published 19 March 2026 for fiscal year 2025.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
+        ),
+        (
+            "unbound-fiscal-year-cue",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for fiscal year ended 31 December; published 19 March 2026.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            None,
+            "unresolved",
+            "fiscal_identity_unresolved",
+        ),
+        (
+            "covered-year-before-publication-date",
+            "Annual and Sustainability Report",
+            "Annual and Sustainability Report for 2025, published on 19 March 2026.",
+            ["sub:report", "sub:report:annual"],
+            None,
+            "2025",
+            "covered_report_heading",
+            None,
         ),
         (
             "covered-heading",

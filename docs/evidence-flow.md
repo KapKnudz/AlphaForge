@@ -125,7 +125,18 @@ interpretation before the broad `report_kind` filter class: an English
 `ANNUAL_REPORT` editions remain annual, without changing report-class horizons.
 Compound `Annual and Sustainability Report` titles and guarded body headings
 identify the covered annual year/range under the same forecast, comparator and
-conflict safeguards as `Annual Report`.
+conflict safeguards as `Annual Report`. For that compound body heading,
+the complete bounded heading clause is inspected, and publication markers alone
+do not establish coverage. Only a year directly bound by the explicit phrase
+`for fiscal year <year>` identifies coverage when publication wording precedes
+it. A covered `for <year>` before later publication wording remains admissible,
+while publication-year-only headings remain unresolved regardless of whether
+the marker precedes or follows the date. Within the bounded clause, an outlook,
+forecast or comparator marker excludes year cues in its sentence-local comma-
+or semicolon-delimited segment, including text before the report label, without
+discarding covered cues in another segment. All remaining covered-year cues are compared:
+contradictory years remain ambiguous rather than selecting one, while repeated
+cues for the same year preserve that identity.
 Covered annual fiscal ranges retain the established `YYYY/YYYY` label
 (`2025/26` normalizes to `2025/2026`) from report titles or guarded body headings;
 a bare provider year cannot prove a two-year annual range. Provider ranges use
@@ -424,10 +435,11 @@ CLI/result diagnostics. The current report-rule fingerprint deliberately
 invalidates the prior provider/state/fiscal/slot/cache interpretations, and the
 current evidence-rule version invalidates prior packet readiness. Historical
 packets still validate against their original hashes, but old rules cannot
-confer current readiness. Report rules v13 and evidence rules v15 deliberately
-invalidate earlier annual range/fiscal interpretation and off-feed rebuild
-behavior. A retained candidate with an older fingerprint is never selected or
-restamped: the flow re-runs current admission and covered identity from its
+confer current readiness. Report rules v19 and evidence rules v15 deliberately
+invalidate earlier annual range/fiscal interpretation, including the compound
+annual publication-year disambiguation, and off-feed rebuild behavior. A
+retained candidate with an older fingerprint is never selected or restamped:
+the flow re-runs current admission and covered identity from its
 immutable source facts: original public detail HTML is re-parsed by the normal
 MFN parser to re-prove title, publication, attachment selection and (for Cision)
 canonical issuer confirmation. Narrative admission also requires independently

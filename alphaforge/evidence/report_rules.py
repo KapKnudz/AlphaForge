@@ -24,7 +24,7 @@ from alphaforge.evidence.mfn_taxonomy import (
 
 # This version is the schema/interpretation version of the rule input record.
 # The content fingerprint also changes when any listed rule input changes.
-REPORT_RULES_VERSION = 13
+REPORT_RULES_VERSION = 19
 
 
 @dataclass(frozen=True)
@@ -86,7 +86,32 @@ def report_rules_inputs() -> dict[str, Any]:
         "fiscal_interpretation": {
             "annual_gate": "guarded-document-type-before-broad-report-kind",
             "compound_annual_heading": "annual-and-sustainability-report",
-            "forecast_context_guard": ["forecast", "forecasts", "forecasting"],
+            "non_covered_context_guard": {
+                "markers": [
+                    "forecast",
+                    "forecasts",
+                    "forecasting",
+                    "outlook",
+                    "compared",
+                    "comparison",
+                    "previous",
+                    "prognos",
+                    "föregående",
+                    "jämfört",
+                    "jämförelse",
+                ],
+                "covered_cue_context": "sentence-local comma-or-semicolon-delimited segment",
+            },
+            "compound_annual_publication_year_guard": {
+                "heading_scope": "complete clause",
+                "publication_markers": ["published", "publication"],
+                "explicit_covered_year_cue": "for fiscal year <year>",
+                "generic_covered_year_cue": {
+                    "pattern": "for <year>",
+                    "without_publication": "complete clause",
+                    "with_publication": "before first publication marker",
+                },
+            },
         },
         "history_window": _history_window_values(),
     }

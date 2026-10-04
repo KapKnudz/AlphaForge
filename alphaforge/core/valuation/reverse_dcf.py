@@ -168,15 +168,23 @@ class ReverseDcfEngine:
         lower_difference = lower_value.value_per_share - inputs.current_price
         upper_difference = upper_value.value_per_share - inputs.current_price
 
-        if abs(lower_difference) <= price_tolerance:
+        if lower_difference == 0.0:
             return self._result(
                 inputs, assumption, lower_bound, lower_bound, upper_bound, 0, lower_value
             )
-        if abs(upper_difference) <= price_tolerance:
+        if upper_difference == 0.0:
             return self._result(
                 inputs, assumption, upper_bound, lower_bound, upper_bound, 0, upper_value
             )
         if lower_difference * upper_difference > 0:
+            if abs(lower_difference) <= price_tolerance:
+                return self._result(
+                    inputs, assumption, lower_bound, lower_bound, upper_bound, 0, lower_value
+                )
+            if abs(upper_difference) <= price_tolerance:
+                return self._result(
+                    inputs, assumption, upper_bound, lower_bound, upper_bound, 0, upper_value
+                )
             raise ValueError(
                 "current price is not bracketed by modeled prices at the supplied bounds"
             )
@@ -256,6 +264,209 @@ class ReverseDcfEngine:
             1.0,
         )
         return nopat * (1.0 - reinvestment_share_of_nopat)
+
+    def diagnose_solve_range(
+        self,
+        inputs: ReverseDcfInputs,
+        assumption: ImpliedAssumption,
+        lower_bound: float,
+        upper_bound: float,
+        *,
+        sample_intervals: int = 200,
+        price_tolerance: float = 1e-6,
+    ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
+        """Report endpoint and sampled range diagnostics without assuming monotonicity."""
+        if assumption not in _SUPPORTED_ASSUMPTIONS:
+            raise ValueError(f"unsupported implied assumption: {assumption}")
+        if not lower_bound < upper_bound:
+            raise ValueError("lower_bound must be less than upper_bound")
+        if sample_intervals <= 0 or price_tolerance <= 0:
+            raise ValueError("range diagnostic settings must be positive")
+
+        points = tuple(
+            lower_bound + (upper_bound - lower_bound) * index / sample_intervals
+            for index in range(sample_intervals + 1)
+        )
+        prices = tuple(
+            self._value_with(inputs, assumption, point).value_per_share for point in points
+        )
+        if not all(isfinite(price) for price in prices):
+            raise ValueError("reverse DCF range diagnostic produced a non-finite price")
+        differences = tuple(price - inputs.current_price for price in prices)
+        matches = tuple(abs(difference) <= price_tolerance for difference in differences)
+        signed_residual_indexes = [
+            index
+            for index, difference in enumerate(differences)
+            if abs(difference) > 1e-12 * max(1.0, abs(prices[index]), abs(inputs.current_price))
+        ]
+        brackets = [
+            (points[left], points[right])
+            for left, right in zip(
+                signed_residual_indexes,
+                signed_residual_indexes[1:],
+                strict=False,
+            )
+            if differences[left] * differences[right] < 0
+        ]
+        sampled_match_points = []
+        sampled_match_regions = []
+        index = 0
+        while index <= sample_intervals:
+            if not matches[index]:
+                index += 1
+                continue
+            start = index
+            while index < sample_intervals and matches[index + 1]:
+                index += 1
+            end = index
+            if start != end:
+                sampled_match_regions.append(
+                    {
+                        "classification": "contiguous_samples_within_tolerance",
+                        "lower_sample_assumption": points[start],
+                        "upper_sample_assumption": points[end],
+                        "sample_count": end - start + 1,
+                        "maximum_absolute_price_difference": max(
+                            abs(differences[match_index]) for match_index in range(start, end + 1)
+                        ),
+                        "qualification": (
+                            "contiguous grid samples match within price tolerance; "
+                            "a continuous equivalence interval is not established"
+                        ),
+                    }
+                )
+            elif start == 0 or start == sample_intervals:
+                sampled_match_points.append(
+                    {
+                        "classification": "sampled_endpoint_match",
+                        "location": "lower_endpoint" if start == 0 else "upper_endpoint",
+                        "assumption": points[start],
+                        "modeled_price": prices[start],
+                        "price_difference": differences[start],
+                        "qualification": (
+                            "endpoint sample matches within price tolerance; "
+                            "analytical exactness is not established"
+                        ),
+                    }
+                )
+            else:
+                sign_change = any(lower <= points[start] <= upper for lower, upper in brackets)
+                sampled_match_points.append(
+                    {
+                        "classification": (
+                            "sampled_match_with_sign_change"
+                            if sign_change
+                            else "sampled_no_sign_change_match"
+                        ),
+                        "location": "interior",
+                        "assumption": points[start],
+                        "modeled_price": prices[start],
+                        "price_difference": differences[start],
+                        "qualification": (
+                            "sample matches within price tolerance alongside sampled sign-change "
+                            "evidence; analytical exactness at the sample is not established"
+                            if sign_change
+                            else "isolated sample matches within price tolerance without a sampled "
+                            "sign change; tangency or analytical exactness is not established"
+                        ),
+                    }
+                )
+            index += 1
+
+        brackets.sort()
+        for match in sampled_match_points:
+            match["associated_sign_change_bracket_count"] = sum(
+                lower <= match["assumption"] <= upper for lower, upper in brackets
+            )
+        for region in sampled_match_regions:
+            region["associated_sign_change_bracket_count"] = sum(
+                lower <= region["upper_sample_assumption"]
+                and upper >= region["lower_sample_assumption"]
+                for lower, upper in brackets
+            )
+
+        changes = []
+        for left, right in zip(prices, prices[1:], strict=False):
+            tolerance = 1e-12 * max(1.0, abs(left), abs(right))
+            changes.append(1 if right - left > tolerance else -1 if left - right > tolerance else 0)
+        observed_changes = [change for change in changes if change]
+        if not observed_changes:
+            monotonicity = "sampled_flat"
+        elif all(change > 0 for change in observed_changes):
+            monotonicity = "sampled_increasing"
+        elif all(change < 0 for change in observed_changes):
+            monotonicity = "sampled_decreasing"
+        else:
+            monotonicity = "sampled_non_monotonic"
+
+        extrema = []
+        for index in range(1, sample_intervals):
+            if prices[index] > prices[index - 1] and prices[index] > prices[index + 1]:
+                extrema.append(
+                    {"type": "local_maximum", "assumption": points[index], "price": prices[index]}
+                )
+            elif prices[index] < prices[index - 1] and prices[index] < prices[index + 1]:
+                extrema.append(
+                    {"type": "local_minimum", "assumption": points[index], "price": prices[index]}
+                )
+
+        minimum_index = min(range(len(prices)), key=prices.__getitem__)
+        maximum_index = max(range(len(prices)), key=prices.__getitem__)
+        minimum_price, maximum_price = prices[minimum_index], prices[maximum_index]
+        target = inputs.current_price
+        if target < minimum_price - price_tolerance:
+            target_position = "below_sampled_range"
+            no_solution_direction = "below"
+            nearest_boundary = "sampled_minimum"
+            nearest_boundary_price = minimum_price
+        elif target > maximum_price + price_tolerance:
+            target_position = "above_sampled_range"
+            no_solution_direction = "above"
+            nearest_boundary = "sampled_maximum"
+            nearest_boundary_price = maximum_price
+        else:
+            target_position = "within_sampled_range"
+            no_solution_direction = "not_established"
+            lower_gap = target - minimum_price
+            upper_gap = maximum_price - target
+            if lower_gap <= upper_gap:
+                nearest_boundary = "sampled_minimum"
+                nearest_boundary_price = minimum_price
+            else:
+                nearest_boundary = "sampled_maximum"
+                nearest_boundary_price = maximum_price
+        boundary_gap = abs(target - nearest_boundary_price)
+        diagnostics = {
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "lower_endpoint_price": prices[0],
+            "upper_endpoint_price": prices[-1],
+            "target_price": target,
+            "target_position": target_position,
+            "no_solution_direction": no_solution_direction,
+            "sampled_minimum_price": minimum_price,
+            "sampled_minimum_assumption": points[minimum_index],
+            "sampled_maximum_price": maximum_price,
+            "sampled_maximum_assumption": points[maximum_index],
+            "nearest_boundary": nearest_boundary,
+            "nearest_boundary_price": nearest_boundary_price,
+            "nearest_boundary_gap": boundary_gap,
+            "nearest_boundary_gap_denominator": "target_price",
+            "nearest_boundary_gap_denominator_value": target,
+            "nearest_boundary_gap_pct_target": boundary_gap / target * 100.0,
+            "monotonicity": monotonicity,
+            "interior_extrema": extrema,
+            "diagnostic_grid_points": sample_intervals + 1,
+            "price_tolerance": price_tolerance,
+            "sign_change_bracket_count": len(brackets),
+            "sampled_match_point_count": len(sampled_match_points),
+            "sampled_match_points": sampled_match_points,
+            "sampled_match_regions": sampled_match_regions,
+            "range_qualification": (
+                "sampled range only; extrema or roots between grid points are not excluded"
+            ),
+        }
+        return diagnostics, tuple(brackets), tuple(sampled_match_points)
 
     def _value_with(
         self,
@@ -347,3 +558,10 @@ class ReverseDcfEngine:
             raise ValueError("terminal_growth must exceed -1")
         if assumptions.reinvestment_return is not None and assumptions.reinvestment_return <= 0.0:
             raise ValueError("reinvestment_return must be positive when supplied")
+        if assumptions.reinvestment_return is not None and (
+            assumptions.ebit_margin < 0.0
+            or (assumptions.ebit_margin_start is not None and assumptions.ebit_margin_start < 0.0)
+        ):
+            raise UnsupportedValuationModel(
+                "ROIC-based reinvestment is unsupported for negative NOPAT"
+            )
