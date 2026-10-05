@@ -162,9 +162,13 @@ def test_evidence_preflight_happens_before_any_numerical_sampling():
             operation(inputs, "revenue_growth", 0, 0.08, eligibility=metadata)
         assert not engine.sampled
     unverified = solve_axis_metadata("revenue_growth", assumptions=inputs.assumptions)
-    with pytest.raises(UnsupportedEconomicPolicy, match="solve_evidence_unavailable"):
-        engine.solve(inputs, "revenue_growth", 0, 0.08, eligibility=unverified)
-    assert not engine.sampled
+    for operation in (engine.solve, engine.diagnose_solve_range):
+        with pytest.raises(UnsupportedEconomicPolicy, match="solve_evidence_unavailable"):
+            operation(inputs, "revenue_growth", 0, 0.08)
+        assert not engine.sampled
+        with pytest.raises(UnsupportedEconomicPolicy, match="solve_evidence_unavailable"):
+            operation(inputs, "revenue_growth", 0, 0.08, eligibility=unverified)
+        assert not engine.sampled
 
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
@@ -223,7 +227,13 @@ def test_supplied_eligibility_must_be_complete(operation, invalid_metadata):
 def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
     engine = ReverseDcfEngine()
     inputs = replace(hand_inputs(), current_price=103.5)
-    result = engine.solve(inputs, "revenue_growth", 0, 0.08)
+    result = engine.solve(
+        inputs,
+        "revenue_growth",
+        0,
+        0.08,
+        eligibility=_verified_metadata(inputs),
+    )
     assert result.implied_assumption == pytest.approx(0.04)
 
     target_inputs = replace(
@@ -232,7 +242,13 @@ def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
             replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.08))
         ).value_per_share,
     )
-    faded = engine.solve(target_inputs, "revenue_growth", 0, 0.12)
+    faded = engine.solve(
+        target_inputs,
+        "revenue_growth",
+        0,
+        0.12,
+        eligibility=_verified_metadata(target_inputs),
+    )
     assert faded.implied_assumption == pytest.approx(0.08)
     assert faded.valuation.projected_cash_flows[0].revenue_growth == pytest.approx(0.08)
     assert faded.valuation.projected_cash_flows[-1].revenue_growth == pytest.approx(0.04)
@@ -350,6 +366,60 @@ def test_candidate_roots_are_not_collapsed_to_a_unique_answer():
         _dcf_solve_status(result["solution_status"], None, None)
         is DcfResultStatus.CANDIDATE_SOLUTIONS
     )
+
+
+@pytest.mark.parametrize(
+    ("sampled_match_regions", "solution_status"),
+    [
+        ([], "candidate_solutions"),
+        (
+            [
+                {
+                    "classification": "contiguous_samples_within_tolerance",
+                    "qualification": "a continuous equivalence interval is not established",
+                }
+            ],
+            "sampled_match_region",
+        ),
+    ],
+)
+def test_exported_sampled_match_count_tracks_filtered_points(
+    sampled_match_regions, solution_status
+):
+    inputs = hand_inputs()
+    metadata = _supported_metadata(inputs)
+    bracketed_match = {
+        "classification": "sampled_match_with_sign_change",
+        "assumption": 0.04,
+        "associated_sign_change_bracket_count": 1,
+    }
+    diagnostics = {
+        "sampled_match_regions": sampled_match_regions,
+        "sampled_match_point_count": 1,
+        "sampled_match_points": [bracketed_match],
+        "no_solution_direction": "not_established",
+    }
+    value = ReverseDcfEngine().value(inputs)
+
+    class BracketedMatchEngine:
+        def diagnose_solve_range(self, *args, **kwargs):
+            return diagnostics, ((0.03, 0.05),), (bracketed_match,)
+
+        def solve(self, *args, **kwargs):
+            return SimpleNamespace(
+                implied_assumption=0.04,
+                modeled_price=inputs.current_price,
+                price_difference=0.0,
+                iterations=1,
+                valuation=value,
+            )
+
+    result = _solve_axis_result(BracketedMatchEngine(), inputs, "revenue_growth", metadata)
+
+    assert result["solution_status"] == solution_status
+    assert result["candidate_solution_count"] == 1
+    assert result["sampled_match_points"] == []
+    assert result["sampled_match_point_count"] == len(result["sampled_match_points"])
 
 
 def test_no_crossing_nonconvergence_and_invalid_candidate_remain_distinct():

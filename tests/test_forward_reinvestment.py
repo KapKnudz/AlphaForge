@@ -32,6 +32,7 @@ from alphaforge.core.valuation.reverse_dcf import (
     UnsupportedEconomicPolicy,
     forward_investment,
 )
+from alphaforge.core.valuation.solve_eligibility import SOLVE_AXIS_REGISTRY, solve_axis_metadata
 from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
 from alphaforge.db.repositories import upsert_prices, upsert_stock_splits
@@ -56,6 +57,22 @@ def hand_inputs(q=0.1, terminal=0.04, years=2):
             economic_convention=ECONOMIC_CONVENTION,
             calibration_identity="synthetic-hand-lock",
         ),
+    )
+
+
+def verified_growth_metadata(inputs):
+    return solve_axis_metadata(
+        "revenue_growth",
+        assumptions=inputs.assumptions,
+        prerequisite_evidence={
+            name: {
+                "status": "met",
+                "evidence_references": ()
+                if name == "fixed_assumptions_with_provenance"
+                else ({"source_id": f"evidence:{name}"},),
+            }
+            for name in SOLVE_AXIS_REGISTRY["revenue_growth"].evidence_prerequisites
+        },
     )
 
 
@@ -202,14 +219,22 @@ def test_forward_economic_boundaries(changes, reason):
 def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_caps():
     engine = ReverseDcfEngine()
     inputs = replace(hand_inputs(), current_price=103.5)
-    result = engine.solve(inputs, "revenue_growth", 0, 0.08)
-    assert result.implied_assumption == pytest.approx(0.04)
-    assert result.modeled_price == pytest.approx(103.5)
-    diagnostics, brackets, _ = engine.diagnose_solve_range(
-        replace(inputs, current_price=200),
+    result = engine.solve(
+        inputs,
         "revenue_growth",
         0,
         0.08,
+        eligibility=verified_growth_metadata(inputs),
+    )
+    assert result.implied_assumption == pytest.approx(0.04)
+    assert result.modeled_price == pytest.approx(103.5)
+    no_match_inputs = replace(inputs, current_price=200)
+    diagnostics, brackets, _ = engine.diagnose_solve_range(
+        no_match_inputs,
+        "revenue_growth",
+        0,
+        0.08,
+        eligibility=verified_growth_metadata(no_match_inputs),
     )
     assert not brackets
     assert diagnostics["lower_endpoint_price"] == pytest.approx(99.5)
@@ -218,7 +243,13 @@ def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_
     assert diagnostics["nearest_boundary_gap_pct_target"] == pytest.approx(46.25)
     assert "sampled range only" in diagnostics["range_qualification"]
     with pytest.raises(ValueError, match="not bracketed"):
-        engine.solve(replace(inputs, current_price=200), "revenue_growth", 0, 0.08)
+        engine.solve(
+            no_match_inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=verified_growth_metadata(no_match_inputs),
+        )
 
 
 def test_nonfinite_projection_and_investment_never_escape():

@@ -294,7 +294,12 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
         sampled_only = [
             match for match in sampled_matches if not match["associated_sign_change_bracket_count"]
         ]
-        base = {**diagnostics, "eligibility": metadata}
+        base = {
+            **diagnostics,
+            "sampled_match_point_count": len(sampled_only),
+            "sampled_match_points": sampled_only,
+            "eligibility": metadata,
+        }
         if diagnostics["sampled_match_regions"]:
             return {
                 **base,
@@ -302,7 +307,6 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
                 "solution_status": "sampled_match_region",
                 "candidate_roots": roots,
                 "candidate_solution_count": len(roots),
-                "sampled_match_points": sampled_only,
                 "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
                 "solution_evidence": (
                     "contiguous sampled assumptions match within price tolerance; a continuous "
@@ -317,7 +321,6 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
                     "solution_status": "sampled_match",
                     "candidate_roots": [],
                     "candidate_solution_count": 0,
-                    "sampled_match_points": sampled_only,
                     "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
                     "solution_qualification": (
                         "sampled tolerance match only; a tangency or exact root is not established"
@@ -349,7 +352,6 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "candidate_roots": roots,
             "candidate_solution_count": len(roots),
             "crossing_count_on_grid": len(roots),
-            "sampled_match_points": sampled_only,
             "solution_evidence": (
                 f"{len(roots)} sampled sign-change bracket(s); "
                 f"{len(sampled_only)} unbracketed tolerance-match sample(s)"

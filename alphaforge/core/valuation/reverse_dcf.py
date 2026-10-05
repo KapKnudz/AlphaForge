@@ -216,40 +216,35 @@ class ReverseDcfEngine:
             raise ValueError("solve eligibility reason does not match the declared registry")
         if metadata.status != "supported":
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
-        if eligibility is not None:
-            prerequisite_names = tuple(item.get("name") for item in metadata.evidence_prerequisites)
-            if prerequisite_names != definition.evidence_prerequisites:
-                raise ValueError(
-                    "solve eligibility prerequisites do not match the declared registry"
+        prerequisite_names = tuple(item.get("name") for item in metadata.evidence_prerequisites)
+        if prerequisite_names != definition.evidence_prerequisites:
+            raise ValueError("solve eligibility prerequisites do not match the declared registry")
+        unmet = next(
+            (
+                item
+                for item in metadata.evidence_prerequisites
+                if item.get("status") != "met"
+                or (
+                    item["name"] != "fixed_assumptions_with_provenance"
+                    and not item.get("evidence_references")
                 )
-            unmet = next(
-                (
-                    item
-                    for item in metadata.evidence_prerequisites
-                    if item.get("status") != "met"
-                    or (
-                        item["name"] != "fixed_assumptions_with_provenance"
-                        and not item.get("evidence_references")
-                    )
-                ),
-                None,
+            ),
+            None,
+        )
+        if unmet is not None:
+            raise UnsupportedEconomicPolicy(
+                unmet.get("reason") or f"solve_evidence_unavailable:{unmet['name']}"
             )
-            if unmet is not None:
-                raise UnsupportedEconomicPolicy(
-                    unmet.get("reason") or f"solve_evidence_unavailable:{unmet['name']}"
-                )
-            expected_fixed = {
-                name: value
-                for name, value in vars(inputs.assumptions).items()
-                if name != assumption
-            }
-            if set(metadata.fixed_assumptions) != set(expected_fixed):
-                raise ValueError("solve eligibility fixed assumptions are incomplete")
-            if any(
-                metadata.fixed_assumptions[name].get("value") != value
-                for name, value in expected_fixed.items()
-            ):
-                raise ValueError("solve eligibility fixed assumptions do not match inputs")
+        expected_fixed = {
+            name: value for name, value in vars(inputs.assumptions).items() if name != assumption
+        }
+        if set(metadata.fixed_assumptions) != set(expected_fixed):
+            raise ValueError("solve eligibility fixed assumptions are incomplete")
+        if any(
+            metadata.fixed_assumptions[name].get("value") != value
+            for name, value in expected_fixed.items()
+        ):
+            raise ValueError("solve eligibility fixed assumptions do not match inputs")
         if not definition.lower_bound <= lower_bound < upper_bound <= definition.upper_bound:
             raise ValueError(
                 f"solve bounds must be within declared {assumption} domain "
