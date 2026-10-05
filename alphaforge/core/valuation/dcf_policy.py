@@ -24,6 +24,7 @@ from alphaforge.core.valuation.required_return import (
     RequiredReturnPolicy,
 )
 from alphaforge.core.valuation.reverse_dcf import DcfAssumptions
+from alphaforge.core.valuation.solve_eligibility import SOLVE_AXIS_REGISTRY
 
 
 @dataclass(frozen=True)
@@ -164,9 +165,8 @@ class DcfAssumptionPolicy:
     MATERIAL_INVESTING_MARGIN = 0.15
     EXTREME_INVESTING_YEAR = 0.30
     SOLVE_BOUNDS = {
-        "revenue_growth": (-0.10, 0.30),
-        "ebit_margin": (0.0, 0.50),
-        "terminal_growth": (-0.01, 0.04),
+        axis: (definition.lower_bound, definition.upper_bound)
+        for axis, definition in SOLVE_AXIS_REGISTRY.items()
     }
 
     def __init__(self, required_return_policy: RequiredReturnPolicy | None = None):

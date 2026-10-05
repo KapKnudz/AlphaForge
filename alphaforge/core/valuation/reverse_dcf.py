@@ -9,9 +9,14 @@ from math import isfinite
 from typing import Literal
 
 from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION, LEGACY_CONVENTION
+from alphaforge.core.valuation.solve_eligibility import (
+    SOLVE_REGISTRY_VERSION,
+    SolveAxisMetadata,
+    solve_axis_definition,
+    solve_axis_metadata,
+)
 
 ImpliedAssumption = Literal["revenue_growth", "ebit_margin", "terminal_growth"]
-_SUPPORTED_ASSUMPTIONS = {"revenue_growth", "ebit_margin", "terminal_growth"}
 _BANK_BRANCH_IDS = {68, 69, 70}
 _PROPERTY_BRANCH_ID = 75
 
@@ -178,11 +183,42 @@ class ReverseDcfEngine:
 
     @staticmethod
     def solve_availability(_inputs: ReverseDcfInputs, assumption: ImpliedAssumption) -> str | None:
-        if assumption == "ebit_margin":
-            return "unavailable_constant_margin_only"
-        if assumption == "terminal_growth":
-            return "not_identifiable"
-        return None
+        return solve_axis_definition(assumption).reason
+
+    @staticmethod
+    def _solve_preflight(
+        assumption: ImpliedAssumption,
+        lower_bound: float,
+        upper_bound: float,
+        eligibility: SolveAxisMetadata | None,
+    ) -> None:
+        definition = solve_axis_definition(assumption)
+        metadata = eligibility or solve_axis_metadata(assumption)
+        if metadata.registry_version != SOLVE_REGISTRY_VERSION:
+            raise ValueError("unsupported solve eligibility registry version")
+        if metadata.axis != assumption:
+            raise ValueError("solve eligibility axis does not match requested assumption")
+        if (
+            metadata.domain.get("lower_bound") != definition.lower_bound
+            or metadata.domain.get("upper_bound") != definition.upper_bound
+        ):
+            raise ValueError("solve eligibility domain does not match the declared registry")
+        if metadata.status != "supported":
+            raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
+        if eligibility is not None:
+            unmet = next(
+                (item for item in metadata.evidence_prerequisites if item.get("status") != "met"),
+                None,
+            )
+            if unmet is not None:
+                raise UnsupportedEconomicPolicy(
+                    unmet.get("reason") or f"solve_evidence_unavailable:{unmet['name']}"
+                )
+        if not definition.lower_bound <= lower_bound < upper_bound <= definition.upper_bound:
+            raise ValueError(
+                f"solve bounds must be within declared {assumption} domain "
+                f"[{definition.lower_bound}, {definition.upper_bound}]"
+            )
 
     def _forward_value(self, inputs: ReverseDcfInputs) -> DcfValue:
         a = inputs.assumptions
@@ -264,14 +300,10 @@ class ReverseDcfEngine:
         price_tolerance: float = 1e-6,
         assumption_tolerance: float = 1e-10,
         max_iterations: int = 200,
+        eligibility: SolveAxisMetadata | None = None,
     ) -> ReverseDcfResult:
-        if assumption not in _SUPPORTED_ASSUMPTIONS:
-            raise ValueError(f"unsupported implied assumption: {assumption}")
-        refusal = self.solve_availability(inputs, assumption)
-        if refusal:
-            raise UnsupportedEconomicPolicy(refusal)
-        if not lower_bound < upper_bound:
-            raise ValueError("lower_bound must be less than upper_bound")
+        self._solve_preflight(assumption, lower_bound, upper_bound, eligibility)
+        self._validate(inputs)
         if price_tolerance <= 0 or assumption_tolerance <= 0 or max_iterations <= 0:
             raise ValueError("solver tolerances and max_iterations must be positive")
 
@@ -388,15 +420,11 @@ class ReverseDcfEngine:
         *,
         sample_intervals: int = 200,
         price_tolerance: float = 1e-6,
+        eligibility: SolveAxisMetadata | None = None,
     ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
-        if assumption not in _SUPPORTED_ASSUMPTIONS:
-            raise ValueError(f"unsupported implied assumption: {assumption}")
-        refusal = self.solve_availability(inputs, assumption)
-        if refusal:
-            raise UnsupportedEconomicPolicy(refusal)
-        if not lower_bound < upper_bound:
-            raise ValueError("lower_bound must be less than upper_bound")
+        self._solve_preflight(assumption, lower_bound, upper_bound, eligibility)
+        self._validate(inputs)
         if sample_intervals <= 0 or price_tolerance <= 0:
             raise ValueError("range diagnostic settings must be positive")
 

@@ -8,13 +8,14 @@ from json import dumps, loads
 from math import isfinite
 from typing import Any
 
-DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v1"
+DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v2"
 
 
 class DcfResultStatus(StrEnum):
     AVAILABLE = "available"
     CANDIDATE_SOLUTIONS = "candidate_solutions"
     SAMPLED_MATCH_REGION = "sampled_match_region"
+    SAMPLED_MATCH = "sampled_match"
     NOT_IDENTIFIABLE = "not_identifiable"
     UNSUPPORTED = "unsupported"
     INVALID_INPUT = "invalid_input"

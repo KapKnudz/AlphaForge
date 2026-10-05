@@ -34,6 +34,7 @@ from alphaforge.core.valuation.dividend_yield import (
 )
 from alphaforge.core.valuation.reinvestment import CALIBRATION_VERSION, ECONOMIC_CONVENTION
 from alphaforge.core.valuation.required_return import RequiredReturnPolicy
+from alphaforge.core.valuation.solve_eligibility import SOLVE_REGISTRY_VERSION
 from alphaforge.db.migrations import migrate
 from alphaforge.evidence.manifest_store import load_evidence_view
 
@@ -157,6 +158,7 @@ def rules_bundle() -> dict:
         "dcf": DcfAssumptionPolicy.VERSION,
         "dcf_input_quality": DcfAssumptionPolicy.INPUT_QUALITY_VERSION,
         "dcf_result_contract": DCF_RESULT_CONTRACT_VERSION,
+        "dcf_solve_registry": SOLVE_REGISTRY_VERSION,
         "dcf_routing": DCF_ROUTING_POLICY_VERSION,
         "reinvestment_calibration": CALIBRATION_VERSION,
         "economic_convention": ECONOMIC_CONVENTION,

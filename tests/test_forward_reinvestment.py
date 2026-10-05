@@ -369,6 +369,19 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert value["status"] == "available"
     assert value["reason"] is None
     assert value["version"] == "reverse-dcf-v16-explicit-input-quality"
+    growth_solve = exported[str(cid)]["implied"]["revenue_growth"]
+    eligibility = growth_solve["eligibility"]
+    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v1"
+    assert eligibility["status"] == "supported"
+    assert eligibility["domain"] == {
+        "lower_bound": -0.10,
+        "upper_bound": 0.30,
+        "bounds_inclusive": True,
+        "candidate_policy": "sample the full declared range; any invalid sampled candidate refuses the axis",
+    }
+    assert "initial revenue growth fades linearly" in eligibility["root_interpretation"]
+    assert eligibility["fixed_assumptions"]["discount_rate"]["evidence_references"]
+    assert {item["status"] for item in eligibility["evidence_prerequisites"]} == {"met"}
     provenance = value["assumption_provenance"]
     assert set(provenance) == set(value["assumptions"])
     assert provenance["revenue_growth"]["origin"] == "company_history"
@@ -422,7 +435,8 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
-    assert rules["dcf_result_contract"] == "dcf-result-contract-v1"
+    assert rules["dcf_result_contract"] == "dcf-result-contract-v2"
+    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v1"
     original = json.loads(executed["outputs"])
     replayed = replay_run(conn, executed["run_id"])
     assert replayed["outputs"] == original
