@@ -187,6 +187,7 @@ class ReverseDcfEngine:
 
     @staticmethod
     def _solve_preflight(
+        inputs: ReverseDcfInputs,
         assumption: ImpliedAssumption,
         lower_bound: float,
         upper_bound: float,
@@ -206,14 +207,39 @@ class ReverseDcfEngine:
         if metadata.status != "supported":
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
         if eligibility is not None:
+            prerequisite_names = tuple(
+                item.get("name") for item in metadata.evidence_prerequisites
+            )
+            if prerequisite_names != definition.evidence_prerequisites:
+                raise ValueError("solve eligibility prerequisites do not match the declared registry")
             unmet = next(
-                (item for item in metadata.evidence_prerequisites if item.get("status") != "met"),
+                (
+                    item
+                    for item in metadata.evidence_prerequisites
+                    if item.get("status") != "met"
+                    or (
+                        item["name"] != "fixed_assumptions_with_provenance"
+                        and not item.get("evidence_references")
+                    )
+                ),
                 None,
             )
             if unmet is not None:
                 raise UnsupportedEconomicPolicy(
                     unmet.get("reason") or f"solve_evidence_unavailable:{unmet['name']}"
                 )
+            expected_fixed = {
+                name: value
+                for name, value in vars(inputs.assumptions).items()
+                if name != assumption
+            }
+            if set(metadata.fixed_assumptions) != set(expected_fixed):
+                raise ValueError("solve eligibility fixed assumptions are incomplete")
+            if any(
+                metadata.fixed_assumptions[name].get("value") != value
+                for name, value in expected_fixed.items()
+            ):
+                raise ValueError("solve eligibility fixed assumptions do not match inputs")
         if not definition.lower_bound <= lower_bound < upper_bound <= definition.upper_bound:
             raise ValueError(
                 f"solve bounds must be within declared {assumption} domain "
@@ -302,7 +328,7 @@ class ReverseDcfEngine:
         max_iterations: int = 200,
         eligibility: SolveAxisMetadata | None = None,
     ) -> ReverseDcfResult:
-        self._solve_preflight(assumption, lower_bound, upper_bound, eligibility)
+        self._solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility)
         self._validate(inputs)
         if price_tolerance <= 0 or assumption_tolerance <= 0 or max_iterations <= 0:
             raise ValueError("solver tolerances and max_iterations must be positive")
@@ -423,7 +449,7 @@ class ReverseDcfEngine:
         eligibility: SolveAxisMetadata | None = None,
     ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
-        self._solve_preflight(assumption, lower_bound, upper_bound, eligibility)
+        self._solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility)
         self._validate(inputs)
         if sample_intervals <= 0 or price_tolerance <= 0:
             raise ValueError("range diagnostic settings must be positive")

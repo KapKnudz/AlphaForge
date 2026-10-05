@@ -22,6 +22,22 @@ def _supported_metadata(inputs):
     return solve_axis_metadata("revenue_growth", assumptions=inputs.assumptions)
 
 
+def _verified_metadata(inputs):
+    return solve_axis_metadata(
+        "revenue_growth",
+        assumptions=inputs.assumptions,
+        prerequisite_evidence={
+            name: {
+                "status": "met",
+                "evidence_references": ()
+                if name == "fixed_assumptions_with_provenance"
+                else ({"source_id": f"evidence:{name}"},),
+            }
+            for name in SOLVE_AXIS_REGISTRY["revenue_growth"].evidence_prerequisites
+        },
+    )
+
+
 def test_registry_is_the_explicit_domain_and_reason_owner():
     assert DcfAssumptionPolicy.SOLVE_BOUNDS == {
         axis: (definition.lower_bound, definition.upper_bound)
@@ -74,6 +90,59 @@ def test_evidence_preflight_happens_before_any_numerical_sampling():
     with pytest.raises(UnsupportedEconomicPolicy, match="solve_evidence_unavailable"):
         engine.solve(inputs, "revenue_growth", 0, 0.08, eligibility=unverified)
     assert not engine.sampled
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+def test_supplied_eligibility_must_match_fixed_input_assumptions(operation):
+    inputs = hand_inputs()
+    metadata = _verified_metadata(inputs)
+    changed_inputs = replace(
+        inputs,
+        assumptions=replace(inputs.assumptions, discount_rate=0.15),
+    )
+
+    with pytest.raises(ValueError, match="fixed assumptions do not match inputs"):
+        getattr(ReverseDcfEngine(), operation)(
+            changed_inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize(
+    "invalid_metadata", ["empty_prerequisites", "missing_reference", "missing_fixed"]
+)
+def test_supplied_eligibility_must_be_complete(operation, invalid_metadata):
+    inputs = hand_inputs()
+    metadata = _verified_metadata(inputs)
+    if invalid_metadata == "empty_prerequisites":
+        metadata = replace(metadata, evidence_prerequisites=())
+        expected_exception = ValueError
+        expected_message = "prerequisites do not match"
+    elif invalid_metadata == "missing_reference":
+        prerequisites = tuple(dict(item) for item in metadata.evidence_prerequisites)
+        prerequisites[0]["evidence_references"] = ()
+        metadata = replace(metadata, evidence_prerequisites=prerequisites)
+        expected_exception = UnsupportedEconomicPolicy
+        expected_message = "solve_evidence_unavailable"
+    else:
+        fixed = dict(metadata.fixed_assumptions)
+        fixed.pop("discount_rate")
+        metadata = replace(metadata, fixed_assumptions=fixed)
+        expected_exception = ValueError
+        expected_message = "fixed assumptions are incomplete"
+
+    with pytest.raises(expected_exception, match=expected_message):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
 
 
 def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
