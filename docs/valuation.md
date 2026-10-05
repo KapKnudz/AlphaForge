@@ -157,12 +157,17 @@ ranking never masquerades as a discounted-cash-flow.
   Direct arithmetic calls on a fully admissible positive-growth range retain deterministic
   sampled diagnostics; revenue growth means initial growth fading to the fixed mature
   endpoint, not constant CAGR. The shared `solve_eligibility.py` registry declares each
-  axis domain, evidence prerequisites, refusal reason, and root interpretation. Exported
-  eligibility metadata records the fixed assumptions and their provenance; solver and
-  diagnostics preflight from that same metadata.
+  axis domain, evidence prerequisites, refusal reason, and root interpretation. Both direct
+  solve and range diagnostics refuse before sampling unless supplied eligibility has every
+  prerequisite verified and its complete fixed-assumption values match the current inputs;
+  omitting eligibility creates an unverified decision and therefore refuses. Exported
+  eligibility metadata records the fixed assumptions and their provenance.
   Canonical results retain conditional sign-change candidates, endpoint matches, and sampled
-  tolerance regions distinctly. No candidate is selected as a unique answer: finite sampling
-  cannot establish uniqueness, completeness, tangency, or roots/extrema between samples.
+  tolerance regions distinctly, including sign-change candidates that coexist with a sampled
+  match region. Point matches already represented by a sign-change bracket are omitted from
+  `sampled_match_points`, and `sampled_match_point_count` always counts that exported collection.
+  No candidate is selected as a unique answer: finite sampling cannot establish uniqueness,
+  completeness, tangency, or roots/extrema between samples.
   Base and candidate results also flag
   negative modeled equity as non-tradable; limited-liability and turnaround option
   value remain outside this FCFF model.
