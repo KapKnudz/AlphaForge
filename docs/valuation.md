@@ -173,7 +173,9 @@ ranking never masquerades as a discounted-cash-flow.
   with specific reasons. Routing does not classify companies, alter sector scoring/readiness
   rules, or bypass quality, calibration, economic, price, share or net-debt requirements.
   The canonical DCF result records route method/profile/evidence/decision identities;
-  capture and replay follow the [executed-run contract](executed-run-replay.md).
+  the decision identity binds the resolved evidence identity as well as the supplied input
+  identity and routing outcome. Capture and replay follow the
+  [executed-run contract](executed-run-replay.md).
 * **Export:** `alphaforge rank` retains original outputs, then writes
   `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)
