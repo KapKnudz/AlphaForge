@@ -24,6 +24,10 @@ from alphaforge.core.gate.readiness import AgentReadinessGate
 from alphaforge.core.ranking.engine import RankingEngine
 from alphaforge.core.valuation.dcf_contract import DCF_RESULT_CONTRACT_VERSION
 from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
+from alphaforge.core.valuation.dcf_router import (
+    DCF_ROUTING_POLICY_VERSION,
+    routing_input_payload,
+)
 from alphaforge.core.valuation.dividend_yield import (
     DIVIDEND_YIELD_POLICY_VERSION,
     trailing_dividend_window,
@@ -153,6 +157,7 @@ def rules_bundle() -> dict:
         "dcf": DcfAssumptionPolicy.VERSION,
         "dcf_input_quality": DcfAssumptionPolicy.INPUT_QUALITY_VERSION,
         "dcf_result_contract": DCF_RESULT_CONTRACT_VERSION,
+        "dcf_routing": DCF_ROUTING_POLICY_VERSION,
         "reinvestment_calibration": CALIBRATION_VERSION,
         "economic_convention": ECONOMIC_CONVENTION,
         "solve_bounds": DcfAssumptionPolicy.SOLVE_BOUNDS,
@@ -165,18 +170,39 @@ def rules_bundle() -> dict:
 
 
 def capture_inputs(
-    conn, companies, as_of: str, *, source_rows: dict | None = None
+    conn,
+    companies,
+    as_of: str,
+    *,
+    source_rows: dict | None = None,
+    dcf_routing: dict[int, object] | None = None,
 ) -> tuple[dict, dict]:
     """Freeze the loader's candidate/selection domain before running any calculator.
 
     Examined rejection/history rows are retained because they affect refusal and
     chronology, not as a general observation-vintage service. Text stays separate.
     """
+    companies = tuple(companies)
     tables = {table: [] for table in TABLES}
     original_ids = {}
     text = {}
     cutoff = date.fromisoformat(as_of)
     start, end = trailing_dividend_window(cutoff)
+    route_values = dcf_routing or {}
+    company_ids = {company.id for company in companies}
+    normalized_routes = {}
+    for company_id, route in route_values.items():
+        if isinstance(company_id, bool) or not isinstance(company_id, (int, str)):
+            raise ValueError("DCF routing keys must be canonical company ids")
+        try:
+            normalized_id = int(company_id)
+        except ValueError as exc:
+            raise ValueError("DCF routing keys must be canonical company ids") from exc
+        if isinstance(company_id, str) and company_id != str(normalized_id):
+            raise ValueError("DCF routing keys must be canonical company ids")
+        if normalized_id in normalized_routes or normalized_id not in company_ids:
+            raise ValueError("DCF routing must identify each selected company at most once")
+        normalized_routes[normalized_id] = route
     conn.execute("SAVEPOINT numerical_capture")
     try:
         for company in companies:
@@ -290,6 +316,10 @@ def capture_inputs(
             "as_of": as_of,
             "universe": [asdict(c) for c in companies],
             "tables": tables,
+            "dcf_routing": {
+                str(company.id): routing_input_payload(normalized_routes.get(company.id))
+                for company in companies
+            },
         }
         return json.loads(canonical(body)), json.loads(canonical(text))
     finally:
@@ -340,9 +370,14 @@ def evaluate(body: dict, text: dict):
                     [row[key] for key in columns],
                 )
         companies = [SimpleNamespace(**c) for c in body["universe"]]
+        routing = body.get("dcf_routing", {})
         results = {
             c.id: load_results_for_company(
-                memory, c.id, body["as_of"], retained_research_evidence=text[str(c.id)]
+                memory,
+                c.id,
+                body["as_of"],
+                retained_research_evidence=text[str(c.id)],
+                dcf_routing=routing.get(str(c.id)),
             )
             for c in companies
         }

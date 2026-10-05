@@ -39,6 +39,7 @@ from alphaforge.core.valuation.dcf_policy import (
     DcfQualityIssue,
     DcfQualityPeriod,
 )
+from alphaforge.core.valuation.dcf_router import decide_dcf_route
 from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
@@ -156,6 +157,13 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         "net_debt",
         "current_revenue_or_shares",
         "price_unavailable",
+        "archetype_unknown_or_mixed",
+        "forecast_profile_unknown_or_mixed",
+        "mature_operating_route_evidence_unavailable",
+        "mature_operating_route_evidence_not_catalogued",
+        "mature_operating_route_evidence_mismatch",
+        "high_growth_transition_and_funding_evidence_unavailable",
+        "cyclical_normalized_base_unavailable",
     }:
         return DcfResultStatus.INSUFFICIENT_EVIDENCE
     if reason in {
@@ -167,7 +175,19 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         "invalid_candidate_economics",
     }:
         return DcfResultStatus.DOMAIN_UNAVAILABLE
-    if "banks require" in reason or "property companies require" in reason or "not FCFF" in reason:
+    if (
+        "banks require" in reason
+        or "property companies require" in reason
+        or "not FCFF" in reason
+        or reason
+        in {
+            "financial_company_requires_non_fcff_method",
+            "property_company_requires_nav_or_ffo_method",
+            "resource_company_requires_separate_economic_policy",
+            "holding_or_unusual_structure_unsupported",
+            "unsupported_forecast_profile",
+        }
+    ):
         return DcfResultStatus.UNSUPPORTED
     if "not both verified" in reason:
         return DcfResultStatus.INSUFFICIENT_EVIDENCE
@@ -1117,7 +1137,12 @@ def _valuation_currency_refusal(
 
 
 def load_results_for_company(
-    conn, company_id: int, as_of: str, *, retained_research_evidence: dict | None = None
+    conn,
+    company_id: int,
+    as_of: str,
+    *,
+    retained_research_evidence: dict | None = None,
+    dcf_routing=None,
 ) -> dict[str, Any]:
     """Select cutoff-filtered stored observations, not historical vintages."""
     cutoff = date.fromisoformat(as_of[:10])
@@ -1144,6 +1169,11 @@ def load_results_for_company(
     else:
         # Historical audit context only; never used to authorize a new live analysis.
         research_evidence = retained_research_evidence
+    packet = (
+        research_evidence.get("evidence_packet") if isinstance(research_evidence, dict) else None
+    )
+    dcf_route_decision = decide_dcf_route(dcf_routing, evidence_packet=packet)
+    dcf_route_payload = asdict(dcf_route_decision)
     company = conn.execute(
         "SELECT branch_id FROM companies WHERE id=?",
         (company_id,),
@@ -1362,6 +1392,7 @@ def load_results_for_company(
                 "missing_information": _missing,
                 "input_quality": input_quality_payload,
                 "normalized_financial_view": asdict(normalized_financial_view),
+                "routing": dcf_route_payload,
             },
             DcfResultMetadata(
                 DcfResultStatus.INSUFFICIENT_EVIDENCE,
@@ -1395,12 +1426,13 @@ def load_results_for_company(
                 },
             ),
             "dcf": {
+                "routing": dcf_route_decision,
                 "policy": None,
                 "value": None,
                 "implied": {},
                 "reverse_dcf": _unavailable,
             },
-            "reverse_dcf": _unavailable,
+            "reverse_dcf": {**_unavailable, "routing": dcf_route_payload},
         }
 
     # Börsdata prices are split-adjusted but report share counts are not. Keep
@@ -1694,7 +1726,30 @@ def load_results_for_company(
                     dcf_policy_decision,
                     missing_information=("admissible_reinvestment_calibration",),
                 )
-        if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
+        route_engine_inputs_available = (
+            not price_missing
+            and current_net_debt is not None
+            and dcf_current_report is not None
+            and dcf_current_report.revenue is not None
+            and dcf_current_report.revenue > 0
+            and dcf_current_report.shares_outstanding is not None
+            and dcf_current_report.shares_outstanding > 0
+        )
+        policy_available_before_routing = (
+            dcf_policy_decision.available and dcf_policy_decision.assumptions is not None
+        )
+        if policy_available_before_routing and dcf_route_decision.status != "available":
+            dcf_policy_decision = replace(
+                dcf_policy_decision,
+                available=False,
+                assumptions=None,
+                missing_information=(dcf_route_decision.reason,),
+                warnings=dcf_policy_decision.warnings
+                + ("DCF route is not supported by the supplied archetype/profile evidence",),
+            )
+        if policy_available_before_routing and (
+            dcf_policy_decision.available or not route_engine_inputs_available
+        ):
             if price_missing:
                 reverse_dcf["status"] = "unavailable"
             elif current_net_debt is None:
@@ -2083,8 +2138,10 @@ def load_results_for_company(
         "decision": asdict(input_quality_decision),
     }
     selection["dcf_input_quality"] = input_quality_payload
+    reverse_dcf["routing"] = dcf_route_payload
     dcf_result = reverse_dcf.get("dcf")
     if isinstance(dcf_result, dict):
+        dcf_result["routing"] = dcf_route_payload
         dcf_result["input_quality"] = input_quality_payload
         dcf_result["normalized_financial_view"] = asdict(normalized_financial_view)
         missing = dcf_result.get("missing_information") or ()
@@ -2142,6 +2199,7 @@ def load_results_for_company(
     # reaching into candidate.full_results, and keep provenance separate from
     # the heuristic valuation_score.
     dcf_payload = {
+        "routing": dcf_route_decision,
         "policy": dcf_policy_decision,
         "value": dcf_value,
         "implied": reverse_dcf_results,
