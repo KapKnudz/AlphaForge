@@ -782,11 +782,9 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     as_of = args.as_of
     watchlist_path = args.watchlist
-    dcf_routing = getattr(args, "dcf_routing", None)
+    dcf_routing = None
     routing_path = getattr(args, "dcf_routing_json", None)
     if routing_path:
-        if dcf_routing is not None:
-            raise ValueError("supply DCF routing through one input only")
 
         def unique_object(pairs):
             value = {}

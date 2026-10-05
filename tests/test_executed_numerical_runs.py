@@ -12,6 +12,7 @@ from dcf_calibration_fixtures import synthetic_calibration_fixture
 from test_method_date_growth_selection import (
     CUTOFF,
     annual,
+    explicit_mature_dcf_route,
     packet,
     rank_exports,
     setup,
@@ -126,7 +127,8 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     monkeypatch, tmp_path, multiple
 ):
     conn, cid = seeded(multiple=multiple)
-    score, _, _ = rank_exports(conn, monkeypatch, tmp_path)
+    routes = {cid: explicit_mature_dcf_route()}
+    score, _, _ = rank_exports(conn, monkeypatch, tmp_path, dcf_routing=routes)
     run, identity, original = latest(conn)
     snapshot = conn.execute(
         "SELECT * FROM numerical_input_bodies WHERE numerical_identity=?", (identity,)
@@ -160,7 +162,7 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
             upsert_kpi_observations(
                 conn, cid, 37, "r12", "latest", [{"year": 2026, "date": "2026-05-01", "v": 40}]
             )
-        rank_exports(conn, monkeypatch, tmp_path)
+        rank_exports(conn, monkeypatch, tmp_path, dcf_routing=routes)
         _, changed_identity, changed_outputs = latest(conn)
         identities.append(changed_identity)
         outputs.append(canonical(changed_outputs))

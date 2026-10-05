@@ -102,18 +102,18 @@ class DcfRoutingDecision:
 
 def _resolve_evidence_references(
     references: tuple[EvidenceReference, ...], evidence_packet: dict | None
-) -> tuple[EvidenceReference, ...] | None:
+) -> tuple[tuple[EvidenceReference, ...], str | None]:
     if not references:
-        return ()
+        return (), None
     if not validate_frozen_packet(evidence_packet):
-        return None
+        return (), "mature_operating_route_evidence_not_catalogued"
     catalog = evidence_packet.get("evidence_catalog")
     catalogued_ids = (
         catalog.get("canonical_source_ids", ()) if isinstance(catalog, dict) else ()
     )
     sources = evidence_packet.get("sources")
     if not isinstance(catalogued_ids, list) or not isinstance(sources, list):
-        return None
+        return (), "mature_operating_route_evidence_not_catalogued"
     catalogued = set(catalogued_ids)
     sources_by_id = {
         source.get("source_id"): source
@@ -124,7 +124,7 @@ def _resolve_evidence_references(
     for reference in references:
         source = sources_by_id.get(reference.source_id)
         if not isinstance(source, dict) or not reference.anchor:
-            return None
+            return (), "mature_operating_route_evidence_not_catalogued"
         anchors = {
             item.get("anchor")
             for collection in (
@@ -157,15 +157,15 @@ def _resolve_evidence_references(
                 "sha256",
             )
         ):
-            return None
+            return (), "mature_operating_route_evidence_not_catalogued"
         if any(
             getattr(reference, field) is not None
             and getattr(reference, field) != getattr(canonical, field)
             for field in ("source_url", "published_on", "observed_on", "sha256")
         ):
-            return None
+            return (), "mature_operating_route_evidence_mismatch"
         resolved.append(canonical)
-    return tuple(resolved)
+    return tuple(resolved), None
 
 
 def decide_dcf_route(value=None, *, evidence_packet: dict | None = None) -> DcfRoutingDecision:
@@ -173,10 +173,9 @@ def decide_dcf_route(value=None, *, evidence_packet: dict | None = None) -> DcfR
     payload = routing_input_payload(routing)
     encoded_input = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     input_identity = sha256(encoded_input.encode("utf-8")).hexdigest()
-    resolved_references = _resolve_evidence_references(
+    canonical_references, reference_failure = _resolve_evidence_references(
         routing.evidence_references, evidence_packet
     )
-    canonical_references = resolved_references or ()
     evidence_identity = sha256(
         json.dumps(
             [asdict(reference) for reference in canonical_references],
@@ -223,12 +222,8 @@ def decide_dcf_route(value=None, *, evidence_packet: dict | None = None) -> DcfR
             "mature_operating_route_evidence_unavailable",
             None,
         )
-    elif resolved_references is None:
-        status, reason, method = (
-            "insufficient_evidence",
-            "mature_operating_route_evidence_not_catalogued",
-            None,
-        )
+    elif reference_failure is not None:
+        status, reason, method = "insufficient_evidence", reference_failure, None
 
     decision_facts = {
         "policy_version": DCF_ROUTING_POLICY_VERSION,

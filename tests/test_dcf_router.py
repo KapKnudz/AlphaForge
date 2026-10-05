@@ -163,16 +163,28 @@ def test_missing_or_unknown_routing_never_auto_admits_general_company():
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "reason"),
     [
-        ("source_url", "https://fabricated.test/report"),
-        ("published_on", "1900-01-01T00:00:00Z"),
-        ("observed_on", "1900-01-02T00:00:00Z"),
-        ("anchor", "document:1#page:999"),
-        ("sha256", "f" * 64),
+        (
+            "source_url",
+            "https://fabricated.test/report",
+            "mature_operating_route_evidence_mismatch",
+        ),
+        (
+            "published_on",
+            "1900-01-01T00:00:00Z",
+            "mature_operating_route_evidence_mismatch",
+        ),
+        (
+            "observed_on",
+            "1900-01-02T00:00:00Z",
+            "mature_operating_route_evidence_mismatch",
+        ),
+        ("anchor", "document:1#page:999", "mature_operating_route_evidence_not_catalogued"),
+        ("sha256", "f" * 64, "mature_operating_route_evidence_mismatch"),
     ],
 )
-def test_mature_route_rejects_provenance_not_owned_by_frozen_source(field, value):
+def test_mature_route_rejects_provenance_not_owned_by_frozen_source(field, value, reason):
     conn, company_id = qualified_company()
     supplied = route()
     supplied["evidence_references"][0][field] = value
@@ -182,7 +194,8 @@ def test_mature_route_rejects_provenance_not_owned_by_frozen_source(field, value
     ]["dcf"]
 
     assert dcf["available"] is False
-    assert dcf["reason"] == "mature_operating_route_evidence_not_catalogued"
+    assert dcf["status"] == "insufficient_evidence"
+    assert dcf["reason"] == reason
     assert dcf["routing"]["evidence_references"] == []
 
 

@@ -161,6 +161,7 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         "forecast_profile_unknown_or_mixed",
         "mature_operating_route_evidence_unavailable",
         "mature_operating_route_evidence_not_catalogued",
+        "mature_operating_route_evidence_mismatch",
         "high_growth_transition_and_funding_evidence_unavailable",
         "cyclical_normalized_base_unavailable",
     }:

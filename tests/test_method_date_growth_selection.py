@@ -160,11 +160,18 @@ def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_d
 
 def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF, dcf_routing=None):
     monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
+    routing_path = None
+    if dcf_routing is not None:
+        routing_path = tmp_path / "dcf-routing.json"
+        routing_path.write_text(json.dumps(dcf_routing), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert (
         cmd_rank(
             argparse.Namespace(
-                dsn="sqlite:///:memory:", as_of=cutoff, watchlist=None, dcf_routing=dcf_routing
+                dsn="sqlite:///:memory:",
+                as_of=cutoff,
+                watchlist=None,
+                dcf_routing_json=str(routing_path) if routing_path else None,
             )
         )
         == 0
@@ -2329,7 +2336,12 @@ def test_nonblocking_annual_rejections_preserve_selected_span(case, reverse, mon
     assert not rejection["current_refusal"]
     assert loaded["financial"].revenue_growth == pytest.approx(0.1)
     assert loaded["financial"].revenue_growth_years == (1 if case == "before_suffix_gap" else 2)
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     assert score["revenue_growth"] == pytest.approx(0.1)
     assert json.loads(row["input_selection"]) == score["input_selection"]
     assert dcf[str(cid)]["selection"] == score["input_selection"]
@@ -2360,7 +2372,12 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     assert score["revenue_growth"] == pytest.approx(0.1)
     assert score["revenue_growth_years"] == 1
     assert row["revenue_growth_years"] == "1"
@@ -3076,7 +3093,13 @@ def test_exact_slot_year_correction_supersedes_old_label_audit(
     assert loaded["financial"].revenue_growth == pytest.approx(0.1)
     assert loaded["financial"].revenue_growth_years == 2
 
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path, cutoff)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        cutoff,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     exported = score["input_selection"]
     exported_audit = next(
         item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"
