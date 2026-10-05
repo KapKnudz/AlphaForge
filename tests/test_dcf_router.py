@@ -189,9 +189,9 @@ def test_mature_route_rejects_provenance_not_owned_by_frozen_source(field, value
     supplied = route()
     supplied["evidence_references"][0][field] = value
 
-    dcf = load_results_for_company(conn, company_id, CUTOFF, dcf_routing=supplied)[
-        "reverse_dcf"
-    ]["dcf"]
+    dcf = load_results_for_company(conn, company_id, CUTOFF, dcf_routing=supplied)["reverse_dcf"][
+        "dcf"
+    ]
 
     assert dcf["available"] is False
     assert dcf["status"] == "insufficient_evidence"
@@ -381,9 +381,7 @@ def test_capture_rejects_route_key_normalization_collisions():
         '{"1": {}, "01": {}}',
     ],
 )
-def test_rank_cli_rejects_duplicate_or_noncanonical_route_json_keys(
-    payload, monkeypatch, tmp_path
-):
+def test_rank_cli_rejects_duplicate_or_noncanonical_route_json_keys(payload, monkeypatch, tmp_path):
     conn, _ = qualified_company()
     route_file = tmp_path / "dcf-routing.json"
     route_file.write_text(payload, encoding="utf-8")

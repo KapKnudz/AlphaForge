@@ -207,9 +207,7 @@ def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch,
         conn,
         monkeypatch,
         tmp_path,
-        dcf_routing={
-            cid: {**explicit_mature_dcf_route(), "archetype": route_archetype}
-        },
+        dcf_routing={cid: {**explicit_mature_dcf_route(), "archetype": route_archetype}},
     )
     expected = "ready" if has_financials else "evidence_blocked"
     if model != "general":

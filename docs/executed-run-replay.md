@@ -17,7 +17,8 @@ readiness gate and calculators, not a second financial implementation.
 Operational report/price/KPI upserts remain latest-state views.
 
 The body preserves the actual company/database/provider identities, branch and
-currencies, ordered universe and cutoff; admitted current/historical reports
+currencies, ordered universe and cutoff; each company's explicit DCF
+archetype/profile/evidence-reference input; admitted current/historical reports
 and raw fiscal/publication/denomination/acquisition facts; selected current and
 paired historical prices with currencies and raw date facts; selected KPI
 period/price/date values and rejected/missing-selection provenance; split facts;
@@ -28,10 +29,10 @@ candidate from [migration 019](../db/migrations/019_reinvestment_calibrations.sq
 including rejected/conflicting choices, exact operand/source/accounting records
 and content identities. The numerical body retains the report and rejection rows
 that determine DCF input quality. Rules separately bind the calibration,
-input-quality, forward-funding/convergence and typed DCF result-contract policy
-versions. A replay whose implementation or rules are incompatible refuses
-honestly rather than reinterpreting old outputs. Unselected intervening daily
-prices and superseded admissible KPI rows are excluded. Raw values survive beside
+input-quality, forward-funding/convergence, explicit DCF-routing and typed DCF
+result-contract policy versions. A replay whose implementation or rules are
+incompatible refuses honestly rather than reinterpreting old outputs. Unselected
+intervening daily prices and superseded admissible KPI rows are excluded. Raw values survive beside
 canonical stored transformations; NULL
 and zero remain distinct. No liquidity, realized returns or thesis inputs are
 added. Provider scale, split adjustment, selection/refusals and formulas retain
@@ -73,10 +74,12 @@ cannot hide an unversioned formula correction.
 
 Textual packet/manifest contents, references and fingerprints are retained as a
 **separate textual context** with their own integrity digest, not included in the
-financial body hash. Existing packet validation remains authoritative. Numerical
-changes never rewrite textual packets or manifests. Replaying a formerly usable
-packet does not restore its current usability or authorize new model analysis;
-new `rank` always selects text through `load_evidence_view`.
+financial body hash. Existing packet validation remains authoritative. DCF route
+references resolve and canonicalize only against this retained frozen packet;
+replay never rereads the live route file or evidence store. Numerical changes never
+rewrite textual packets or manifests. Replaying a formerly usable packet does not
+restore its current usability or authorize new model analysis; new `rank` always
+selects text through `load_evidence_view`.
 
 ## Retention, publication and refusal
 

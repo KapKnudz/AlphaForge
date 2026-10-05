@@ -108,9 +108,7 @@ def _resolve_evidence_references(
     if not validate_frozen_packet(evidence_packet):
         return (), "mature_operating_route_evidence_not_catalogued"
     catalog = evidence_packet.get("evidence_catalog")
-    catalogued_ids = (
-        catalog.get("canonical_source_ids", ()) if isinstance(catalog, dict) else ()
-    )
+    catalogued_ids = catalog.get("canonical_source_ids", ()) if isinstance(catalog, dict) else ()
     sources = evidence_packet.get("sources")
     if not isinstance(catalogued_ids, list) or not isinstance(sources, list):
         return (), "mature_operating_route_evidence_not_catalogued"
