@@ -222,18 +222,34 @@ def _dcf_solve_status(
 
 def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]:
     """Return conditional solve evidence without promoting sampled candidates to a unique answer."""
+    definition = SOLVE_AXIS_REGISTRY[axis]
     metadata = asdict(eligibility)
-    if eligibility.status != "supported":
+    metadata["root_interpretation"] = definition.root_interpretation
+    if definition.status != "supported":
+        metadata["status"] = definition.status
+        metadata["reason"] = definition.reason
         return {
             "available": False,
             "solution_status": (
-                "not_identifiable" if eligibility.status == "not_identifiable" else "unavailable"
+                "not_identifiable" if definition.status == "not_identifiable" else "unavailable"
             ),
+            "reason": definition.reason,
+            "eligibility": metadata,
+            "candidate_roots": [],
+            "candidate_solution_count": 0,
+            "qualification": definition.root_interpretation,
+        }
+    if eligibility.status == "supported":
+        metadata["reason"] = definition.reason
+    if eligibility.status != "supported":
+        return {
+            "available": False,
+            "solution_status": "unavailable",
             "reason": eligibility.reason,
             "eligibility": metadata,
             "candidate_roots": [],
             "candidate_solution_count": 0,
-            "qualification": eligibility.root_interpretation,
+            "qualification": definition.root_interpretation,
         }
 
     lower = eligibility.domain["lower_bound"]

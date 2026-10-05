@@ -50,6 +50,81 @@ def test_registry_is_the_explicit_domain_and_reason_owner():
     assert SOLVE_REGISTRY_VERSION == "reverse-dcf-solve-registry-v1"
 
 
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize("axis", ["ebit_margin", "terminal_growth"])
+def test_registry_disabled_axis_cannot_be_promoted(operation, axis):
+    inputs = hand_inputs()
+    definition = SOLVE_AXIS_REGISTRY[axis]
+    metadata = solve_axis_metadata(axis, assumptions=inputs.assumptions)
+    promoted = replace(metadata, status="supported")
+
+    with pytest.raises(ValueError, match="decision does not match"):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            axis,
+            definition.lower_bound,
+            definition.upper_bound,
+            eligibility=promoted,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize("axis", ["ebit_margin", "terminal_growth"])
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("reason", "caller_override", "decision does not match"),
+        ("root_interpretation", "caller override", "interpretation does not match"),
+    ],
+)
+def test_registry_disabled_axis_explanation_cannot_be_overridden(
+    operation, axis, field, value, message
+):
+    inputs = hand_inputs()
+    definition = SOLVE_AXIS_REGISTRY[axis]
+    metadata = replace(
+        solve_axis_metadata(axis, assumptions=inputs.assumptions),
+        **{field: value},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            axis,
+            definition.lower_bound,
+            definition.upper_bound,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize(
+    ("axis", "solution_status"),
+    [("ebit_margin", "unavailable"), ("terminal_growth", "not_identifiable")],
+)
+def test_disabled_axis_result_exports_registry_decision(axis, solution_status):
+    inputs = hand_inputs()
+    definition = SOLVE_AXIS_REGISTRY[axis]
+    metadata = replace(
+        solve_axis_metadata(axis, assumptions=inputs.assumptions),
+        status="supported",
+        reason="caller_override",
+        root_interpretation="caller override",
+    )
+
+    class SamplingTrap:
+        def diagnose_solve_range(self, *args, **kwargs):
+            raise AssertionError("disabled axis reached numerical sampling")
+
+    result = _solve_axis_result(SamplingTrap(), inputs, axis, metadata)
+
+    assert result["solution_status"] == solution_status
+    assert result["reason"] == definition.reason
+    assert result["qualification"] == definition.root_interpretation
+    assert result["eligibility"]["status"] == definition.status
+    assert result["eligibility"]["reason"] == definition.reason
+    assert result["eligibility"]["root_interpretation"] == definition.root_interpretation
+
+
 def test_evidence_preflight_happens_before_any_numerical_sampling():
     inputs = hand_inputs()
     metadata = solve_axis_metadata(

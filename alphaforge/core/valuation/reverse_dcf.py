@@ -204,6 +204,14 @@ class ReverseDcfEngine:
             or metadata.domain.get("upper_bound") != definition.upper_bound
         ):
             raise ValueError("solve eligibility domain does not match the declared registry")
+        if metadata.root_interpretation != definition.root_interpretation:
+            raise ValueError("solve eligibility interpretation does not match the declared registry")
+        if definition.status != "supported" and (
+            metadata.status != definition.status or metadata.reason != definition.reason
+        ):
+            raise ValueError("solve eligibility decision does not match the declared registry")
+        if metadata.status == "supported" and metadata.reason != definition.reason:
+            raise ValueError("solve eligibility reason does not match the declared registry")
         if metadata.status != "supported":
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
         if eligibility is not None:
