@@ -115,8 +115,12 @@ ranking never masquerades as a discounted-cash-flow.
   cutoff-filtered verified-date contract, **not historical-known-then PIT**.
   Quality output exposes expected and selected spans, excluded and missing
   periods, dates/durations/currencies, evidenced selection anomalies and metadata
-  unknowns. Unknown starts remain visible rather than becoming proven
-  duration defects. The versioned sufficiency rule is
+  unknowns. Current rejected annual and R12 candidates remain source-attributable
+  excluded evidence; missing, malformed, or raw/stored-conflicting fiscal ends,
+  publication dates, and fiscal years are emitted as unknown rather than trusted.
+  Rejected R12 candidates do not expand the expected annual span. Unknown starts
+  remain visible rather than becoming proven duration defects. The versioned
+  sufficiency rule is
   `dcf-input-quality-v1-two-qualified-consecutive-annual-periods`, grounded in the
   existing consecutive-annual revenue and EBIT operand contracts; no three- or five-year
   minimum or guessed confidence is added. This DCF-only decision does not alter
