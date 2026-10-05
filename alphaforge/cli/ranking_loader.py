@@ -1735,11 +1735,10 @@ def load_results_for_company(
             and dcf_current_report.shares_outstanding is not None
             and dcf_current_report.shares_outstanding > 0
         )
-        if (
-            dcf_policy_decision.available
-            and route_engine_inputs_available
-            and dcf_route_decision.status != "available"
-        ):
+        policy_available_before_routing = (
+            dcf_policy_decision.available and dcf_policy_decision.assumptions is not None
+        )
+        if policy_available_before_routing and dcf_route_decision.status != "available":
             dcf_policy_decision = replace(
                 dcf_policy_decision,
                 available=False,
@@ -1748,7 +1747,9 @@ def load_results_for_company(
                 warnings=dcf_policy_decision.warnings
                 + ("DCF route is not supported by the supplied archetype/profile evidence",),
             )
-        if dcf_policy_decision.available and dcf_policy_decision.assumptions is not None:
+        if policy_available_before_routing and (
+            dcf_policy_decision.available or not route_engine_inputs_available
+        ):
             if price_missing:
                 reverse_dcf["status"] = "unavailable"
             elif current_net_debt is None:

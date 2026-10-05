@@ -239,14 +239,21 @@ def test_routing_cannot_override_capital_quality_or_economic_refusals():
     conn, company_id = setup(periods=[annual(2025, 100), annual(2026, 110, net_Debt=None)])
     packet(conn, company_id)
     synthetic_calibration_fixture(conn, company_id)
-    missing_bridge = load_results_for_company(
+    missing_bridge_loaded = load_results_for_company(
         conn, company_id, CUTOFF, dcf_routing=route(profile="high_growth")
-    )["reverse_dcf"]["dcf"]
+    )
+    missing_bridge = missing_bridge_loaded["reverse_dcf"]["dcf"]
     assert missing_bridge["reason"] == "net_debt"
     assert missing_bridge["routing"]["reason"] == (
         "high_growth_transition_and_funding_evidence_unavailable"
     )
     assert "value_per_share" not in missing_bridge
+    bridge_policy = missing_bridge_loaded["dcf"]["policy"]
+    assert bridge_policy.available is False
+    assert bridge_policy.assumptions is None
+    assert bridge_policy.missing_information == (
+        "high_growth_transition_and_funding_evidence_unavailable",
+    )
 
     conn, company_id = setup(periods=[annual(2025, 100), annual(2026, 110)], price_date=None)
     packet(conn, company_id)
