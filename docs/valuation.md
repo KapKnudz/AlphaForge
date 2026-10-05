@@ -157,8 +157,9 @@ ranking never masquerades as a discounted-cash-flow.
   Direct arithmetic calls on a fully admissible positive-growth range retain deterministic
   sampled diagnostics; revenue growth means initial growth fading to the fixed mature
   endpoint, not constant CAGR. The shared `solve_eligibility.py` registry declares each
-  axis domain, evidence prerequisites, refusal reason, fixed-assumption evidence references,
-  and root interpretation; solver and diagnostics preflight from that same metadata.
+  axis domain, evidence prerequisites, refusal reason, and root interpretation. Exported
+  eligibility metadata records the fixed assumptions and their provenance; solver and
+  diagnostics preflight from that same metadata.
   Canonical results retain conditional sign-change candidates, endpoint matches, and sampled
   tolerance regions distinctly. No candidate is selected as a unique answer: finite sampling
   cannot establish uniqueness, completeness, tangency, or roots/extrema between samples.

@@ -205,7 +205,9 @@ class ReverseDcfEngine:
         ):
             raise ValueError("solve eligibility domain does not match the declared registry")
         if metadata.root_interpretation != definition.root_interpretation:
-            raise ValueError("solve eligibility interpretation does not match the declared registry")
+            raise ValueError(
+                "solve eligibility interpretation does not match the declared registry"
+            )
         if definition.status != "supported" and (
             metadata.status != definition.status or metadata.reason != definition.reason
         ):
@@ -215,11 +217,11 @@ class ReverseDcfEngine:
         if metadata.status != "supported":
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
         if eligibility is not None:
-            prerequisite_names = tuple(
-                item.get("name") for item in metadata.evidence_prerequisites
-            )
+            prerequisite_names = tuple(item.get("name") for item in metadata.evidence_prerequisites)
             if prerequisite_names != definition.evidence_prerequisites:
-                raise ValueError("solve eligibility prerequisites do not match the declared registry")
+                raise ValueError(
+                    "solve eligibility prerequisites do not match the declared registry"
+                )
             unmet = next(
                 (
                     item
