@@ -1670,6 +1670,77 @@ def test_rejected_annual_has_one_source_attributable_quality_anomaly():
     ]
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement", "remove_field", "unknown_field", "expected_unknown"),
+    [
+        (
+            "period_end",
+            None,
+            True,
+            "period_end",
+            "year period 2026 ending unknown-end: period_end unknown",
+        ),
+        (
+            "period_end",
+            "not-a-date",
+            False,
+            "period_end",
+            "year period 2026 ending unknown-end: period_end unknown",
+        ),
+        (
+            "report_Date",
+            None,
+            True,
+            "published_on",
+            "year period 2026 ending 2026-03-31: published_on unknown",
+        ),
+        (
+            "report_Date",
+            "not-a-date",
+            False,
+            "published_on",
+            "year period 2026 ending 2026-03-31: published_on unknown",
+        ),
+        (
+            "year",
+            None,
+            True,
+            "fiscal_year",
+            "year period unknown-year ending 2026-03-31: fiscal_year unknown",
+        ),
+        (
+            "year",
+            "not-a-year",
+            False,
+            "fiscal_year",
+            "year period unknown-year ending 2026-03-31: fiscal_year unknown",
+        ),
+    ],
+)
+def test_rejected_report_quality_lists_unverified_identity_metadata(
+    field, replacement, remove_field, unknown_field, expected_unknown
+):
+    conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
+    rejected = annual(2026, 121)
+    if remove_field:
+        rejected.pop(field)
+    else:
+        rejected[field] = replacement
+    assert upsert_financial_periods(conn, cid, [rejected]) == 0
+
+    selection = load_results_for_company(conn, cid, CUTOFF)["selection"]
+    rejection = next(
+        item for item in selection["rejected_reports"] if item["raw_payload"] == rejected
+    )
+    view = selection["dcf_input_quality"]["view"]
+    rejected_period = next(
+        period for period in view["excluded_periods"] if period["evidence_id"] == rejection["id"]
+    )
+
+    assert unknown_field in rejected_period["unknown_fields"]
+    assert expected_unknown in view["unknowns"]
+
+
 def test_rejected_r12_is_visible_without_expanding_annual_quality_span():
     conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
     rejected = annual(

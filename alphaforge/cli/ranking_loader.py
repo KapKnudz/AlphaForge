@@ -497,28 +497,30 @@ def _dcf_rejected_quality_period(item: dict) -> DcfQualityPeriod:
     years, malformed_year = report_integer_aliases(raw, "report_year")
     periods, malformed_period = report_integer_aliases(raw, "report_period")
     fiscal_year = _fiscal_year(item.get("report_year"))
-    period_end = next(iter(ends)) if not malformed_end and len(ends) == 1 else None
-    period_start = next(iter(starts)) if not malformed_start and len(starts) == 1 else None
-    published_on = (
-        next(iter(publications)) if not malformed_publication and len(publications) == 1 else None
-    )
+    valid_period_end = not malformed_end and len(ends) == 1
+    valid_period_start = not malformed_start and len(starts) == 1
+    valid_publication = not malformed_publication and len(publications) == 1
+    valid_fiscal_year = fiscal_year is not None and not malformed_year and years == {fiscal_year}
+    period_end = next(iter(ends)) if valid_period_end else None
+    period_start = next(iter(starts)) if valid_period_start else None
+    published_on = next(iter(publications)) if valid_publication else None
     denomination = item.get("denomination") or {}
     currency = _currency_code(denomination.get("values_currency"))
     if currency is None:
         currency = _currency_code(raw.get("values_currency"))
     unknown_fields = []
-    if not starts and not malformed_start:
+    if not valid_period_start:
         unknown_fields.append("period_start_and_duration")
-    if (
-        currency is None
-        and not denomination.get("values_currency")
-        and not raw.get("values_currency")
-    ):
+    if not valid_period_end:
+        unknown_fields.append("period_end")
+    if not valid_publication:
+        unknown_fields.append("published_on")
+    if not valid_fiscal_year:
+        unknown_fields.append("fiscal_year")
+    if currency is None:
         unknown_fields.append("values_currency")
     return DcfQualityPeriod(
-        fiscal_year=fiscal_year
-        if fiscal_year is not None and not malformed_year and years == {fiscal_year}
-        else None,
+        fiscal_year=fiscal_year if valid_fiscal_year else None,
         period_type=str(item.get("period_type", "year")),
         period_start=period_start.isoformat() if period_start else None,
         period_end=period_end.isoformat() if period_end else None,
