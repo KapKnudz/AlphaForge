@@ -217,8 +217,9 @@ these loader predicates. `SELECTION_VERSION` is
 also carried by ranking JSON/CSV and `dcf.json`: rejected report/KPI/price
 provenance with original payload/value/date facts, selected report denomination
 and acquisition mode/target, selected price date/age, historical pairings and
-annual fiscal ends/refusal reasons. Applicable refusal
-reasons also appear in ranking missing data and readiness
+annual fiscal ends/refusal reasons. Its `dcf_input_quality` member carries the
+versioned DCF-only view and decision owned by [valuation.md](valuation.md).
+Applicable refusal reasons also appear in ranking missing data and readiness
 limitations. A quarter/R12 refusal is superseded only by a unique same-type row
 matching its verified end or its fiscal year plus report period; otherwise only
 chronology provably older than the latest same-type row becomes audit-only.

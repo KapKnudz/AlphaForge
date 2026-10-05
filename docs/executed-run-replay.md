@@ -26,11 +26,13 @@ Reports/rejections examined by chronology/refusal are part of the selected input
 domain. Encoding `executed-numerical-v2` also retains every analyst calibration
 candidate from [migration 019](../db/migrations/019_reinvestment_calibrations.sql),
 including rejected/conflicting choices, exact operand/source/accounting records
-and content identities. Rules bind the calibration,
-forward-funding/convergence policies and typed DCF result-contract version. A replay
-whose implementation or rules are incompatible refuses honestly rather than
-reinterpreting old outputs. Unselected intervening daily prices and superseded admissible KPI rows
-are excluded. Raw values survive beside canonical stored transformations; NULL
+and content identities. The numerical body retains the report and rejection rows
+that determine DCF input quality. Rules separately bind the calibration,
+input-quality, forward-funding/convergence and typed DCF result-contract policy
+versions. A replay whose implementation or rules are incompatible refuses
+honestly rather than reinterpreting old outputs. Unselected intervening daily
+prices and superseded admissible KPI rows are excluded. Raw values survive beside
+canonical stored transformations; NULL
 and zero remain distinct. No liquidity, realized returns or thesis inputs are
 added. Provider scale, split adjustment, selection/refusals and formulas retain
 the [deterministic](deterministic-flow.md) and [valuation](valuation.md) owners.
@@ -62,8 +64,9 @@ service and cannot recover pre-retention overwritten values.
 `numerical_identity` additionally binds the recorded rule bundle: exact Git
 revision, executing source-file digests (including taxonomy, financial,
 valuation, ranking, readiness and reconstruction/schema code), Python and SQLite
-runtimes, selection/scoring/DCF/required-return/dividend versions, accepted age
-limits, DCF defaults/solve bounds, size hurdles and scale/split assumptions.
+runtimes, selection/scoring/DCF/input-quality/required-return/dividend versions,
+accepted age limits, DCF defaults/solve bounds, size hurdles and scale/split
+assumptions.
 Actual source digests also identify dirty development execution; the Git revision
 alone is not represented as sufficient code identity. A version string alone
 cannot hide an unversioned formula correction.

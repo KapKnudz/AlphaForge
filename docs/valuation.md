@@ -47,15 +47,19 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v15-typed-result-contract"`) — historical growth
+  (`VERSION = "reverse-dcf-v16-explicit-input-quality"`) — historical growth
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
-  growth authority; the existing explicit zero-growth fallback remains recorded
-  in assumption sources, never a CAGR across that uncertain span.
+  growth authority. The public DCF quality policy requires at least two
+  consecutive annual periods with positive revenue and reported EBIT; a single
+  latest-year/current-margin fallback cannot authorize a mature forecast. The
+  zero-growth fallback remains explicit in policy diagnostics, but the policy
+  returns unavailable when annual quality is insufficient.
   5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
-  EBIT margin revenue-weighted over 3–5 annuals. This slice requires constant
+  EBIT margin revenue-weighted over 3–5 annuals when available; shorter
+  histories use the explicit latest-period normalization and warnings. This slice requires constant
   positive margins: the current and normalized margin must agree; it does not
   price margin expansion from revenue growth. Reinvestment requires a **qualified
   own-company operating-capital/earnings calibration**. Dated provider ROIC alone
@@ -103,12 +107,25 @@ ranking never masquerades as a discounted-cash-flow.
   convention remains solely for historical arithmetic controls, never the public
   loader. Current exact replay cannot reinterpret incompatible old runs.
 * **Wiring:** `alphaforge/cli/ranking_loader.py:load_results_for_company`
-  builds `DcfPolicyDecision` from validated consecutive annual fiscal history
-  and analyst-reviewed `reinvestment_calibrations`, then `ReverseDcfEngine` → `DcfValue`
+  composes existing report selection and policy normalization into a frozen
+  `DcfNormalizedFinancialView` and versioned `DcfInputQualityDecision` before
+  `ReverseDcfEngine` → `DcfValue`
   (enterprise/equity/value per share, terminal value, 5 `ProjectedCashFlow`
   with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
   cutoff-filtered verified-date contract, **not historical-known-then PIT**.
-  Rejected market inputs cannot drive valuation. DCF market cap, enterprise value, and
+  Quality output exposes expected and selected spans, excluded and missing
+  periods, dates/durations/currencies, evidenced selection anomalies and metadata
+  unknowns. Current rejected annual and R12 candidates remain source-attributable
+  excluded evidence; missing, malformed, or raw/stored-conflicting fiscal ends,
+  publication dates, and fiscal years are emitted as unknown rather than trusted.
+  Rejected R12 candidates do not expand the expected annual span. Unknown starts
+  remain visible rather than becoming proven duration defects. The versioned
+  sufficiency rule is
+  `dcf-input-quality-v1-two-qualified-consecutive-annual-periods`, grounded in the
+  existing consecutive-annual revenue and EBIT operand contracts; no three- or five-year
+  minimum or guessed confidence is added. This DCF-only decision does not alter
+  heuristic score calculation. Rejected market inputs cannot drive valuation.
+  DCF market cap, enterprise value, and
   the required-return hurdle come from the selected DCF report (latest R12, else
   latest annual); the heuristic `valuation_score` keeps the latest-report basis.
   `reverse_dcf` dict carries `dcf.available`, consistent `status`, `reason`,
@@ -151,7 +168,8 @@ ranking never masquerades as a discounted-cash-flow.
   unavailable result (`dcf.available=false` with `missing_information` and
   top-level `status="unavailable"`), including outer DCF wiring failures. The
   pure `core/valuation/dcf_contract.py` serializer produces loader DCF records;
-  exports and replay preserve those same records. It rejects non-finite serialized
+  exports and replay preserve those same records, including `input_quality` and
+  `normalized_financial_view`. It rejects non-finite serialized
   values. Its status distinguishes unsupported, invalid input, insufficient
   evidence, domain unavailable, no crossing and nonconvergence while preserving
   detailed reasons; the explicit non-SEK hurdle refusal is `unsupported`, not
@@ -170,8 +188,10 @@ ranking never masquerades as a discounted-cash-flow.
   see the [bounded evidence investigation](plans/dcf-positive-profit-economic-decision.md).
   Synthetic test disclosures are not issuer evidence.
   `policy_version`, `size_bucket`, `market_cap`, `reinvestment_return`,
-  `normalization {confidence, selected_window_years, reasons}`, `warnings`,
-  `missing_information` are persisted; heuristic score and DCF are never merged.
+  `normalization {confidence, selected_window_years, reasons}`, `input_quality`,
+  `normalized_financial_view`, `warnings`, and `missing_information` are persisted;
+  heuristic score and DCF are never merged. The input-quality retention and rules
+  identity are specified by [executed-run replay](executed-run-replay.md).
 
 ## Börsdata field mapping (anti-leakage seam)
 

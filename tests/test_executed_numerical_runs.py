@@ -136,6 +136,12 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
     assert original["metrics"][str(cid)]["financial"]["revenue_growth"] == pytest.approx(0.10)
     assert original["metrics"][str(cid)]["dividend_yield"]["value"] == 10
     assert original["dcf"][str(cid)]["dcf"]["available"] is True
+    quality_original = original["dcf"][str(cid)]["dcf"]["input_quality"]
+    assert quality_original["decision"]["policy_version"] == (
+        "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
+    )
+    assert quality_original["decision"]["selected_depth"] == 3
+    assert len(quality_original["view"]["unknowns"]) == 3
     assert original["scores"][0] == score
     artifact_id = json.loads((tmp_path / "exports" / CUTOFF / "run.json").read_text())[
         "artifact_id"
@@ -163,7 +169,9 @@ def test_corrections_and_deleted_mutable_rows_replay_actual_outputs(
                 "SELECT packet_hash FROM ranking_runs ORDER BY id DESC LIMIT 1"
             ).fetchone()[0]
         )
-        assert replay_run(conn, run)["outputs"] == original
+        replayed = replay_run(conn, run)["outputs"]
+        assert replayed == original
+        assert replayed["dcf"][str(cid)]["dcf"]["input_quality"] == quality_original
     assert len(set(identities)) == 4
     assert len(set(outputs)) == 4
     assert len(set(text_hashes)) == 1

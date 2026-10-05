@@ -151,6 +151,7 @@ def rules_bundle() -> dict:
         "selection": SELECTION_VERSION,
         "max_price_age_calendar_days": MAX_PRICE_AGE_DAYS,
         "dcf": DcfAssumptionPolicy.VERSION,
+        "dcf_input_quality": DcfAssumptionPolicy.INPUT_QUALITY_VERSION,
         "dcf_result_contract": DCF_RESULT_CONTRACT_VERSION,
         "reinvestment_calibration": CALIBRATION_VERSION,
         "economic_convention": ECONOMIC_CONVENTION,

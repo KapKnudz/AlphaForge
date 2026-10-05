@@ -40,6 +40,7 @@ class NormalizationWindow:
 class NormalizationDiagnostics:
     confidence: Literal["low", "medium", "high"]
     selected_window_years: int
+    selected_window: NormalizationWindow
     three_year: NormalizationWindow | None
     five_year: NormalizationWindow | None
     annual_fcf_margin_stddev: float | None
@@ -50,6 +51,60 @@ class NormalizationDiagnostics:
     material_window_disagreement: bool
     material_aggregate_investing: bool
     reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DcfQualityPeriod:
+    fiscal_year: int | None
+    period_type: str
+    period_start: str | None
+    period_end: str | None
+    published_on: str | None
+    duration_days: int | None
+    currency: str | None
+    disposition: Literal["selected", "excluded", "valuation_input"]
+    revenue_operand_qualified: bool = False
+    ebit_operand_qualified: bool = False
+    reported_period: int | None = None
+    unknown_fields: tuple[str, ...] = ()
+    evidence_id: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DcfQualityIssue:
+    source: str
+    fiscal_year: int | None
+    period_end: str | None
+    reason: str
+    evidence_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DcfInputQualityView:
+    expected_periods: tuple[int, ...]
+    valuation_period: DcfQualityPeriod | None
+    selected_periods: tuple[DcfQualityPeriod, ...]
+    excluded_periods: tuple[DcfQualityPeriod, ...]
+    missing_periods: tuple[int, ...]
+    evidenced_anomalies: tuple[DcfQualityIssue, ...]
+    unknowns: tuple[str, ...]
+    selection_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DcfInputQualityDecision:
+    policy_version: str
+    available: bool
+    required_selected_periods: int
+    selected_depth: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DcfNormalizedFinancialView:
+    input_quality: DcfInputQualityView
+    normalization: NormalizationDiagnostics | None
 
 
 @dataclass(frozen=True)
@@ -95,7 +150,9 @@ class DcfPolicyDecision:
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v15-typed-result-contract"
+    VERSION = "reverse-dcf-v16-explicit-input-quality"
+    INPUT_QUALITY_VERSION = "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
+    REQUIRED_SELECTED_ANNUAL_PERIODS = 2
     PROJECTION_YEARS = 5
     TAX_RATE = 0.21
     TERMINAL_GROWTH = 0.02
@@ -115,6 +172,28 @@ class DcfAssumptionPolicy:
     def __init__(self, required_return_policy: RequiredReturnPolicy | None = None):
         self.required_return_policy = required_return_policy or RequiredReturnPolicy()
 
+    @classmethod
+    def assess_input_quality(cls, view: DcfInputQualityView | None) -> DcfInputQualityDecision:
+        """Require the existing consecutive-annual operand contract for a mature forecast."""
+        depth = 0
+        if view is not None:
+            for period in reversed(view.selected_periods):
+                if not period.revenue_operand_qualified or not period.ebit_operand_qualified:
+                    break
+                depth += 1
+        reasons = (
+            ()
+            if depth >= cls.REQUIRED_SELECTED_ANNUAL_PERIODS
+            else ("qualified_consecutive_annual_history_unavailable",)
+        )
+        return DcfInputQualityDecision(
+            policy_version=cls.INPUT_QUALITY_VERSION,
+            available=not reasons,
+            required_selected_periods=cls.REQUIRED_SELECTED_ANNUAL_PERIODS,
+            selected_depth=depth,
+            reasons=reasons,
+        )
+
     def build(
         self,
         current_report: Report | None,
@@ -128,7 +207,9 @@ class DcfAssumptionPolicy:
         market_split_references: tuple[EvidenceReference, ...] = (),
         roic: float | None = None,
         calibration_record: dict | None = None,
+        input_quality: DcfInputQualityView | None = None,
     ) -> DcfPolicyDecision:
+        input_quality_decision = self.assess_input_quality(input_quality)
         missing = self._missing_operating_inputs(current_report)
         if missing:
             return DcfPolicyDecision(
@@ -409,7 +490,7 @@ class DcfAssumptionPolicy:
                 ("identity does not independently authenticate source interpretation",),
             ),
         }
-        return DcfPolicyDecision(
+        decision = DcfPolicyDecision(
             available=True,
             policy_version=self.VERSION,
             assumptions=assumptions,
@@ -427,6 +508,18 @@ class DcfAssumptionPolicy:
             missing_information=(),
             warnings=tuple(warnings),
         )
+        if not input_quality_decision.available:
+            return replace(
+                decision,
+                available=False,
+                assumptions=None,
+                missing_information=input_quality_decision.reasons,
+                warnings=decision.warnings
+                + (
+                    "latest-year normalization does not qualify without a consecutive annual history",
+                ),
+            )
+        return decision
 
     @staticmethod
     def _report_evidence_references(
@@ -716,6 +809,7 @@ class DcfAssumptionPolicy:
         return NormalizationDiagnostics(
             confidence=confidence,
             selected_window_years=selected.years,
+            selected_window=selected,
             three_year=three_year,
             five_year=five_year,
             annual_fcf_margin_stddev=fcf["stddev"],
