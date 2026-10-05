@@ -51,12 +51,11 @@ ranking never masquerades as a discounted-cash-flow.
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
-  growth authority. The public DCF quality policy requires the loader's existing
-  minimum of two consecutive annual periods with positive revenue and reported
-  EBIT; a single latest-year/current-margin fallback cannot authorize a mature
-  forecast. The pure assumption policy's
-  zero-growth fallback remains visible but is refused by the public loader when
-  annual quality is insufficient.
+  growth authority. The public DCF quality policy requires at least two
+  consecutive annual periods with positive revenue and reported EBIT; a single
+  latest-year/current-margin fallback cannot authorize a mature forecast. The
+  zero-growth fallback remains explicit in policy diagnostics, but the policy
+  returns unavailable when annual quality is insufficient.
   5-year projection,
   `tax_rate 21%`, `terminal_growth 2%`, revenue CAGR clamped `[-5%,15%]`,
   EBIT margin revenue-weighted over 3–5 annuals when available; shorter
@@ -115,8 +114,8 @@ ranking never masquerades as a discounted-cash-flow.
   with `fcff`/`discounted_fcff`). Inputs follow the deterministic flow's
   cutoff-filtered verified-date contract, **not historical-known-then PIT**.
   Quality output exposes expected and selected spans, excluded and missing
-  periods, dates/durations/currencies, evidenced anomalies/restatements and
-  metadata unknowns. Unknown starts remain visible rather than becoming proven
+  periods, dates/durations/currencies, evidenced selection anomalies and metadata
+  unknowns. Unknown starts remain visible rather than becoming proven
   duration defects. The versioned sufficiency rule is
   `dcf-input-quality-v1-two-qualified-consecutive-annual-periods`, grounded in the
   existing consecutive-annual revenue and EBIT operand contracts; no three- or five-year
@@ -187,9 +186,8 @@ ranking never masquerades as a discounted-cash-flow.
   `policy_version`, `size_bucket`, `market_cap`, `reinvestment_return`,
   `normalization {confidence, selected_window_years, reasons}`, `input_quality`,
   `normalized_financial_view`, `warnings`, and `missing_information` are persisted;
-  heuristic score and DCF are never merged. Replay rules bind the input-quality
-  policy version and source rows, so retained quality facts do not depend on later
-  live-row mutations.
+  heuristic score and DCF are never merged. The input-quality retention and rules
+  identity are specified by [executed-run replay](executed-run-replay.md).
 
 ## Börsdata field mapping (anti-leakage seam)
 

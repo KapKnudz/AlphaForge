@@ -1633,9 +1633,7 @@ def test_dcf_quality_period_identity_distinguishes_annual_and_r12_unknowns():
         ]
     )
 
-    quality = load_results_for_company(conn, cid, CUTOFF)["selection"]["dcf_input_quality"][
-        "view"
-    ]
+    quality = load_results_for_company(conn, cid, CUTOFF)["selection"]["dcf_input_quality"]["view"]
     selected_latest = quality["selected_periods"][-1]
     valuation = quality["valuation_period"]
     assert selected_latest["evidence_id"] == "year:2026:2026-03-31"

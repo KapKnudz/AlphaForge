@@ -540,12 +540,9 @@ def test_report_provenance_identity_distinguishes_period_types():
     provenance = value["assumption_provenance"]
     growth_ids = {ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]}
     margin_ids = {ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]}
-    discount_ids = {
-        ref["source_id"] for ref in provenance["discount_rate"]["evidence_references"]
-    }
+    discount_ids = {ref["source_id"] for ref in provenance["discount_rate"]["evidence_references"]}
     annual_ids = {
-        f"financial-period:company-{cid}:type-year:end-{year}-03-31"
-        for year in (2025, 2026)
+        f"financial-period:company-{cid}:type-year:end-{year}-03-31" for year in (2025, 2026)
     }
     latest_annual_id = f"financial-period:company-{cid}:type-year:end-2026-03-31"
     r12_id = f"financial-period:company-{cid}:type-r12:end-2026-03-31"

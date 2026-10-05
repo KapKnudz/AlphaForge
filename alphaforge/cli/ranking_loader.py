@@ -575,9 +575,7 @@ def _dcf_input_quality_view(
         *selected,
         *(period for period in excluded if period.period_type == "year"),
     )
-    years = {
-        period.fiscal_year for period in annual_periods if period.fiscal_year is not None
-    }
+    years = {period.fiscal_year for period in annual_periods if period.fiscal_year is not None}
     expected = tuple(range(min(years), max(years) + 1)) if years else ()
     missing = tuple(year for year in expected if year not in years)
 
