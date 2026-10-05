@@ -497,10 +497,29 @@ def _dcf_rejected_quality_period(item: dict) -> DcfQualityPeriod:
     years, malformed_year = report_integer_aliases(raw, "report_year")
     periods, malformed_period = report_integer_aliases(raw, "report_period")
     fiscal_year = _fiscal_year(item.get("report_year"))
-    valid_period_end = not malformed_end and len(ends) == 1
+    stored_period_end = _date(item.get("period_end"))
+    stored_publication = _date(item.get("report_date"))
+    stored_periods, malformed_stored_period = report_integer_aliases(
+        {"report_period": item.get("report_period")}, "report_period"
+    )
+    valid_period_end = (
+        not malformed_end
+        and len(ends) == 1
+        and ("period_end" not in item or ends == {stored_period_end})
+    )
     valid_period_start = not malformed_start and len(starts) == 1
-    valid_publication = not malformed_publication and len(publications) == 1
+    valid_publication = (
+        not malformed_publication
+        and len(publications) == 1
+        and ("report_date" not in item or publications == {stored_publication})
+    )
     valid_fiscal_year = fiscal_year is not None and not malformed_year and years == {fiscal_year}
+    valid_reported_period = (
+        not malformed_period
+        and not malformed_stored_period
+        and len(periods) == 1
+        and periods == stored_periods
+    )
     period_end = next(iter(ends)) if valid_period_end else None
     period_start = next(iter(starts)) if valid_period_start else None
     published_on = next(iter(publications)) if valid_publication else None
@@ -532,9 +551,7 @@ def _dcf_rejected_quality_period(item: dict) -> DcfQualityPeriod:
         ),
         currency=currency,
         disposition="excluded",
-        reported_period=(
-            next(iter(periods)) if not malformed_period and len(periods) == 1 else None
-        ),
+        reported_period=next(iter(periods)) if valid_reported_period else None,
         unknown_fields=tuple(unknown_fields),
         evidence_id=str(item.get("id")) if item.get("id") is not None else None,
         reason=str(item.get("reason", "annual report rejected")),

@@ -1741,6 +1741,58 @@ def test_rejected_report_quality_lists_unverified_identity_metadata(
     assert expected_unknown in view["unknowns"]
 
 
+@pytest.mark.parametrize(
+    ("raw_field", "conflicting_value", "quality_field", "unknown_field", "expected_unknown"),
+    [
+        (
+            "period_end",
+            "2026-04-30",
+            "period_end",
+            "period_end",
+            "year period 2026 ending unknown-end: period_end unknown",
+        ),
+        (
+            "report_Date",
+            "2026-05-15",
+            "published_on",
+            "published_on",
+            "year period 2026 ending 2026-03-31: published_on unknown",
+        ),
+    ],
+)
+def test_rejected_report_quality_refuses_raw_dates_conflicting_with_persisted_values(
+    raw_field, conflicting_value, quality_field, unknown_field, expected_unknown
+):
+    conn, cid = setup(periods=[annual(2024), annual(2025, 110), annual(2026, 121)])
+    row = conn.execute(
+        "SELECT id, raw_payload FROM financial_periods WHERE report_year=2026"
+    ).fetchone()
+    raw = json.loads(row["raw_payload"])
+    raw[raw_field] = conflicting_value
+    conn.execute(
+        "UPDATE financial_periods SET raw_payload=? WHERE id=?",
+        (json.dumps(raw), row["id"]),
+    )
+
+    selection = load_results_for_company(conn, cid, CUTOFF)["selection"]
+    rejection = next(
+        item
+        for item in selection["rejected_reports"]
+        if item["source"] == "financial_periods" and item["id"] == row["id"]
+    )
+    assert rejection["current_refusal"] is True
+    view = selection["dcf_input_quality"]["view"]
+    rejected_period = next(
+        period
+        for period in view["excluded_periods"]
+        if period["evidence_id"] == str(rejection["id"])
+    )
+
+    assert rejected_period[quality_field] is None
+    assert unknown_field in rejected_period["unknown_fields"]
+    assert expected_unknown in view["unknowns"]
+
+
 def test_rejected_r12_is_visible_without_expanding_annual_quality_span():
     conn, cid = setup(periods=[annual(2024), annual(2025, 110)])
     rejected = annual(
