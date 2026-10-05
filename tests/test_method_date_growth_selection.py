@@ -161,22 +161,6 @@ def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_d
 def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF, dcf_routing=None):
     monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
     monkeypatch.chdir(tmp_path)
-    if dcf_routing is None:
-        dcf_routing = {}
-        for company_id, branch_id in conn.execute(
-            "SELECT c.id, c.branch_id FROM companies c JOIN watchlist w ON w.company_id=c.id"
-        ):
-            archetype = (
-                "financial"
-                if branch_id in (68, 69, 70)
-                else "property"
-                if branch_id == 75
-                else "operating_company"
-            )
-            dcf_routing[company_id] = {
-                **explicit_mature_dcf_route(),
-                "archetype": archetype,
-            }
     assert (
         cmd_rank(
             argparse.Namespace(
@@ -207,7 +191,19 @@ def test_actual_rank_method_priority(branch, model, has_financials, monkeypatch,
         packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     assert loaded["candidate"].ranking_model == model
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    route_archetype = {
+        "general": "operating_company",
+        "bank": "financial",
+        "property": "property",
+    }[model]
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={
+            cid: {**explicit_mature_dcf_route(), "archetype": route_archetype}
+        },
+    )
     expected = "ready" if has_financials else "evidence_blocked"
     if model != "general":
         expected = "method_unsupported"
@@ -235,7 +231,12 @@ def test_current_price_age_boundary_exports(age, available, monkeypatch, tmp_pat
         assert price_selection["value"] == 10
         assert price_selection["date_facts"] == {"d": price_date}
         assert price_selection["raw_payload"] == {"d": price_date, "c": 10}
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     assert (
         score["readiness_status"]
         == row["readiness_status"]
@@ -1133,7 +1134,12 @@ def test_report_publication_is_a_separate_verified_date(
     packet(conn, cid)
     result = load_results_for_company(conn, cid, CUTOFF)
     assert (result["financial"] is not None) == admitted
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     assert (
         score["readiness_status"]
         == row["readiness_status"]
@@ -1558,7 +1564,12 @@ def test_qualified_calibration_exports_fade_and_refused_solve_axes(monkeypatch, 
         [{"y": 2026, "p": 5, "v": 10.0, "observationDate": CUTOFF}],
     )
 
-    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    _, _, exported = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     result = exported[str(cid)]
     dcf = result["dcf"]
     assert result["status"] == "available"
@@ -1604,7 +1615,12 @@ def test_valid_april_annual_history_keeps_qualified_dcf_and_quality_facts(monkey
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid)
 
-    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    _, _, exported = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     result = exported[str(cid)]
     assert result["dcf"]["available"] is True
     quality = result["dcf"]["input_quality"]
@@ -2060,7 +2076,12 @@ def test_negative_modeled_equity_is_not_exported_as_tradable_negative_price(monk
         [{"y": 2026, "p": 5, "v": 20.0, "observationDate": CUTOFF}],
     )
 
-    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    _, _, exported = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     dcf = exported[str(cid)]["dcf"]
     assert dcf["available"] is True
     assert dcf["negative_modeled_equity"] is True
@@ -2525,7 +2546,12 @@ def test_invalid_same_slot_resync_preserves_verified_report_and_exports(
     assert not any(expected_reason in reason for reason in loaded["selection"]["refusal_reasons"])
 
     packet(conn, cid)
-    score, row, dcf = rank_exports(conn, monkeypatch, tmp_path)
+    score, row, dcf = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     exported = score["input_selection"]
     exported_audit = next(
         item for item in exported["rejected_reports"] if item["source"] == "ingestion_rejection"

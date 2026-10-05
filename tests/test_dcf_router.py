@@ -59,7 +59,16 @@ def test_explicit_mature_operating_route_values_with_canonical_identities():
     assert decision["archetype"] == "operating_company"
     assert decision["forecast_profile"] == "mature"
     assert decision["profile_identity"] == "operating_company+mature-v1"
-    assert decision["evidence_references"][0]["source_id"] == "document:1"
+    assert decision["evidence_references"] == [
+        {
+            "source_id": "document:1",
+            "source_url": "https://mfn.test/fix",
+            "published_on": "2026-05-01T00:00:00Z",
+            "observed_on": "2026-06-01T00:00:00Z",
+            "anchor": "document:1#page:1",
+            "sha256": "a" * 64,
+        }
+    ]
     assert all(
         decision[name] for name in ("input_identity", "evidence_identity", "decision_identity")
     )
@@ -151,6 +160,30 @@ def test_missing_or_unknown_routing_never_auto_admits_general_company():
         dcf_routing=route(source_id="not-in-the-frozen-packet"),
     )["reverse_dcf"]["dcf"]
     assert un_catalogued["reason"] == "mature_operating_route_evidence_not_catalogued"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_url", "https://fabricated.test/report"),
+        ("published_on", "1900-01-01T00:00:00Z"),
+        ("observed_on", "1900-01-02T00:00:00Z"),
+        ("anchor", "document:1#page:999"),
+        ("sha256", "f" * 64),
+    ],
+)
+def test_mature_route_rejects_provenance_not_owned_by_frozen_source(field, value):
+    conn, company_id = qualified_company()
+    supplied = route()
+    supplied["evidence_references"][0][field] = value
+
+    dcf = load_results_for_company(conn, company_id, CUTOFF, dcf_routing=supplied)[
+        "reverse_dcf"
+    ]["dcf"]
+
+    assert dcf["available"] is False
+    assert dcf["reason"] == "mature_operating_route_evidence_not_catalogued"
+    assert dcf["routing"]["evidence_references"] == []
 
 
 def test_routing_cannot_override_capital_quality_or_economic_refusals():
@@ -297,10 +330,64 @@ def test_sector_scores_and_readiness_do_not_depend_on_dcf_route(branch, archetyp
     assert assessments[0].blockers == assessments[1].blockers
 
 
+@pytest.mark.parametrize("invalid_key", [True, 1.5, "01"])
+def test_capture_rejects_noncanonical_programmatic_route_keys(invalid_key):
+    conn, company_id = qualified_company()
+    Company = make_dataclass("Company", ["id", "name", "ticker", "branch_id"])
+    companies = [Company(company_id, "Synthetic AB", "FIX", None)]
+
+    with pytest.raises(ValueError, match="canonical company ids"):
+        capture_inputs(conn, companies, CUTOFF, dcf_routing={invalid_key: route()})
+
+
+def test_capture_rejects_route_key_normalization_collisions():
+    conn, company_id = qualified_company()
+    Company = make_dataclass("Company", ["id", "name", "ticker", "branch_id"])
+    companies = [Company(company_id, "Synthetic AB", "FIX", None)]
+
+    with pytest.raises(ValueError, match="at most once"):
+        capture_inputs(
+            conn,
+            companies,
+            CUTOFF,
+            dcf_routing={company_id: route(), str(company_id): route()},
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"1": {}, "1": {}}',
+        '{"1": {}, "01": {}}',
+    ],
+)
+def test_rank_cli_rejects_duplicate_or_noncanonical_route_json_keys(
+    payload, monkeypatch, tmp_path
+):
+    conn, _ = qualified_company()
+    route_file = tmp_path / "dcf-routing.json"
+    route_file.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
+
+    with pytest.raises(ValueError, match="duplicate key|canonical company ids"):
+        cmd_rank(
+            SimpleNamespace(
+                dsn="sqlite:///:memory:",
+                as_of=CUTOFF,
+                watchlist=None,
+                dcf_routing_json=str(route_file),
+            )
+        )
+
+
 def test_route_identities_are_stable_and_evidence_bound():
-    first = decide_dcf_route(route(source_id="fixture:one"))
-    same = decide_dcf_route(route(source_id="fixture:one"))
-    other = decide_dcf_route(route(source_id="fixture:two"))
+    conn, company_id = setup()
+    evidence_packet = packet(conn, company_id)
+    first = decide_dcf_route(route(), evidence_packet=evidence_packet)
+    same = decide_dcf_route(route(), evidence_packet=evidence_packet)
+    other_value = route()
+    other_value["evidence_references"][0]["source_url"] = "https://fabricated.test"
+    other = decide_dcf_route(other_value, evidence_packet=evidence_packet)
 
     assert first.decision_identity == same.decision_identity
     assert first.input_identity == same.input_identity

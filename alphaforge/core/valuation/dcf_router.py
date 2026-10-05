@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from hashlib import sha256
 
+from alphaforge.core.frozen_packet import validate_frozen_packet
 from alphaforge.core.valuation.dcf_contract import EvidenceReference
 
 DCF_ROUTING_POLICY_VERSION = "dcf-routing-v1-explicit-mature-operating-company"
@@ -99,16 +100,86 @@ class DcfRoutingDecision:
     decision_identity: str
 
 
-def decide_dcf_route(
-    value=None, *, catalogued_source_ids: set[str] | frozenset[str] | None = None
-) -> DcfRoutingDecision:
+def _resolve_evidence_references(
+    references: tuple[EvidenceReference, ...], evidence_packet: dict | None
+) -> tuple[EvidenceReference, ...] | None:
+    if not references:
+        return ()
+    if not validate_frozen_packet(evidence_packet):
+        return None
+    catalog = evidence_packet.get("evidence_catalog")
+    catalogued_ids = (
+        catalog.get("canonical_source_ids", ()) if isinstance(catalog, dict) else ()
+    )
+    sources = evidence_packet.get("sources")
+    if not isinstance(catalogued_ids, list) or not isinstance(sources, list):
+        return None
+    catalogued = set(catalogued_ids)
+    sources_by_id = {
+        source.get("source_id"): source
+        for source in sources
+        if isinstance(source, dict) and source.get("source_id") in catalogued
+    }
+    resolved = []
+    for reference in references:
+        source = sources_by_id.get(reference.source_id)
+        if not isinstance(source, dict) or not reference.anchor:
+            return None
+        anchors = {
+            item.get("anchor")
+            for collection in (
+                source.get("pages"),
+                source.get("body", {}).get("paragraphs")
+                if isinstance(source.get("body"), dict)
+                else None,
+            )
+            if isinstance(collection, list)
+            for item in collection
+            if isinstance(item, dict) and isinstance(item.get("anchor"), str)
+        }
+        attachment = source.get("attachment")
+        canonical = EvidenceReference(
+            source_id=reference.source_id,
+            source_url=source.get("source_url"),
+            published_on=source.get("publication_date"),
+            observed_on=source.get("ingestion_date"),
+            anchor=reference.anchor,
+            sha256=attachment.get("sha256") if isinstance(attachment, dict) else None,
+        )
+        if canonical.anchor not in anchors or any(
+            not isinstance(getattr(canonical, field), str) or not getattr(canonical, field)
+            for field in (
+                "source_id",
+                "source_url",
+                "published_on",
+                "observed_on",
+                "anchor",
+                "sha256",
+            )
+        ):
+            return None
+        if any(
+            getattr(reference, field) is not None
+            and getattr(reference, field) != getattr(canonical, field)
+            for field in ("source_url", "published_on", "observed_on", "sha256")
+        ):
+            return None
+        resolved.append(canonical)
+    return tuple(resolved)
+
+
+def decide_dcf_route(value=None, *, evidence_packet: dict | None = None) -> DcfRoutingDecision:
     routing = routing_input_from_value(value)
     payload = routing_input_payload(routing)
     encoded_input = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     input_identity = sha256(encoded_input.encode("utf-8")).hexdigest()
+    resolved_references = _resolve_evidence_references(
+        routing.evidence_references, evidence_packet
+    )
+    canonical_references = resolved_references or ()
     evidence_identity = sha256(
         json.dumps(
-            payload["evidence_references"],
+            [asdict(reference) for reference in canonical_references],
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -152,9 +223,7 @@ def decide_dcf_route(
             "mature_operating_route_evidence_unavailable",
             None,
         )
-    elif not {reference.source_id for reference in routing.evidence_references}.issubset(
-        catalogued_source_ids or set()
-    ):
+    elif resolved_references is None:
         status, reason, method = (
             "insufficient_evidence",
             "mature_operating_route_evidence_not_catalogued",
@@ -180,7 +249,7 @@ def decide_dcf_route(
         archetype=routing.archetype.value,
         forecast_profile=routing.forecast_profile.value,
         profile_identity=f"{routing.archetype.value}+{routing.forecast_profile.value}-v1",
-        evidence_references=routing.evidence_references,
+        evidence_references=canonical_references,
         evidence_identity=evidence_identity,
         limitations=(
             "archetype and forecast profile are caller-supplied; cited source identity is not an automatic classifier or proof of eligibility",

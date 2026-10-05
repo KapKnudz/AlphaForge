@@ -787,13 +787,30 @@ def cmd_rank(args: argparse.Namespace) -> int:
     if routing_path:
         if dcf_routing is not None:
             raise ValueError("supply DCF routing through one input only")
-        routing_payload = json.loads(Path(routing_path).read_text(encoding="utf-8"))
+
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError(f"DCF routing JSON contains duplicate key: {key}")
+                value[key] = item
+            return value
+
+        routing_payload = json.loads(
+            Path(routing_path).read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object,
+        )
         if not isinstance(routing_payload, dict):
             raise ValueError("DCF routing JSON must map company ids to route records")
-        try:
-            dcf_routing = {int(company_id): route for company_id, route in routing_payload.items()}
-        except (TypeError, ValueError) as exc:
-            raise ValueError("DCF routing JSON keys must be company ids") from exc
+        dcf_routing = {}
+        for company_id, route in routing_payload.items():
+            try:
+                normalized_id = int(company_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("DCF routing JSON keys must be canonical company ids") from exc
+            if company_id != str(normalized_id) or normalized_id in dcf_routing:
+                raise ValueError("DCF routing JSON keys must be canonical company ids")
+            dcf_routing[normalized_id] = route
 
     # Load companies from watchlist or DB
     companies = []

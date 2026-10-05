@@ -190,12 +190,19 @@ def capture_inputs(
     start, end = trailing_dividend_window(cutoff)
     route_values = dcf_routing or {}
     company_ids = {company.id for company in companies}
-    try:
-        route_ids = [int(company_id) for company_id in route_values]
-    except (TypeError, ValueError) as exc:
-        raise ValueError("DCF routing keys must be company ids") from exc
-    if len(route_ids) != len(set(route_ids)) or set(route_ids) - company_ids:
-        raise ValueError("DCF routing must identify each selected company at most once")
+    normalized_routes = {}
+    for company_id, route in route_values.items():
+        if isinstance(company_id, bool) or not isinstance(company_id, (int, str)):
+            raise ValueError("DCF routing keys must be canonical company ids")
+        try:
+            normalized_id = int(company_id)
+        except ValueError as exc:
+            raise ValueError("DCF routing keys must be canonical company ids") from exc
+        if isinstance(company_id, str) and company_id != str(normalized_id):
+            raise ValueError("DCF routing keys must be canonical company ids")
+        if normalized_id in normalized_routes or normalized_id not in company_ids:
+            raise ValueError("DCF routing must identify each selected company at most once")
+        normalized_routes[normalized_id] = route
     conn.execute("SAVEPOINT numerical_capture")
     try:
         for company in companies:
@@ -310,9 +317,7 @@ def capture_inputs(
             "universe": [asdict(c) for c in companies],
             "tables": tables,
             "dcf_routing": {
-                str(company.id): routing_input_payload(
-                    route_values.get(company.id, route_values.get(str(company.id)))
-                )
+                str(company.id): routing_input_payload(normalized_routes.get(company.id))
                 for company in companies
             },
         }

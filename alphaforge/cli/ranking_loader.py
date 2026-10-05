@@ -1171,12 +1171,7 @@ def load_results_for_company(
     packet = (
         research_evidence.get("evidence_packet") if isinstance(research_evidence, dict) else None
     )
-    catalog = packet.get("evidence_catalog") if isinstance(packet, dict) else None
-    source_ids = catalog.get("canonical_source_ids", ()) if isinstance(catalog, dict) else ()
-    catalogued_source_ids = frozenset(
-        source_id for source_id in source_ids if isinstance(source_id, str)
-    )
-    dcf_route_decision = decide_dcf_route(dcf_routing, catalogued_source_ids=catalogued_source_ids)
+    dcf_route_decision = decide_dcf_route(dcf_routing, evidence_packet=packet)
     dcf_route_payload = asdict(dcf_route_decision)
     company = conn.execute(
         "SELECT branch_id FROM companies WHERE id=?",

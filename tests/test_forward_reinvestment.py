@@ -341,7 +341,12 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
         "reverse_dcf"
     ]
     assert live["dcf"]["available"]
-    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    _, _, exported = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     assert exported[str(cid)]["dcf"] == live["dcf"]
     value = exported[str(cid)]["dcf"]
     assert value["calibration"]["identity"] == identity
@@ -486,7 +491,12 @@ def test_split_adjusted_discount_provenance_is_retained_and_replayed(monkeypatch
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid)
 
-    _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
+    _, _, exported = rank_exports(
+        conn,
+        monkeypatch,
+        tmp_path,
+        dcf_routing={cid: explicit_mature_dcf_route()},
+    )
     result = exported[str(cid)]
     value = result["dcf"]
     assert result["current_shares"] == 450
