@@ -229,6 +229,7 @@ def decide_dcf_route(value=None, *, evidence_packet: dict | None = None) -> DcfR
         "reason": reason,
         "method": method,
         "input_identity": input_identity,
+        "evidence_identity": evidence_identity,
     }
     decision_identity = sha256(
         json.dumps(decision_facts, sort_keys=True, separators=(",", ":")).encode("utf-8")

@@ -411,3 +411,16 @@ def test_route_identities_are_stable_and_evidence_bound():
     assert first.input_identity == same.input_identity
     assert first.decision_identity != other.decision_identity
     assert first.evidence_identity != other.evidence_identity
+
+
+def test_decision_identity_tracks_resolved_evidence_identity():
+    conn, company_id = setup()
+    evidence_packet = packet(conn, company_id)
+    later_packet = packet(conn, company_id, cutoff="2026-06-02")
+
+    first = decide_dcf_route(route(), evidence_packet=evidence_packet)
+    later = decide_dcf_route(route(), evidence_packet=later_packet)
+
+    assert first.input_identity == later.input_identity
+    assert first.evidence_identity != later.evidence_identity
+    assert first.decision_identity != later.decision_identity
