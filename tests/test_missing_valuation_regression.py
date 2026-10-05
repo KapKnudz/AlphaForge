@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from test_method_date_growth_selection import explicit_mature_dcf_route, packet
+
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.config import Settings
 from alphaforge.core.kpi_taxonomy import KpiIds
@@ -258,7 +260,10 @@ def test_dcf_wired_and_distinguished_from_heuristic_score():
         published="2026-02-01",
         observed="2026-02-02",
     )
-    results = load_results_for_company(conn, cid, "2026-02-03")
+    packet(conn, cid, "2026-02-03")
+    results = load_results_for_company(
+        conn, cid, "2026-02-03", dcf_routing=explicit_mature_dcf_route()
+    )
     rd = results["reverse_dcf"]
     assert "dcf" in rd, f"reverse_dcf missing dcf key: {rd}"
     assert rd["dcf"]["available"] is True, f"dcf not available: {rd.get('dcf')}"

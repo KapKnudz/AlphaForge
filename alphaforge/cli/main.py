@@ -782,6 +782,18 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     as_of = args.as_of
     watchlist_path = args.watchlist
+    dcf_routing = getattr(args, "dcf_routing", None)
+    routing_path = getattr(args, "dcf_routing_json", None)
+    if routing_path:
+        if dcf_routing is not None:
+            raise ValueError("supply DCF routing through one input only")
+        routing_payload = json.loads(Path(routing_path).read_text(encoding="utf-8"))
+        if not isinstance(routing_payload, dict):
+            raise ValueError("DCF routing JSON must map company ids to route records")
+        try:
+            dcf_routing = {int(company_id): route for company_id, route in routing_payload.items()}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DCF routing JSON keys must be company ids") from exc
 
     # Load companies from watchlist or DB
     companies = []
@@ -873,7 +885,13 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     companies.sort(key=lambda c: (c.ticker, c.id))
     source_rows = {}
-    body, textual_context = capture_inputs(conn, companies, as_of, source_rows=source_rows)
+    body, textual_context = capture_inputs(
+        conn,
+        companies,
+        as_of,
+        source_rows=source_rows,
+        dcf_routing=dcf_routing,
+    )
     numerical_identity, financial_inputs_hash = retain_inputs(conn, body, rules_bundle())
     ranking, _, original_outputs = evaluate(body, textual_context)
     engine = RankingEngine()
@@ -1177,6 +1195,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--watchlist",
         default=None,
         help="Watchlist CSV path (optional, uses DB watchlist if omitted)",
+    )
+    rank.add_argument(
+        "--dcf-routing-json",
+        default=None,
+        help=(
+            "Optional JSON map of company ids to explicit archetype, forecast_profile, "
+            "and evidence_references; omitted routes remain unknown"
+        ),
     )
     rank.set_defaults(func=cmd_rank)
 

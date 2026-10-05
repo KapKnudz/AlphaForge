@@ -95,6 +95,7 @@ def setup(branch=None, periods=None, price_date=CUTOFF):
 
 
 def packet(conn, cid, cutoff=CUTOFF):
+    publication_date = (date.fromisoformat(cutoff) - timedelta(days=31)).isoformat()
     body = {
         "schema_version": "evidence-packet-v1",
         "frozen": True,
@@ -108,7 +109,7 @@ def packet(conn, cid, cutoff=CUTOFF):
                 "source_id": "document:1",
                 "source_url": "https://mfn.test/fix",
                 "title": "Synthetic annual",
-                "publication_date": "2026-05-01T00:00:00Z",
+                "publication_date": f"{publication_date}T00:00:00Z",
                 "publication_timestamp_authoritative": True,
                 "ingestion_date": cutoff + "T00:00:00Z",
                 "attachment": {"source_url": "https://storage.test/fix.pdf", "sha256": "a" * 64},
@@ -136,6 +137,14 @@ def packet(conn, cid, cutoff=CUTOFF):
     return body
 
 
+def explicit_mature_dcf_route():
+    return {
+        "archetype": "operating_company",
+        "forecast_profile": "mature",
+        "evidence_references": [{"source_id": "document:1", "anchor": "document:1#page:1"}],
+    }
+
+
 def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_date=CUTOFF):
     # Separate synthetic qualified capital record: provider KPI alone is insufficient.
     synthetic_calibration_fixture(conn, company_id)
@@ -149,10 +158,33 @@ def measured_roic_fixture(conn, company_id, value=20.0, year=2026, observation_d
     )
 
 
-def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF):
+def rank_exports(conn, monkeypatch, tmp_path, cutoff=CUTOFF, dcf_routing=None):
     monkeypatch.setattr("alphaforge.db.connection.get_connection", lambda settings: conn)
     monkeypatch.chdir(tmp_path)
-    assert cmd_rank(argparse.Namespace(dsn="sqlite:///:memory:", as_of=cutoff, watchlist=None)) == 0
+    if dcf_routing is None:
+        dcf_routing = {}
+        for company_id, branch_id in conn.execute(
+            "SELECT c.id, c.branch_id FROM companies c JOIN watchlist w ON w.company_id=c.id"
+        ):
+            archetype = (
+                "financial"
+                if branch_id in (68, 69, 70)
+                else "property"
+                if branch_id == 75
+                else "operating_company"
+            )
+            dcf_routing[company_id] = {
+                **explicit_mature_dcf_route(),
+                "archetype": archetype,
+            }
+    assert (
+        cmd_rank(
+            argparse.Namespace(
+                dsn="sqlite:///:memory:", as_of=cutoff, watchlist=None, dcf_routing=dcf_routing
+            )
+        )
+        == 0
+    )
     output = tmp_path / "exports" / cutoff
     data = json.loads((output / "ranking.json").read_text())
     with (output / "ranking.csv").open() as stream:
@@ -2293,7 +2325,16 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
     packet(conn, cid)
     loaded = load_results_for_company(conn, cid, CUTOFF)
     synthetic_calibration_fixture(conn, cid)
-    loaded = load_results_for_company(conn, cid, CUTOFF)
+    loaded = load_results_for_company(
+        conn,
+        cid,
+        CUTOFF,
+        dcf_routing={
+            "archetype": "operating_company",
+            "forecast_profile": "mature",
+            "evidence_references": [{"source_id": "document:1", "anchor": "document:1#page:1"}],
+        },
+    )
     expected = "reverse-dcf-v16-explicit-input-quality"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)

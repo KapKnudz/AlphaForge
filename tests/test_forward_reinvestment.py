@@ -9,7 +9,14 @@ from decimal import localcontext
 
 import pytest
 from dcf_calibration_fixtures import synthetic_calibration_fixture, synthetic_record
-from test_method_date_growth_selection import CUTOFF, annual, packet, rank_exports, setup
+from test_method_date_growth_selection import (
+    CUTOFF,
+    annual,
+    explicit_mature_dcf_route,
+    packet,
+    rank_exports,
+    setup,
+)
 
 from alphaforge.cli.ranking_loader import load_results_for_company
 from alphaforge.core.valuation.reinvestment import (
@@ -330,7 +337,9 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
         record,
         as_of=date.fromisoformat(CUTOFF),
     )
-    live = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]
+    live = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())[
+        "reverse_dcf"
+    ]
     assert live["dcf"]["available"]
     _, _, exported = rank_exports(conn, monkeypatch, tmp_path)
     assert exported[str(cid)]["dcf"] == live["dcf"]
@@ -513,7 +522,9 @@ def test_report_provenance_uses_exact_consumed_windows():
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid)
 
-    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    value = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())[
+        "reverse_dcf"
+    ]["dcf"]
     provenance = value["assumption_provenance"]
 
     def expected(years):
@@ -536,7 +547,9 @@ def test_report_provenance_identity_distinguishes_period_types():
     packet(conn, cid)
     synthetic_calibration_fixture(conn, cid)
 
-    value = load_results_for_company(conn, cid, CUTOFF)["reverse_dcf"]["dcf"]
+    value = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())[
+        "reverse_dcf"
+    ]["dcf"]
     provenance = value["assumption_provenance"]
     growth_ids = {ref["source_id"] for ref in provenance["revenue_growth"]["evidence_references"]}
     margin_ids = {ref["source_id"] for ref in provenance["ebit_margin"]["evidence_references"]}

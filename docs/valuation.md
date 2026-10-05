@@ -159,6 +159,7 @@ ranking never masquerades as a discounted-cash-flow.
   not excluded; finite scans are not full-range proofs. Base and candidate results also flag
   negative modeled equity as non-tradable; limited-liability and turnaround option
   value remain outside this FCFF model.
+* **Explicit router (S-M3):** `alphaforge rank --dcf-routing-json <file>` may receive a JSON object keyed by company id; each value supplies `archetype`, `forecast_profile`, and `evidence_references` (source ids must occur in that company's frozen evidence catalog). Only an explicitly evidenced `operating_company` + `mature` route selects the existing FCFF policy/evaluator. Omitted routing stays `unknown`; `GENERAL` and sector branch classification never imply mature eligibility. Financial/bank, property, resource, holding/unusual, unknown/mixed, high-growth, cyclical and other unsupported routes refuse with specific reasons. Routing does not classify companies, alter sector scoring/readiness rules, or bypass quality, calibration, economic, price, share or net-debt requirements. Route method/profile/evidence/decision identities are in the canonical DCF result and frozen numerical body; replay uses the captured route and packet, never a live route file.
 * **Export:** `alphaforge rank` retains original outputs, then writes
   `exports/runs/<artifact_id>/dcf.json` alongside `ranking.json/csv`; the date directory
   remains a mutable latest alias. [Executed-run replay](executed-run-replay.md)
