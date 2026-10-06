@@ -157,8 +157,7 @@ def fixed_assumption_provenance_complete(
                 or source != policy_default[1]
                 or references
                 or not any(
-                    isinstance(limitation, str) and limitation.strip()
-                    for limitation in limitations
+                    isinstance(limitation, str) and limitation.strip() for limitation in limitations
                 )
             ):
                 return False

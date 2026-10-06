@@ -389,17 +389,13 @@ class DcfAssumptionPolicy:
             "tax_rate": FIXED_DEFAULT_ASSUMPTION_POLICY["tax_rate"][1],
             "discount_rate": ("deterministic required-return hurdle selected by market-cap bucket"),
             "terminal_growth": FIXED_DEFAULT_ASSUMPTION_POLICY["terminal_growth"][1],
-            "net_reinvestment_rate": FIXED_DEFAULT_ASSUMPTION_POLICY[
-                "net_reinvestment_rate"
-            ][1],
+            "net_reinvestment_rate": FIXED_DEFAULT_ASSUMPTION_POLICY["net_reinvestment_rate"][1],
             "reinvestment_return": (
                 "assumed future incremental return calibrated from own-company average "
                 "operating ROIC; linear fade to discount hurdle proxy in the last funding interval"
             ),
             "economic_convention": FIXED_DEFAULT_ASSUMPTION_POLICY["economic_convention"][1],
-            "revenue_growth_fade_to": FIXED_DEFAULT_ASSUMPTION_POLICY[
-                "revenue_growth_fade_to"
-            ][1],
+            "revenue_growth_fade_to": FIXED_DEFAULT_ASSUMPTION_POLICY["revenue_growth_fade_to"][1],
             "ebit_margin_start": (
                 "constant positive normalized EBIT margin; changes require capital evidence"
             ),

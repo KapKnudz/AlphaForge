@@ -371,9 +371,7 @@ def test_every_fixed_default_is_bound_to_policy_value_and_source(field):
     assert fixed_assumption_provenance_complete({field: value}, None, provenance)
 
     other_value = f"{value}-other" if isinstance(value, str) else value + 1
-    assert not fixed_assumption_provenance_complete(
-        {field: other_value}, None, provenance
-    )
+    assert not fixed_assumption_provenance_complete({field: other_value}, None, provenance)
     provenance[field]["source"] = "replacement default source"
     assert not fixed_assumption_provenance_complete({field: value}, None, provenance)
 
