@@ -462,7 +462,9 @@ def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
     )
     assert faded.implied_assumption == pytest.approx(0.08)
     assert faded.valuation.projected_cash_flows[0].revenue_growth == pytest.approx(0.08)
-    assert faded.valuation.projected_cash_flows[-1].revenue_growth == pytest.approx(0.04)
+    assert faded.valuation.projected_cash_flows[-1].revenue_growth == pytest.approx(
+        target_inputs.assumptions.revenue_growth_fade_to
+    )
 
 
 def test_unbracketed_endpoint_match_is_not_promoted_to_a_root():
