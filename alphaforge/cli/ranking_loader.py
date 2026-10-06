@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from hashlib import sha256
 from math import isfinite
 from types import SimpleNamespace
 from typing import Any
@@ -52,6 +53,7 @@ from alphaforge.core.valuation.reverse_dcf import (
 )
 from alphaforge.core.valuation.solve_eligibility import (
     SOLVE_AXIS_REGISTRY,
+    fixed_assumption_provenance_complete,
     solve_axis_metadata,
 )
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
@@ -300,13 +302,32 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "sampled_match_points": sampled_only,
             "eligibility": metadata,
         }
+        if diagnostics["sampled_match_regions"] and roots:
+            return {
+                **base,
+                "available": False,
+                "solution_status": "candidate_solutions",
+                "candidate_roots": roots,
+                "candidate_solution_count": len(roots),
+                "crossing_count_on_grid": len(roots),
+                "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+                "solution_evidence": (
+                    f"{len(roots)} sampled sign-change bracket(s) and "
+                    f"{len(diagnostics['sampled_match_regions'])} sampled match region(s)"
+                ),
+                "solution_qualification": (
+                    "conditional candidates and sampled match regions are distinct observations; "
+                    "finite sampling does not establish uniqueness or completeness, nor a "
+                    "continuous equivalence interval, and no candidate is selected as the answer"
+                ),
+            }
         if diagnostics["sampled_match_regions"]:
             return {
                 **base,
                 "available": False,
                 "solution_status": "sampled_match_region",
-                "candidate_roots": roots,
-                "candidate_solution_count": len(roots),
+                "candidate_roots": [],
+                "candidate_solution_count": 0,
                 "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
                 "solution_evidence": (
                     "contiguous sampled assumptions match within price tolerance; a continuous "
@@ -1944,6 +1965,29 @@ def load_results_for_company(
                 and dcf_current_report.shares_outstanding > 0
             ):
                 try:
+                    eligibility_context_facts = {
+                        "company_id": company_id,
+                        "packet_hash": packet.get("packet_hash")
+                        if isinstance(packet, dict)
+                        else None,
+                        "route_decision_identity": dcf_route_decision.decision_identity,
+                        "route_input_identity": dcf_route_decision.input_identity,
+                        "route_evidence_identity": dcf_route_decision.evidence_identity,
+                        "assumption_provenance": {
+                            name: asdict(record)
+                            for name, record in sorted(
+                                dcf_policy_decision.assumption_provenance.items()
+                            )
+                        },
+                    }
+                    eligibility_context_identity = sha256(
+                        json.dumps(
+                            eligibility_context_facts,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
                     dcf_inputs = ReverseDcfInputs(
                         current_price=latest_price.close,
                         shares_outstanding=dcf_current_report.shares_outstanding,
@@ -1951,6 +1995,7 @@ def load_results_for_company(
                         net_debt=float(current_net_debt),
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
+                        eligibility_context_identity=eligibility_context_identity,
                     )
                     engine = ReverseDcfEngine()
                     dcf_value = engine.value(dcf_inputs)
@@ -2019,6 +2064,9 @@ def load_results_for_company(
                     calibration_references = tuple(
                         getattr(provenance.get("reinvestment_return"), "evidence_references", ())
                     )
+                    fixed_provenance_complete = fixed_assumption_provenance_complete(
+                        dcf_policy_decision.assumptions, "revenue_growth", provenance
+                    )
                     prerequisite_evidence = {
                         "explicit_mature_operating_route": {
                             "status": "met"
@@ -2044,12 +2092,10 @@ def load_results_for_company(
                             "evidence_references": calibration_references,
                         },
                         "fixed_assumptions_with_provenance": {
-                            "status": "met"
-                            if set(provenance) == set(asdict(dcf_policy_decision.assumptions))
-                            else "unmet",
-                            "reason": "fixed assumption provenance incomplete"
-                            if set(provenance) != set(asdict(dcf_policy_decision.assumptions))
-                            else None,
+                            "status": "met" if fixed_provenance_complete else "unmet",
+                            "reason": None
+                            if fixed_provenance_complete
+                            else "fixed assumption provenance incomplete",
                             "evidence_references": (),
                         },
                     }
@@ -2060,6 +2106,7 @@ def load_results_for_company(
                             assumptions=dcf_policy_decision.assumptions,
                             assumption_provenance=provenance,
                             prerequisite_evidence=prerequisite_evidence,
+                            inputs=dcf_inputs,
                         )
                         reverse_dcf_results[_assump] = _solve_axis_result(
                             engine, dcf_inputs, _assump, _eligibility

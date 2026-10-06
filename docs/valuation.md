@@ -159,9 +159,11 @@ ranking never masquerades as a discounted-cash-flow.
   endpoint, not constant CAGR. The shared `solve_eligibility.py` registry declares each
   axis domain, evidence prerequisites, refusal reason, and root interpretation. Both direct
   solve and range diagnostics refuse before sampling unless supplied eligibility has every
-  prerequisite verified and its complete fixed-assumption values match the current inputs;
-  omitting eligibility creates an unverified decision and therefore refuses. Exported
-  eligibility metadata records the fixed assumptions and their provenance.
+  prerequisite verified and its fixed-assumption values and provenance match the current
+  inputs. The eligibility identity binds numerical inputs to company, frozen packet, route,
+  and the exact exported evidence record; omitting eligibility creates an unverified decision
+  and therefore refuses. Provenance validation accepts policy-approved defaults only with
+  their recorded limitations and no fabricated source references.
   Canonical results retain conditional sign-change candidates, endpoint matches, and sampled
   tolerance regions distinctly, including sign-change candidates that coexist with a sampled
   match region. Point matches already represented by a sign-change bracket are omitted from
@@ -204,7 +206,7 @@ ranking never masquerades as a discounted-cash-flow.
   and nonconvergence while preserving
   detailed reasons; the explicit non-SEK hurdle refusal is `unsupported`, not
   missing evidence.
-  The v2 result-contract and `reverse-dcf-solve-registry-v1` identities are part of the
+  The v2 result-contract and `reverse-dcf-solve-registry-v2` identities are part of the
   replay rules identity, so old incompatible outputs are refused rather than reinterpreted.
 * **Provenance:** migration 019 adds append-only calibration records; trusted analyst
   admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.

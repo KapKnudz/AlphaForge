@@ -12,8 +12,10 @@ from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION, LEGACY_C
 from alphaforge.core.valuation.solve_eligibility import (
     SOLVE_REGISTRY_VERSION,
     SolveAxisMetadata,
+    fixed_assumption_provenance_complete,
     solve_axis_definition,
     solve_axis_metadata,
+    solve_input_identity,
 )
 
 ImpliedAssumption = Literal["revenue_growth", "ebit_margin", "terminal_growth"]
@@ -69,6 +71,7 @@ class ReverseDcfInputs:
     net_debt: float
     assumptions: DcfAssumptions
     branch_id: int | None = None
+    eligibility_context_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,8 @@ class ReverseDcfEngine:
             raise ValueError("solve eligibility reason does not match the declared registry")
         if metadata.status != "supported":
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
+        if eligibility is None:
+            raise UnsupportedEconomicPolicy("solve_evidence_unavailable:eligibility_metadata")
         prerequisite_names = tuple(item.get("name") for item in metadata.evidence_prerequisites)
         if prerequisite_names != definition.evidence_prerequisites:
             raise ValueError("solve eligibility prerequisites do not match the declared registry")
@@ -245,6 +250,21 @@ class ReverseDcfEngine:
             for name, value in expected_fixed.items()
         ):
             raise ValueError("solve eligibility fixed assumptions do not match inputs")
+        if not fixed_assumption_provenance_complete(
+            metadata.fixed_assumptions, None, metadata.fixed_assumptions
+        ):
+            raise UnsupportedEconomicPolicy(
+                "solve_evidence_unavailable:fixed_assumptions_with_provenance"
+            )
+        current_input_identity = solve_input_identity(
+            inputs, metadata.fixed_assumptions, metadata.evidence_prerequisites
+        )
+        if current_input_identity is None:
+            raise UnsupportedEconomicPolicy(
+                "solve_evidence_unavailable:eligibility_context_identity"
+            )
+        if metadata.input_identity != current_input_identity:
+            raise ValueError("solve eligibility input identity does not match current inputs")
         if not definition.lower_bound <= lower_bound < upper_bound <= definition.upper_bound:
             raise ValueError(
                 f"solve bounds must be within declared {assumption} domain "

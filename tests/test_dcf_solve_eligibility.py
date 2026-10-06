@@ -18,14 +18,51 @@ from alphaforge.core.valuation.solve_eligibility import (
 )
 
 
+def _test_assumption_provenance(inputs):
+    origins = {
+        "projection_years": "fixed_default",
+        "revenue_growth": "company_history",
+        "ebit_margin": "report_evidence",
+        "tax_rate": "fixed_default",
+        "discount_rate": "market_evidence",
+        "terminal_growth": "fixed_default",
+        "net_reinvestment_rate": "fixed_default",
+        "reinvestment_return": "qualified_calibration",
+        "revenue_growth_fade_to": "fixed_default",
+        "ebit_margin_start": "report_evidence",
+        "economic_convention": "fixed_default",
+        "calibration_identity": "qualified_calibration",
+    }
+    return {
+        name: {
+            "origin": origins[name],
+            "source": "synthetic test assumption",
+            "evidence_references": (
+                ()
+                if origins[name] == "fixed_default"
+                else ({"source_id": f"synthetic:{name}", "anchor": name},)
+            ),
+            "limitations": ("synthetic test assumption",),
+        }
+        for name in vars(inputs.assumptions)
+    }
+
+
 def _supported_metadata(inputs):
-    return solve_axis_metadata("revenue_growth", assumptions=inputs.assumptions)
+    return solve_axis_metadata(
+        "revenue_growth",
+        assumptions=inputs.assumptions,
+        assumption_provenance=_test_assumption_provenance(inputs),
+        inputs=inputs,
+    )
 
 
 def _verified_metadata(inputs):
     return solve_axis_metadata(
         "revenue_growth",
         assumptions=inputs.assumptions,
+        assumption_provenance=_test_assumption_provenance(inputs),
+        inputs=inputs,
         prerequisite_evidence={
             name: {
                 "status": "met",
@@ -47,7 +84,7 @@ def test_registry_is_the_explicit_domain_and_reason_owner():
     assert SOLVE_AXIS_REGISTRY["revenue_growth"].status == "supported"
     assert SOLVE_AXIS_REGISTRY["ebit_margin"].reason == "unavailable_constant_margin_only"
     assert SOLVE_AXIS_REGISTRY["terminal_growth"].status == "not_identifiable"
-    assert SOLVE_REGISTRY_VERSION == "reverse-dcf-solve-registry-v1"
+    assert SOLVE_REGISTRY_VERSION == "reverse-dcf-solve-registry-v2"
 
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
@@ -130,6 +167,8 @@ def test_evidence_preflight_happens_before_any_numerical_sampling():
     metadata = solve_axis_metadata(
         "revenue_growth",
         assumptions=inputs.assumptions,
+        assumption_provenance=_test_assumption_provenance(inputs),
+        inputs=inputs,
         prerequisite_evidence={
             "explicit_mature_operating_route": {
                 "status": "met",
@@ -183,6 +222,65 @@ def test_supplied_eligibility_must_match_fixed_input_assumptions(operation):
     with pytest.raises(ValueError, match="fixed assumptions do not match inputs"):
         getattr(ReverseDcfEngine(), operation)(
             changed_inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+def test_solve_eligibility_is_bound_to_company_and_frozen_inputs(operation):
+    inputs = hand_inputs()
+    metadata = _verified_metadata(inputs)
+    engine = ReverseDcfEngine()
+    stale_inputs = replace(inputs, current_price=inputs.current_price + 1)
+    other_company = replace(inputs, eligibility_context_identity="company-b:packet-b")
+
+    for changed_inputs in (stale_inputs, other_company):
+        with pytest.raises(ValueError, match="input identity"):
+            getattr(engine, operation)(
+                changed_inputs,
+                "revenue_growth",
+                0,
+                0.08,
+                eligibility=metadata,
+            )
+    with pytest.raises(UnsupportedEconomicPolicy, match="eligibility_context_identity"):
+        getattr(engine, operation)(
+            replace(inputs, eligibility_context_identity=None),
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize(
+    "provenance_changes",
+    [
+        {"origin": None},
+        {"source": ""},
+        {"origin": "market_evidence", "evidence_references": ()},
+        {"origin": "fixed_default", "evidence_references": (), "limitations": ()},
+        {
+            "origin": "fixed_default",
+            "evidence_references": (),
+            "limitations": ("synthetic approved-default wording",),
+        },
+    ],
+)
+def test_fixed_assumption_provenance_must_follow_existing_contract(operation, provenance_changes):
+    inputs = hand_inputs()
+    metadata = _verified_metadata(inputs)
+    fixed = {name: dict(record) for name, record in metadata.fixed_assumptions.items()}
+    fixed["discount_rate"].update(provenance_changes)
+    metadata = replace(metadata, fixed_assumptions=fixed)
+
+    with pytest.raises(UnsupportedEconomicPolicy, match="fixed_assumptions_with_provenance"):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
             "revenue_growth",
             0,
             0.08,
@@ -379,7 +477,7 @@ def test_candidate_roots_are_not_collapsed_to_a_unique_answer():
                     "qualification": "a continuous equivalence interval is not established",
                 }
             ],
-            "sampled_match_region",
+            "candidate_solutions",
         ),
     ],
 )
@@ -420,6 +518,9 @@ def test_exported_sampled_match_count_tracks_filtered_points(
     assert result["candidate_solution_count"] == 1
     assert result["sampled_match_points"] == []
     assert result["sampled_match_point_count"] == len(result["sampled_match_points"])
+    assert result["sampled_match_regions"] == sampled_match_regions
+    if sampled_match_regions:
+        assert "uniqueness or completeness" in result["solution_qualification"]
 
 
 def test_no_crossing_nonconvergence_and_invalid_candidate_remain_distinct():

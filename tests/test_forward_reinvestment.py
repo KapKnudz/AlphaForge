@@ -57,6 +57,7 @@ def hand_inputs(q=0.1, terminal=0.04, years=2):
             economic_convention=ECONOMIC_CONVENTION,
             calibration_identity="synthetic-hand-lock",
         ),
+        eligibility_context_identity="synthetic-company:packet",
     )
 
 
@@ -64,6 +65,33 @@ def verified_growth_metadata(inputs):
     return solve_axis_metadata(
         "revenue_growth",
         assumptions=inputs.assumptions,
+        assumption_provenance={
+            name: {
+                "origin": origin,
+                "source": "synthetic test assumption",
+                "evidence_references": (
+                    ()
+                    if origin == "fixed_default"
+                    else ({"source_id": f"synthetic:{name}", "anchor": name},)
+                ),
+                "limitations": ("synthetic test assumption",),
+            }
+            for name, origin in {
+                "projection_years": "fixed_default",
+                "revenue_growth": "company_history",
+                "ebit_margin": "report_evidence",
+                "tax_rate": "fixed_default",
+                "discount_rate": "market_evidence",
+                "terminal_growth": "fixed_default",
+                "net_reinvestment_rate": "fixed_default",
+                "reinvestment_return": "qualified_calibration",
+                "revenue_growth_fade_to": "fixed_default",
+                "ebit_margin_start": "report_evidence",
+                "economic_convention": "fixed_default",
+                "calibration_identity": "qualified_calibration",
+            }.items()
+        },
+        inputs=inputs,
         prerequisite_evidence={
             name: {
                 "status": "met",
@@ -402,7 +430,7 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert value["version"] == "reverse-dcf-v16-explicit-input-quality"
     growth_solve = exported[str(cid)]["implied"]["revenue_growth"]
     eligibility = growth_solve["eligibility"]
-    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v1"
+    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v2"
     assert eligibility["status"] == "supported"
     assert eligibility["domain"] == {
         "lower_bound": -0.10,
@@ -467,7 +495,7 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
     assert rules["dcf_result_contract"] == "dcf-result-contract-v2"
-    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v1"
+    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v2"
     original = json.loads(executed["outputs"])
     replayed = replay_run(conn, executed["run_id"])
     assert replayed["outputs"] == original
