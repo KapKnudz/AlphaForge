@@ -5,7 +5,10 @@ import pytest
 from test_forward_reinvestment import hand_inputs
 
 from alphaforge.cli.ranking_loader import _dcf_solve_status, _solve_axis_result
-from alphaforge.core.valuation.dcf_contract import DcfResultStatus
+from alphaforge.core.valuation.dcf_contract import (
+    FIXED_DEFAULT_ASSUMPTION_POLICY,
+    DcfResultStatus,
+)
 from alphaforge.core.valuation.dcf_policy import DcfAssumptionPolicy
 from alphaforge.core.valuation.reverse_dcf import (
     ReverseDcfEngine,
@@ -14,6 +17,7 @@ from alphaforge.core.valuation.reverse_dcf import (
 from alphaforge.core.valuation.solve_eligibility import (
     SOLVE_AXIS_REGISTRY,
     SOLVE_REGISTRY_VERSION,
+    fixed_assumption_provenance_complete,
     solve_axis_metadata,
 )
 
@@ -36,16 +40,25 @@ def _test_assumption_provenance(inputs):
     return {
         name: {
             "origin": origins[name],
-            "source": "synthetic test assumption",
+            "source": (
+                FIXED_DEFAULT_ASSUMPTION_POLICY[name][1]
+                if origins[name] == "fixed_default"
+                else "synthetic test assumption"
+            ),
             "evidence_references": (
                 ()
                 if origins[name] == "fixed_default"
                 else ({"source_id": f"synthetic:{name}", "anchor": name},)
             ),
-            "limitations": ("synthetic test assumption",),
+            "limitations": ("synthetic test fixture assumption",),
         }
         for name in vars(inputs.assumptions)
     }
+
+
+def _eligible_inputs():
+    inputs = hand_inputs(years=5, terminal=0.02)
+    return replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
 
 
 def _supported_metadata(inputs):
@@ -57,11 +70,11 @@ def _supported_metadata(inputs):
     )
 
 
-def _verified_metadata(inputs):
+def _verified_metadata(inputs, provenance=None):
     return solve_axis_metadata(
         "revenue_growth",
         assumptions=inputs.assumptions,
-        assumption_provenance=_test_assumption_provenance(inputs),
+        assumption_provenance=provenance or _test_assumption_provenance(inputs),
         inputs=inputs,
         prerequisite_evidence={
             name: {
@@ -212,7 +225,7 @@ def test_evidence_preflight_happens_before_any_numerical_sampling():
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
 def test_supplied_eligibility_must_match_fixed_input_assumptions(operation):
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _verified_metadata(inputs)
     changed_inputs = replace(
         inputs,
@@ -231,7 +244,7 @@ def test_supplied_eligibility_must_match_fixed_input_assumptions(operation):
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
 def test_solve_eligibility_is_bound_to_company_and_frozen_inputs(operation):
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _verified_metadata(inputs)
     engine = ReverseDcfEngine()
     stale_inputs = replace(inputs, current_price=inputs.current_price + 1)
@@ -272,7 +285,7 @@ def test_solve_eligibility_is_bound_to_company_and_frozen_inputs(operation):
     ],
 )
 def test_fixed_assumption_provenance_must_follow_existing_contract(operation, provenance_changes):
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _verified_metadata(inputs)
     fixed = {name: dict(record) for name, record in metadata.fixed_assumptions.items()}
     fixed["discount_rate"].update(provenance_changes)
@@ -290,10 +303,111 @@ def test_fixed_assumption_provenance_must_follow_existing_contract(operation, pr
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
 @pytest.mark.parametrize(
+    ("field", "unapproved_value"),
+    [
+        ("projection_years", 2),
+        ("tax_rate", 0.0),
+        ("terminal_growth", 0.04),
+        ("net_reinvestment_rate", 0.01),
+        ("revenue_growth_fade_to", 0.04),
+        ("economic_convention", "legacy-capped-revenue-growth-v13"),
+    ],
+)
+def test_solve_rejects_unapproved_fixed_default_values(operation, field, unapproved_value):
+    inputs = _eligible_inputs()
+    inputs = replace(
+        inputs,
+        assumptions=replace(inputs.assumptions, **{field: unapproved_value}),
+    )
+    metadata = _verified_metadata(inputs)
+
+    with pytest.raises(
+        UnsupportedEconomicPolicy,
+        match="fixed_assumption_provenance_incomplete",
+    ):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+def test_solve_rejects_unapproved_fixed_default_source(operation):
+    inputs = _eligible_inputs()
+    provenance = _test_assumption_provenance(inputs)
+    provenance["tax_rate"] = {
+        **provenance["tax_rate"],
+        "source": "synthetic replacement default",
+    }
+    metadata = _verified_metadata(inputs, provenance)
+
+    with pytest.raises(
+        UnsupportedEconomicPolicy,
+        match="fixed_assumption_provenance_incomplete",
+    ):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("field", FIXED_DEFAULT_ASSUMPTION_POLICY)
+def test_every_fixed_default_is_bound_to_policy_value_and_source(field):
+    value, source = FIXED_DEFAULT_ASSUMPTION_POLICY[field]
+    provenance = {
+        field: {
+            "origin": "fixed_default",
+            "source": source,
+            "evidence_references": (),
+            "limitations": ("policy default test fixture",),
+        }
+    }
+    assert fixed_assumption_provenance_complete({field: value}, None, provenance)
+
+    other_value = f"{value}-other" if isinstance(value, str) else value + 1
+    assert not fixed_assumption_provenance_complete(
+        {field: other_value}, None, provenance
+    )
+    provenance[field]["source"] = "replacement default source"
+    assert not fixed_assumption_provenance_complete({field: value}, None, provenance)
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize(
+    "domain_change",
+    [
+        {"bounds_inclusive": False},
+        {"candidate_policy": "caller-selected candidate policy"},
+        {"caller_extension": True},
+    ],
+)
+def test_complete_exported_eligibility_record_is_identity_bound(operation, domain_change):
+    inputs = _eligible_inputs()
+    metadata = _verified_metadata(inputs)
+    metadata = replace(metadata, domain={**metadata.domain, **domain_change})
+
+    with pytest.raises(ValueError, match="input identity"):
+        getattr(ReverseDcfEngine(), operation)(
+            inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=metadata,
+        )
+
+
+@pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
+@pytest.mark.parametrize(
     "invalid_metadata", ["empty_prerequisites", "missing_reference", "missing_fixed"]
 )
 def test_supplied_eligibility_must_be_complete(operation, invalid_metadata):
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _verified_metadata(inputs)
     if invalid_metadata == "empty_prerequisites":
         metadata = replace(metadata, evidence_prerequisites=())
@@ -324,7 +438,8 @@ def test_supplied_eligibility_must_be_complete(operation, invalid_metadata):
 
 def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
     engine = ReverseDcfEngine()
-    inputs = replace(hand_inputs(), current_price=103.5)
+    inputs = _eligible_inputs()
+    inputs = replace(inputs, current_price=engine.value(inputs).value_per_share)
     result = engine.solve(
         inputs,
         "revenue_growth",

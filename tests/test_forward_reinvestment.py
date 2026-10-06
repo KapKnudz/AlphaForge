@@ -19,6 +19,7 @@ from test_method_date_growth_selection import (
 )
 
 from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.core.valuation.dcf_contract import FIXED_DEFAULT_ASSUMPTION_POLICY
 from alphaforge.core.valuation.reinvestment import (
     ECONOMIC_CONVENTION,
     calibration_identity,
@@ -61,6 +62,11 @@ def hand_inputs(q=0.1, terminal=0.04, years=2):
     )
 
 
+def policy_solve_inputs():
+    inputs = hand_inputs(years=5, terminal=0.02)
+    return replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+
+
 def verified_growth_metadata(inputs):
     return solve_axis_metadata(
         "revenue_growth",
@@ -68,7 +74,11 @@ def verified_growth_metadata(inputs):
         assumption_provenance={
             name: {
                 "origin": origin,
-                "source": "synthetic test assumption",
+                "source": (
+                    FIXED_DEFAULT_ASSUMPTION_POLICY[name][1]
+                    if origin == "fixed_default"
+                    else "synthetic test assumption"
+                ),
                 "evidence_references": (
                     ()
                     if origin == "fixed_default"
@@ -246,7 +256,14 @@ def test_forward_economic_boundaries(changes, reason):
 
 def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_caps():
     engine = ReverseDcfEngine()
-    inputs = replace(hand_inputs(), current_price=103.5)
+    inputs = policy_solve_inputs()
+    lower_price = engine.value(
+        replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.0))
+    ).value_per_share
+    upper_price = engine.value(
+        replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.08))
+    ).value_per_share
+    inputs = replace(inputs, current_price=engine.value(inputs).value_per_share)
     result = engine.solve(
         inputs,
         "revenue_growth",
@@ -255,8 +272,8 @@ def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_
         eligibility=verified_growth_metadata(inputs),
     )
     assert result.implied_assumption == pytest.approx(0.04)
-    assert result.modeled_price == pytest.approx(103.5)
-    no_match_inputs = replace(inputs, current_price=200)
+    assert result.modeled_price == pytest.approx(inputs.current_price)
+    no_match_inputs = replace(inputs, current_price=upper_price + 100)
     diagnostics, brackets, _ = engine.diagnose_solve_range(
         no_match_inputs,
         "revenue_growth",
@@ -265,10 +282,12 @@ def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_
         eligibility=verified_growth_metadata(no_match_inputs),
     )
     assert not brackets
-    assert diagnostics["lower_endpoint_price"] == pytest.approx(99.5)
-    assert diagnostics["upper_endpoint_price"] == pytest.approx(107.5)
-    assert diagnostics["nearest_boundary_gap"] == pytest.approx(92.5)
-    assert diagnostics["nearest_boundary_gap_pct_target"] == pytest.approx(46.25)
+    assert diagnostics["lower_endpoint_price"] == pytest.approx(lower_price)
+    assert diagnostics["upper_endpoint_price"] == pytest.approx(upper_price)
+    assert diagnostics["nearest_boundary_gap"] == pytest.approx(100)
+    assert diagnostics["nearest_boundary_gap_pct_target"] == pytest.approx(
+        100 / no_match_inputs.current_price * 100
+    )
     assert "sampled range only" in diagnostics["range_qualification"]
     with pytest.raises(ValueError, match="not bracketed"):
         engine.solve(

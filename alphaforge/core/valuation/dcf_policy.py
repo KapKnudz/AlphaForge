@@ -9,13 +9,13 @@ from typing import Literal
 from alphaforge.core.statistics import cagr
 from alphaforge.core.types import Report, StockPrice
 from alphaforge.core.valuation.dcf_contract import (
+    FIXED_DEFAULT_ASSUMPTION_POLICY,
     AssumptionOrigin,
     AssumptionProvenance,
     EvidenceReference,
 )
 from alphaforge.core.valuation.reinvestment import (
     CALIBRATION_EVIDENCE_OPERANDS,
-    ECONOMIC_CONVENTION,
     ReinvestmentCalibration,
     qualify_calibration,
 )
@@ -154,9 +154,9 @@ class DcfAssumptionPolicy:
     VERSION = "reverse-dcf-v16-explicit-input-quality"
     INPUT_QUALITY_VERSION = "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
     REQUIRED_SELECTED_ANNUAL_PERIODS = 2
-    PROJECTION_YEARS = 5
-    TAX_RATE = 0.21
-    TERMINAL_GROWTH = 0.02
+    PROJECTION_YEARS = FIXED_DEFAULT_ASSUMPTION_POLICY["projection_years"][0]
+    TAX_RATE = FIXED_DEFAULT_ASSUMPTION_POLICY["tax_rate"][0]
+    TERMINAL_GROWTH = FIXED_DEFAULT_ASSUMPTION_POLICY["terminal_growth"][0]
     GROWTH_RANGE = (-0.05, 0.15)
     NET_REINVESTMENT_RANGE = (-0.05, 0.15)
     FCF_MARGIN_VOLATILITY = 0.10
@@ -243,8 +243,7 @@ class DcfAssumptionPolicy:
         )
         warnings: list[str] = list(required_return.warnings)
         if growth is None:
-            growth = 0.0
-            growth_source = "zero-growth fallback; historical revenue growth unavailable"
+            growth, growth_source = FIXED_DEFAULT_ASSUMPTION_POLICY["revenue_growth"]
             warnings.append("historical revenue growth unavailable")
         else:
             raw_growth = growth
@@ -376,30 +375,31 @@ class DcfAssumptionPolicy:
             tax_rate=self.TAX_RATE,
             discount_rate=required_return.required_return,
             terminal_growth=self.TERMINAL_GROWTH,
-            net_reinvestment_rate=0.0,
+            net_reinvestment_rate=FIXED_DEFAULT_ASSUMPTION_POLICY["net_reinvestment_rate"][0],
             reinvestment_return=roic_fraction,
             revenue_growth_fade_to=self.TERMINAL_GROWTH,
             ebit_margin_start=ebit_margin,
-            economic_convention=ECONOMIC_CONVENTION,
+            economic_convention=FIXED_DEFAULT_ASSUMPTION_POLICY["economic_convention"][0],
             calibration_identity=calibration.identity,
         )
         assumption_sources = {
-            "projection_years": "fixed policy horizon",
+            "projection_years": FIXED_DEFAULT_ASSUMPTION_POLICY["projection_years"][1],
             "revenue_growth": growth_source,
             "ebit_margin": economics_source,
-            "tax_rate": "fixed normalized Nordic modeling rate",
+            "tax_rate": FIXED_DEFAULT_ASSUMPTION_POLICY["tax_rate"][1],
             "discount_rate": ("deterministic required-return hurdle selected by market-cap bucket"),
-            "terminal_growth": "fixed mature nominal growth policy",
-            "net_reinvestment_rate": "inactive legacy field; inspect investment amounts instead",
+            "terminal_growth": FIXED_DEFAULT_ASSUMPTION_POLICY["terminal_growth"][1],
+            "net_reinvestment_rate": FIXED_DEFAULT_ASSUMPTION_POLICY[
+                "net_reinvestment_rate"
+            ][1],
             "reinvestment_return": (
                 "assumed future incremental return calibrated from own-company average "
                 "operating ROIC; linear fade to discount hurdle proxy in the last funding interval"
             ),
-            "economic_convention": "end-of-year spending funds next-year profit; no capital release or funding caps",
-            "revenue_growth_fade_to": (
-                "year-one revenue growth fades linearly to fixed mature "
-                "terminal growth by the final explicit year"
-            ),
+            "economic_convention": FIXED_DEFAULT_ASSUMPTION_POLICY["economic_convention"][1],
+            "revenue_growth_fade_to": FIXED_DEFAULT_ASSUMPTION_POLICY[
+                "revenue_growth_fade_to"
+            ][1],
             "ebit_margin_start": (
                 "constant positive normalized EBIT margin; changes require capital evidence"
             ),

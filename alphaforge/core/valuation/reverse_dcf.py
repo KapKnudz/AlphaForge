@@ -256,9 +256,7 @@ class ReverseDcfEngine:
             raise UnsupportedEconomicPolicy(
                 "solve_evidence_unavailable:fixed_assumptions_with_provenance"
             )
-        current_input_identity = solve_input_identity(
-            inputs, metadata.fixed_assumptions, metadata.evidence_prerequisites
-        )
+        current_input_identity = solve_input_identity(inputs, metadata)
         if current_input_identity is None:
             raise UnsupportedEconomicPolicy(
                 "solve_evidence_unavailable:eligibility_context_identity"

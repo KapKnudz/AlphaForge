@@ -2,12 +2,15 @@
 
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from hashlib import sha256
 from types import MappingProxyType
 from typing import Any
 
-from alphaforge.core.valuation.dcf_contract import AssumptionOrigin
+from alphaforge.core.valuation.dcf_contract import (
+    FIXED_DEFAULT_ASSUMPTION_POLICY,
+    AssumptionOrigin,
+)
 
 SOLVE_REGISTRY_VERSION = "reverse-dcf-solve-registry-v2"
 
@@ -143,8 +146,20 @@ def fixed_assumption_provenance_complete(
         ):
             return False
         if origin == AssumptionOrigin.FIXED_DEFAULT.value:
-            if references or not any(
-                isinstance(limitation, str) and limitation.strip() for limitation in limitations
+            policy_default = FIXED_DEFAULT_ASSUMPTION_POLICY.get(name)
+            assumption_value = values[name]
+            assumption_record = _mapping(assumption_value)
+            if assumption_record is not None and "value" in assumption_record:
+                assumption_value = assumption_record["value"]
+            if (
+                policy_default is None
+                or assumption_value != policy_default[0]
+                or source != policy_default[1]
+                or references
+                or not any(
+                    isinstance(limitation, str) and limitation.strip()
+                    for limitation in limitations
+                )
             ):
                 return False
             continue
@@ -173,16 +188,14 @@ def _identity_value(value: Any) -> Any:
     return value
 
 
-def solve_input_identity(
-    inputs: Any,
-    fixed_assumptions: Mapping[str, Any] | None = None,
-    evidence_prerequisites: tuple[dict[str, Any], ...] | None = None,
-) -> str | None:
-    """Bind eligibility to frozen evidence, numerical inputs, and its exported evidence record."""
+def solve_input_identity(inputs: Any, metadata: SolveAxisMetadata) -> str | None:
+    """Bind eligibility to frozen inputs and the complete exported eligibility record."""
     context_identity = getattr(inputs, "eligibility_context_identity", None)
     assumptions = getattr(inputs, "assumptions", None)
     if not isinstance(context_identity, str) or not context_identity.strip() or assumptions is None:
         return None
+    eligibility_record = asdict(metadata)
+    eligibility_record.pop("input_identity")
     payload = {
         "eligibility_context_identity": context_identity,
         "current_price": inputs.current_price,
@@ -191,8 +204,7 @@ def solve_input_identity(
         "net_debt": inputs.net_debt,
         "branch_id": inputs.branch_id,
         "assumptions": asdict(assumptions) if is_dataclass(assumptions) else dict(assumptions),
-        "fixed_assumptions": fixed_assumptions,
-        "evidence_prerequisites": evidence_prerequisites,
+        "eligibility": eligibility_record,
     }
     encoded = json.dumps(
         _identity_value(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -275,7 +287,7 @@ def solve_axis_metadata(
             status = "insufficient_evidence"
             reason = unmet["reason"] or f"solve_evidence_unavailable:{unmet['name']}"
 
-    return SolveAxisMetadata(
+    metadata = SolveAxisMetadata(
         registry_version=SOLVE_REGISTRY_VERSION,
         axis=axis,
         domain={
@@ -291,7 +303,7 @@ def solve_axis_metadata(
         evidence_prerequisites=prerequisites,
         fixed_assumptions=fixed,
         root_interpretation=definition.root_interpretation,
-        input_identity=(
-            solve_input_identity(inputs, fixed, prerequisites) if inputs is not None else None
-        ),
     )
+    if inputs is None:
+        return metadata
+    return replace(metadata, input_identity=solve_input_identity(inputs, metadata))
