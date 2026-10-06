@@ -153,10 +153,24 @@ ranking never masquerades as a discounted-cash-flow.
   Original bounds remain recorded `(-10..30%, 0..50%, -1..4%)`. The revenue-growth
   range contains unsupported contraction/financing candidates, so automatic range
   diagnostics refuse with `invalid_candidate_economics`, no endpoint prices or roots.
-  Bounds are not narrowed to manufacture an admissible solution. Direct arithmetic
-  calls on a fully admissible positive-growth range retain deterministic sampled
-  diagnostics with the explicit limitation that roots/extrema between points are
-  not excluded; finite scans are not full-range proofs. Base and candidate results also flag
+  Bounds are not narrowed and invalid candidates are not skipped to manufacture a root.
+  Direct arithmetic calls on a fully admissible positive-growth range retain deterministic
+  sampled diagnostics; revenue growth means initial growth fading to the fixed mature
+  endpoint, not constant CAGR. The shared `solve_eligibility.py` registry declares each
+  axis domain, evidence prerequisites, refusal reason, and root interpretation. Both direct
+  solve and range diagnostics refuse before sampling unless supplied eligibility has every
+  prerequisite verified and its fixed-assumption values and provenance match the current
+  inputs. The eligibility identity binds numerical inputs to company, frozen packet, route,
+  and the exact exported evidence record; omitting eligibility creates an unverified decision
+  and therefore refuses. Provenance validation accepts policy-approved defaults only with
+  their recorded limitations and no fabricated source references.
+  Canonical results retain conditional sign-change candidates, endpoint matches, and sampled
+  tolerance regions distinctly, including sign-change candidates that coexist with a sampled
+  match region. Point matches already represented by a sign-change bracket are omitted from
+  `sampled_match_points`, and `sampled_match_point_count` always counts that exported collection.
+  No candidate is selected as a unique answer: finite sampling cannot establish uniqueness,
+  completeness, tangency, or roots/extrema between samples.
+  Base and candidate results also flag
   negative modeled equity as non-tradable; limited-liability and turnaround option
   value remain outside this FCFF model.
 * **Explicit router (S-M3):** `alphaforge rank --dcf-routing-json <file>` may receive a
@@ -188,11 +202,12 @@ ranking never masquerades as a discounted-cash-flow.
   exports and replay preserve those same records, including `input_quality` and
   `normalized_financial_view`. It rejects non-finite serialized
   values. Its status distinguishes unsupported, invalid input, insufficient
-  evidence, domain unavailable, no crossing and nonconvergence while preserving
+  evidence, domain unavailable, sampled matches/regions, candidate solutions, no crossing,
+  and nonconvergence while preserving
   detailed reasons; the explicit non-SEK hurdle refusal is `unsupported`, not
   missing evidence.
-  The result-contract version is part of the replay rules identity, so old
-  incompatible outputs are refused rather than reinterpreted.
+  The v2 result-contract and `reverse-dcf-solve-registry-v2` identities are part of the
+  replay rules identity, so old incompatible outputs are refused rather than reinterpreted.
 * **Provenance:** migration 019 adds append-only calibration records; trusted analyst
   admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.
   There is deliberately no public acquisition command. The loader reports rejected

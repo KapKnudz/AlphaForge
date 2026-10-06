@@ -75,8 +75,10 @@ def test_solve_policy_applies_to_every_convention_and_operation(
 
 class _DiagnosticEngine(ReverseDcfEngine):
     @staticmethod
-    def solve_availability(_inputs, _assumption):
-        return None
+    def _solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility):
+        # Exercise the numerical diagnostic independently of terminal-axis policy.
+        if not lower_bound < upper_bound:
+            raise ValueError("range bounds must be increasing")
 
 
 def _target_at(inputs, assumption, value):

@@ -6,15 +6,44 @@ from datetime import date, datetime
 from enum import StrEnum
 from json import dumps, loads
 from math import isfinite
+from types import MappingProxyType
 from typing import Any
 
-DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v1"
+from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION
+
+DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v2"
+
+FIXED_DEFAULT_ASSUMPTION_POLICY = MappingProxyType(
+    {
+        "projection_years": (5, "fixed policy horizon"),
+        "revenue_growth": (
+            0.0,
+            "zero-growth fallback; historical revenue growth unavailable",
+        ),
+        "tax_rate": (0.21, "fixed normalized Nordic modeling rate"),
+        "terminal_growth": (0.02, "fixed mature nominal growth policy"),
+        "net_reinvestment_rate": (
+            0.0,
+            "inactive legacy field; inspect investment amounts instead",
+        ),
+        "revenue_growth_fade_to": (
+            0.02,
+            "year-one revenue growth fades linearly to fixed mature "
+            "terminal growth by the final explicit year",
+        ),
+        "economic_convention": (
+            ECONOMIC_CONVENTION,
+            "end-of-year spending funds next-year profit; no capital release or funding caps",
+        ),
+    }
+)
 
 
 class DcfResultStatus(StrEnum):
     AVAILABLE = "available"
     CANDIDATE_SOLUTIONS = "candidate_solutions"
     SAMPLED_MATCH_REGION = "sampled_match_region"
+    SAMPLED_MATCH = "sampled_match"
     NOT_IDENTIFIABLE = "not_identifiable"
     UNSUPPORTED = "unsupported"
     INVALID_INPUT = "invalid_input"

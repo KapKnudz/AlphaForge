@@ -106,7 +106,7 @@ Carried from `scout-alphaforge-data-foundation §3` and `scout-alphaforge-eviden
 | 3 | Raw valuation | `core/valuation/raw_valuation.py` | `compute_raw_valuation` | `PriceBar × Report` → `RawValuation` (SEK currency guard, `EV = marketCap + netDebt`) |
 | 4 | Historical valuation | `core/valuation/historical.py` | `percentile / history_bound` | `history: float[]` → `pe_percentile / guardrails 0.10/0.25/0.75/0.90` |
 | 5 | Valuation calculator | `core/valuation/calculator.py` | `calculate` | `CurrentValuation × HistoricalValuation × RawValuation` → `ValuationResult` (`earnings_yield=1/pe`, `fcf_yield`, guardrails) |
-| 6 | Reverse-DCF engine | `core/valuation/reverse_dcf.py` | `value / solve(bisect)` | `ReverseDcfInputs{price,shares,revenue,netDebt,DcfAssumptions,branchId}` → `DcfValue / implied{rev-growth, ebit-margin, terminal-growth}` |
+| 6 | Reverse-DCF engine | `core/valuation/reverse_dcf.py` | `value / solve(bisect)` | `ReverseDcfInputs{price,shares,revenue,netDebt,DcfAssumptions,branchId}` → `DcfValue` plus registry-governed conditional solve evidence; [valuation.md](../valuation.md#auditable-dcf-policy--engine) owns current axis eligibility and interpretation |
 | 7 | DCF assumption policy | `core/valuation/dcf_policy.py` | `build` | `Report × ROIC × marketCap → DcfPolicyDecision{assumptions: 5y, tax 21%, terminal 2%, growth −5..15%, solve bounds rev −10..30% / margin 0..50% / term −1..4%}` |
 | 8 | Required-return policy | `core/valuation/required_return.py` | `build` | `marketCap × currency → RequiredReturnDecision` — **v2 buckets verbatim** (see §3.4) |
 | 9 | Forward scenario | `core/valuation/forward_scenario.py` | `assess_readiness / recalculate` | `ScenarioBundle × terminal_multiple_range → ScenarioBandResult(bear/base/bull with annualized returns)` |
@@ -177,7 +177,7 @@ Per the captain's FX call (detailed shape from §3):
 
 Six discrete Hedborg skills (not one giant prompt) plus the aggregator, each with a prompt version and a deterministic counterpart:
 
-- Falsifiable-case author (one-sentence case), Peak-margin bridge (`gross→EBIT` spread is a clue; peak is an estimate with mechanism), Credibility ledger (8–12q pattern recognition), Reverse-DCF expectation check (implied growth/margin vs history), Ownership/flow timing read (signal + flow-effect, never mechanical), Sell-condition author (7 Hedborg invalidation conditions).
+- Falsifiable-case author (one-sentence case), Peak-margin bridge (`gross→EBIT` spread is a clue; peak is an estimate with mechanism), Credibility ledger (8–12q pattern recognition), Reverse-DCF expectation check (eligible conditional solve evidence vs history), Ownership/flow timing read (signal + flow-effect, never mechanical), Sell-condition author (7 Hedborg invalidation conditions).
 
 Scoring weights: `GENERAL (30/25/30/15)`, `PROPERTY (25/15/30/30)`, `BANK (30/20/25/25)` routed by `branch_id` (`68–70 bank, 75 property`). Property/bank ranking models remain **blocked** (`method_unsupported`) in MVP — `general` only — per `agent/readiness.py`.
 

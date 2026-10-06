@@ -39,6 +39,7 @@ def test_empty_history_early_refusal_uses_the_same_result_contract():
         DcfResultStatus.INVALID_INPUT,
         DcfResultStatus.INSUFFICIENT_EVIDENCE,
         DcfResultStatus.DOMAIN_UNAVAILABLE,
+        DcfResultStatus.SAMPLED_MATCH,
         DcfResultStatus.NO_CROSSING,
         DcfResultStatus.NONCONVERGENCE,
     ],
@@ -65,6 +66,7 @@ def test_result_status_mapping_distinguishes_input_and_solver_failures():
         is DcfResultStatus.NONCONVERGENCE
     )
     assert _dcf_solve_status("no_candidate_solution", None, None) is DcfResultStatus.NO_CROSSING
+    assert _dcf_solve_status("sampled_match", None, None) is DcfResultStatus.SAMPLED_MATCH
     assert (
         _dcf_failure_status("DCF report and stock price currencies are not both verified")
         is DcfResultStatus.INSUFFICIENT_EVIDENCE

@@ -73,7 +73,7 @@ def test_explicit_mature_operating_route_values_with_canonical_identities():
         decision[name] for name in ("input_identity", "evidence_identity", "decision_identity")
     )
     assert dcf["version"] == "reverse-dcf-v16-explicit-input-quality"
-    assert dcf["contract_version"] == "dcf-result-contract-v1"
+    assert dcf["contract_version"] == "dcf-result-contract-v2"
 
 
 @pytest.mark.parametrize(

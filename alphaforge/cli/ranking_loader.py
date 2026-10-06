@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 from datetime import date, timedelta
+from hashlib import sha256
 from math import isfinite
 from types import SimpleNamespace
 from typing import Any
@@ -49,6 +50,11 @@ from alphaforge.core.valuation.reinvestment import qualify_calibration
 from alphaforge.core.valuation.reverse_dcf import (
     UnsupportedEconomicPolicy,
     UnsupportedValuationModel,
+)
+from alphaforge.core.valuation.solve_eligibility import (
+    SOLVE_AXIS_REGISTRY,
+    fixed_assumption_provenance_complete,
+    solve_axis_metadata,
 )
 from alphaforge.core.valuation.types import CurrentValuation, HistoricalValuation
 from alphaforge.evidence.manifest_store import load_evidence_view
@@ -203,6 +209,8 @@ def _dcf_solve_status(
         return DcfResultStatus.NOT_IDENTIFIABLE
     if solution_status == "sampled_match_region":
         return DcfResultStatus.SAMPLED_MATCH_REGION
+    if solution_status == "sampled_match":
+        return DcfResultStatus.SAMPLED_MATCH
     if solution_status == "no_candidate_solution":
         return DcfResultStatus.NO_CROSSING
     if solution_status == "candidate_solutions":
@@ -212,6 +220,189 @@ def _dcf_solve_status(
             error if reason == "invalid_candidate_economics" else reason or error
         )
     return DcfResultStatus.UNAVAILABLE
+
+
+def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]:
+    """Return conditional solve evidence without promoting sampled candidates to a unique answer."""
+    definition = SOLVE_AXIS_REGISTRY[axis]
+    metadata = asdict(eligibility)
+    metadata["root_interpretation"] = definition.root_interpretation
+    if definition.status != "supported":
+        metadata["status"] = definition.status
+        metadata["reason"] = definition.reason
+        return {
+            "available": False,
+            "solution_status": (
+                "not_identifiable" if definition.status == "not_identifiable" else "unavailable"
+            ),
+            "reason": definition.reason,
+            "eligibility": metadata,
+            "candidate_roots": [],
+            "candidate_solution_count": 0,
+            "qualification": definition.root_interpretation,
+        }
+    if eligibility.status == "supported":
+        metadata["reason"] = definition.reason
+    if eligibility.status != "supported":
+        return {
+            "available": False,
+            "solution_status": "unavailable",
+            "reason": eligibility.reason,
+            "eligibility": metadata,
+            "candidate_roots": [],
+            "candidate_solution_count": 0,
+            "qualification": definition.root_interpretation,
+        }
+
+    lower = eligibility.domain["lower_bound"]
+    upper = eligibility.domain["upper_bound"]
+    try:
+        diagnostics, brackets, sampled_matches = engine.diagnose_solve_range(
+            inputs, axis, lower, upper, eligibility=eligibility
+        )
+        roots = []
+        for bracket_lower, bracket_upper in brackets:
+            result = engine.solve(
+                inputs,
+                axis,
+                bracket_lower,
+                bracket_upper,
+                eligibility=eligibility,
+            )
+            value = result.valuation
+            roots.append(
+                {
+                    "implied_assumption": result.implied_assumption,
+                    "modeled_price": result.modeled_price,
+                    "price_difference": result.price_difference,
+                    "iterations": result.iterations,
+                    "root_bracket": [bracket_lower, bracket_upper],
+                    "solution_evidence": "sign_change_bracket",
+                    "solution_evidence_qualification": (
+                        "opposite-signed sampled residuals bracket a conditional numerical solution"
+                    ),
+                    "enterprise_value": value.enterprise_value,
+                    "equity_value": value.equity_value,
+                    "value_per_share": value.value_per_share,
+                    "terminal_value_share_of_enterprise_value": (
+                        value.discounted_terminal_value / value.enterprise_value
+                        if value.enterprise_value != 0
+                        else None
+                    ),
+                    **_equity_qualification(value.equity_value),
+                }
+            )
+        roots.sort(key=lambda root: root["implied_assumption"])
+        sampled_only = [
+            match for match in sampled_matches if not match["associated_sign_change_bracket_count"]
+        ]
+        base = {
+            **diagnostics,
+            "sampled_match_point_count": len(sampled_only),
+            "sampled_match_points": sampled_only,
+            "eligibility": metadata,
+        }
+        if diagnostics["sampled_match_regions"] and roots:
+            return {
+                **base,
+                "available": False,
+                "solution_status": "candidate_solutions",
+                "candidate_roots": roots,
+                "candidate_solution_count": len(roots),
+                "crossing_count_on_grid": len(roots),
+                "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+                "solution_evidence": (
+                    f"{len(roots)} sampled sign-change bracket(s) and "
+                    f"{len(diagnostics['sampled_match_regions'])} sampled match region(s)"
+                ),
+                "solution_qualification": (
+                    "conditional candidates and sampled match regions are distinct observations; "
+                    "finite sampling does not establish uniqueness or completeness, nor a "
+                    "continuous equivalence interval, and no candidate is selected as the answer"
+                ),
+            }
+        if diagnostics["sampled_match_regions"]:
+            return {
+                **base,
+                "available": False,
+                "solution_status": "sampled_match_region",
+                "candidate_roots": [],
+                "candidate_solution_count": 0,
+                "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+                "solution_evidence": (
+                    "contiguous sampled assumptions match within price tolerance; a continuous "
+                    "equivalence interval and complete root set are not established"
+                ),
+            }
+        if not roots:
+            if sampled_only:
+                return {
+                    **base,
+                    "available": False,
+                    "solution_status": "sampled_match",
+                    "candidate_roots": [],
+                    "candidate_solution_count": 0,
+                    "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+                    "solution_qualification": (
+                        "sampled tolerance match only; a tangency or exact root is not established"
+                    ),
+                }
+            direction = diagnostics["no_solution_direction"]
+            error = (
+                f"target price is {direction} the sampled attainable range"
+                if direction in {"above", "below"}
+                else "target lies within the sampled range but no sampled sign-change bracket was found"
+            )
+            return {
+                **base,
+                "available": False,
+                "error": error,
+                "solution_status": "no_candidate_solution",
+                "candidate_roots": [],
+                "candidate_solution_count": 0,
+                "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+                "solution_qualification": (
+                    "no crossing was observed in the finite sampled range; unsampled crossings "
+                    "or extrema are not excluded"
+                ),
+            }
+        return {
+            **base,
+            "available": False,
+            "solution_status": "candidate_solutions",
+            "candidate_roots": roots,
+            "candidate_solution_count": len(roots),
+            "crossing_count_on_grid": len(roots),
+            "solution_evidence": (
+                f"{len(roots)} sampled sign-change bracket(s); "
+                f"{len(sampled_only)} unbracketed tolerance-match sample(s)"
+            ),
+            "solution_qualification": (
+                "conditional candidate solutions only; finite sampling does not establish "
+                "uniqueness or completeness, and no candidate is selected as the answer"
+            ),
+            "solve_scope": "one-variable conditional solve; all other assumptions held fixed",
+        }
+    except RuntimeError as exc:
+        return {
+            "available": False,
+            "solution_status": "unavailable",
+            "reason": "reverse DCF solver did not converge",
+            "error": str(exc),
+            "eligibility": metadata,
+            "candidate_roots": [],
+            "candidate_solution_count": 0,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "solution_status": "unavailable",
+            "reason": "invalid_candidate_economics",
+            "error": str(exc),
+            "eligibility": metadata,
+            "candidate_roots": [],
+            "candidate_solution_count": 0,
+        }
 
 
 def _equity_qualification(equity_value: float) -> dict[str, Any]:
@@ -1774,6 +1965,29 @@ def load_results_for_company(
                 and dcf_current_report.shares_outstanding > 0
             ):
                 try:
+                    eligibility_context_facts = {
+                        "company_id": company_id,
+                        "packet_hash": packet.get("packet_hash")
+                        if isinstance(packet, dict)
+                        else None,
+                        "route_decision_identity": dcf_route_decision.decision_identity,
+                        "route_input_identity": dcf_route_decision.input_identity,
+                        "route_evidence_identity": dcf_route_decision.evidence_identity,
+                        "assumption_provenance": {
+                            name: asdict(record)
+                            for name, record in sorted(
+                                dcf_policy_decision.assumption_provenance.items()
+                            )
+                        },
+                    }
+                    eligibility_context_identity = sha256(
+                        json.dumps(
+                            eligibility_context_facts,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
                     dcf_inputs = ReverseDcfInputs(
                         current_price=latest_price.close,
                         shares_outstanding=dcf_current_report.shares_outstanding,
@@ -1781,6 +1995,7 @@ def load_results_for_company(
                         net_debt=float(current_net_debt),
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
+                        eligibility_context_identity=eligibility_context_identity,
                     )
                     engine = ReverseDcfEngine()
                     dcf_value = engine.value(dcf_inputs)
@@ -1838,219 +2053,64 @@ def load_results_for_company(
                         else [],
                         "missing_information": list(dcf_policy_decision.missing_information),
                     }
-                    # Each reverse result is a one-variable conditional solve; the
-                    # other assumptions remain fixed at the exported base case.
-                    for _assump in ("revenue_growth", "ebit_margin", "terminal_growth"):
-                        _bounds = dcf_policy_decision.solve_bounds.get(_assump)
-                        if _bounds is None:
-                            continue
-                        _refusal = engine.solve_availability(dcf_inputs, _assump)
-                        if _refusal:
-                            reverse_dcf_results[_assump] = {
-                                "available": False,
-                                "solution_status": (
-                                    "not_identifiable"
-                                    if _assump == "terminal_growth"
-                                    else "unavailable"
-                                ),
-                                "reason": _refusal,
-                                "candidate_roots": [],
-                                "candidate_solution_count": 0,
-                                "qualification": (
-                                    "mature returns equal the hurdle: terminal growth creates no "
-                                    "excess-return value; a linked transition can still change "
-                                    "pre-convergence cash flows, so the full forecast is not invariant"
-                                    if _assump == "terminal_growth"
-                                    else "a changed margin violates this slice's constant-margin capital basis"
-                                ),
-                            }
-                            continue
-                        try:
-                            _diagnostics, _brackets, _sample_matches = engine.diagnose_solve_range(
-                                dcf_inputs, _assump, _bounds[0], _bounds[1]
-                            )
-                            _roots = []
-                            for _lower, _upper in _brackets:
-                                _res = engine.solve(dcf_inputs, _assump, _lower, _upper)
-                                _roots.append(
-                                    {
-                                        "implied_assumption": _res.implied_assumption,
-                                        "modeled_price": _res.modeled_price,
-                                        "price_difference": _res.price_difference,
-                                        "iterations": _res.iterations,
-                                        "root_bracket": [_lower, _upper],
-                                        "solution_evidence": "sign_change_bracket",
-                                        "solution_evidence_qualification": (
-                                            "opposite-signed sampled residuals bracket a conditional "
-                                            "numerical solution"
-                                        ),
-                                        "valuation": _res.valuation,
-                                    }
-                                )
-                            for _match in _sample_matches:
-                                if _match["associated_sign_change_bracket_count"]:
-                                    continue
-                                _point_inputs = replace(
-                                    dcf_inputs,
-                                    assumptions=replace(
-                                        dcf_inputs.assumptions,
-                                        **{_assump: _match["assumption"]},
-                                    ),
-                                )
-                                _point_value = engine.value(_point_inputs)
-                                _roots.append(
-                                    {
-                                        "implied_assumption": _match["assumption"],
-                                        "modeled_price": _point_value.value_per_share,
-                                        "price_difference": (
-                                            _point_value.value_per_share - dcf_inputs.current_price
-                                        ),
-                                        "iterations": 0,
-                                        "root_bracket": None,
-                                        "solution_evidence": _match["classification"],
-                                        "solution_evidence_qualification": _match["qualification"],
-                                        "valuation": _point_value,
-                                    }
-                                )
-                            _roots.sort(key=lambda _root: _root["implied_assumption"])
-                            _conditional_scope = (
-                                "one-variable conditional solve; all other assumptions held fixed"
-                            )
-                            if not _roots:
-                                if _diagnostics["sampled_match_regions"]:
-                                    reverse_dcf_results[_assump] = {
-                                        **_diagnostics,
-                                        "solution_status": "sampled_match_region",
-                                        "solve_scope": _conditional_scope,
-                                        "candidate_roots": [],
-                                        "candidate_solution_count": 0,
-                                        "solution_evidence": (
-                                            "contiguous sampled assumptions match within price "
-                                            "tolerance; no finite root list or continuous "
-                                            "equivalence interval is established"
-                                        ),
-                                    }
-                                    continue
-                                _direction = _diagnostics["no_solution_direction"]
-                                _error = (
-                                    f"target price is {_direction} the sampled attainable range"
-                                    if _direction in {"above", "below"}
-                                    else "target lies within the sampled range but no solve bracket was found"
-                                )
-                                reverse_dcf_results[_assump] = {
-                                    **_diagnostics,
-                                    "error": _error,
-                                    "solution_status": "no_candidate_solution",
-                                    "solve_scope": _conditional_scope,
-                                    "candidate_roots": [],
-                                    "candidate_solution_count": 0,
-                                }
-                                continue
-
-                            _root_summaries = []
-                            for _root in _roots:
-                                _valuation = _root["valuation"]
-                                _root_near_bound = (
-                                    _assump == "terminal_growth"
-                                    and _bounds[1] - _root["implied_assumption"]
-                                    <= (_bounds[1] - _bounds[0]) * 0.05
-                                )
-                                _root_summary = {
-                                    key: value for key, value in _root.items() if key != "valuation"
-                                }
-                                _root_summary.update(
-                                    {
-                                        "enterprise_value": _valuation.enterprise_value,
-                                        "equity_value": _valuation.equity_value,
-                                        "terminal_value_share_of_enterprise_value": (
-                                            _valuation.discounted_terminal_value
-                                            / _valuation.enterprise_value
-                                            if _valuation.enterprise_value != 0
-                                            else None
-                                        ),
-                                        **_equity_qualification(_valuation.equity_value),
-                                        "near_bound": _root_near_bound,
-                                        "near_bound_side": ("upper" if _root_near_bound else None),
-                                        "interpretation": (
-                                            "near-bound terminal-growth equivalence is conditional and "
-                                            "assumption-sensitive, not an economic conclusion"
-                                            if _root_near_bound
-                                            else "conditional one-variable equivalence, not an economic conclusion"
-                                        ),
-                                    }
-                                )
-                                _root_summaries.append(_root_summary)
-                            _chosen = _roots[0]
-                            _chosen_value = _chosen["valuation"]
-                            _selected_root_summary = _root_summaries[0]
-                            _near_cap_candidate_present = any(
-                                _root["near_bound"] for _root in _root_summaries
-                            )
-                            _crossing_count = sum(
-                                _root["solution_evidence"] == "sign_change_bracket"
-                                for _root in _root_summaries
-                            )
-                            _sample_match_candidate_count = len(_root_summaries) - _crossing_count
-                            reverse_dcf_results[_assump] = {
-                                **_diagnostics,
-                                "implied_assumption": _chosen["implied_assumption"],
-                                "lower_bound": _bounds[0],
-                                "upper_bound": _bounds[1],
-                                "target_price": dcf_inputs.current_price,
-                                "modeled_price": _chosen["modeled_price"],
-                                "price_difference": _chosen["price_difference"],
-                                "iterations": _chosen["iterations"],
-                                "value_per_share": _chosen_value.value_per_share,
-                                "enterprise_value": _chosen_value.enterprise_value,
-                                "equity_value": _chosen_value.equity_value,
-                                **_equity_qualification(_chosen_value.equity_value),
-                                "root_bracket": _chosen["root_bracket"],
-                                "selected_solution_evidence": _chosen["solution_evidence"],
-                                "selected_solution_evidence_qualification": _chosen[
-                                    "solution_evidence_qualification"
-                                ],
-                                "candidate_roots": _root_summaries,
-                                "candidate_solution_count": len(_root_summaries),
-                                "crossing_count_on_grid": _crossing_count,
-                                "sample_match_candidate_count": _sample_match_candidate_count,
-                                "solution_status": "candidate_solutions",
-                                "solution_evidence": (
-                                    f"{_crossing_count} sampled sign-change bracket(s); "
-                                    f"{_sample_match_candidate_count} isolated tolerance-match "
-                                    f"candidate(s); {len(_diagnostics['sampled_match_regions'])} "
-                                    "contiguous tolerance-match region(s)"
-                                ),
-                                "solution_qualification": (
-                                    "conditional numerical evidence only; additional roots or "
-                                    "extrema between grid points are not excluded"
-                                ),
-                                "solve_scope": _conditional_scope,
-                                "terminal_value_share_of_enterprise_value": (
-                                    _chosen_value.discounted_terminal_value
-                                    / _chosen_value.enterprise_value
-                                    if _chosen_value.enterprise_value != 0
-                                    else None
-                                ),
-                                "near_bound": _selected_root_summary["near_bound"],
-                                "near_bound_side": _selected_root_summary["near_bound_side"],
-                                "interpretation": _selected_root_summary["interpretation"],
-                                "near_cap_candidate_present": _near_cap_candidate_present,
-                                "near_cap_warning": (
-                                    "at least one terminal-growth candidate root is near the upper "
-                                    "solve cap; equivalence is conditional and assumption-sensitive"
-                                    if _near_cap_candidate_present
-                                    else None
-                                ),
-                            }
-                        except Exception as exc:
-                            reverse_dcf_results[_assump] = {
-                                "available": False,
-                                "solution_status": "unavailable",
-                                "reason": "invalid_candidate_economics",
-                                "error": str(exc),
-                                "candidate_roots": [],
-                                "candidate_solution_count": 0,
-                            }
+                    # All admission evidence is frozen and checked before any solve sampling.
+                    quality_decision = policy.assess_input_quality(input_quality_view)
+                    provenance = dcf_policy_decision.assumption_provenance
+                    report_references = tuple(
+                        reference
+                        for name in ("revenue_growth", "ebit_margin", "ebit_margin_start")
+                        for reference in getattr(provenance.get(name), "evidence_references", ())
+                    )
+                    calibration_references = tuple(
+                        getattr(provenance.get("reinvestment_return"), "evidence_references", ())
+                    )
+                    fixed_provenance_complete = fixed_assumption_provenance_complete(
+                        dcf_policy_decision.assumptions, "revenue_growth", provenance
+                    )
+                    prerequisite_evidence = {
+                        "explicit_mature_operating_route": {
+                            "status": "met"
+                            if dcf_route_decision.status == "available"
+                            else "unmet",
+                            "reason": dcf_route_decision.reason,
+                            "evidence_references": dcf_route_decision.evidence_references,
+                        },
+                        "qualified_consecutive_annual_history": {
+                            "status": "met" if quality_decision.available else "unmet",
+                            "reason": next(iter(quality_decision.reasons), None),
+                            "evidence_references": report_references,
+                        },
+                        "qualified_reinvestment_calibration": {
+                            "status": "met"
+                            if dcf_policy_decision.calibration is not None
+                            and calibration_references
+                            else "unmet",
+                            "reason": None
+                            if dcf_policy_decision.calibration is not None
+                            and calibration_references
+                            else "admissible_reinvestment_calibration",
+                            "evidence_references": calibration_references,
+                        },
+                        "fixed_assumptions_with_provenance": {
+                            "status": "met" if fixed_provenance_complete else "unmet",
+                            "reason": None
+                            if fixed_provenance_complete
+                            else "fixed assumption provenance incomplete",
+                            "evidence_references": (),
+                        },
+                    }
+                    # The registry supplies the declared full domains and every axis decision.
+                    for _assump in SOLVE_AXIS_REGISTRY:
+                        _eligibility = solve_axis_metadata(
+                            _assump,
+                            assumptions=dcf_policy_decision.assumptions,
+                            assumption_provenance=provenance,
+                            prerequisite_evidence=prerequisite_evidence,
+                            inputs=dcf_inputs,
+                        )
+                        reverse_dcf_results[_assump] = _solve_axis_result(
+                            engine, dcf_inputs, _assump, _eligibility
+                        )
                     reverse_dcf["implied"] = reverse_dcf_results
                     reverse_dcf["status"] = "available"
                 except Exception as exc:

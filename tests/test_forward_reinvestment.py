@@ -19,6 +19,7 @@ from test_method_date_growth_selection import (
 )
 
 from alphaforge.cli.ranking_loader import load_results_for_company
+from alphaforge.core.valuation.dcf_contract import FIXED_DEFAULT_ASSUMPTION_POLICY
 from alphaforge.core.valuation.reinvestment import (
     ECONOMIC_CONVENTION,
     calibration_identity,
@@ -32,6 +33,7 @@ from alphaforge.core.valuation.reverse_dcf import (
     UnsupportedEconomicPolicy,
     forward_investment,
 )
+from alphaforge.core.valuation.solve_eligibility import SOLVE_AXIS_REGISTRY, solve_axis_metadata
 from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
 from alphaforge.db.repositories import upsert_prices, upsert_stock_splits
@@ -56,6 +58,59 @@ def hand_inputs(q=0.1, terminal=0.04, years=2):
             economic_convention=ECONOMIC_CONVENTION,
             calibration_identity="synthetic-hand-lock",
         ),
+        eligibility_context_identity="synthetic-company:packet",
+    )
+
+
+def policy_solve_inputs():
+    inputs = hand_inputs(years=5, terminal=0.02)
+    return replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+
+
+def verified_growth_metadata(inputs):
+    return solve_axis_metadata(
+        "revenue_growth",
+        assumptions=inputs.assumptions,
+        assumption_provenance={
+            name: {
+                "origin": origin,
+                "source": (
+                    FIXED_DEFAULT_ASSUMPTION_POLICY[name][1]
+                    if origin == "fixed_default"
+                    else "synthetic test assumption"
+                ),
+                "evidence_references": (
+                    ()
+                    if origin == "fixed_default"
+                    else ({"source_id": f"synthetic:{name}", "anchor": name},)
+                ),
+                "limitations": ("synthetic test assumption",),
+            }
+            for name, origin in {
+                "projection_years": "fixed_default",
+                "revenue_growth": "company_history",
+                "ebit_margin": "report_evidence",
+                "tax_rate": "fixed_default",
+                "discount_rate": "market_evidence",
+                "terminal_growth": "fixed_default",
+                "net_reinvestment_rate": "fixed_default",
+                "reinvestment_return": "qualified_calibration",
+                "revenue_growth_fade_to": "fixed_default",
+                "ebit_margin_start": "report_evidence",
+                "economic_convention": "fixed_default",
+                "calibration_identity": "qualified_calibration",
+            }.items()
+        },
+        inputs=inputs,
+        prerequisite_evidence={
+            name: {
+                "status": "met",
+                "evidence_references": ()
+                if name == "fixed_assumptions_with_provenance"
+                else ({"source_id": f"evidence:{name}"},),
+            }
+            for name in SOLVE_AXIS_REGISTRY["revenue_growth"].evidence_prerequisites
+        },
     )
 
 
@@ -201,24 +256,47 @@ def test_forward_economic_boundaries(changes, reason):
 
 def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_caps():
     engine = ReverseDcfEngine()
-    inputs = replace(hand_inputs(), current_price=103.5)
-    result = engine.solve(inputs, "revenue_growth", 0, 0.08)
-    assert result.implied_assumption == pytest.approx(0.04)
-    assert result.modeled_price == pytest.approx(103.5)
-    diagnostics, brackets, _ = engine.diagnose_solve_range(
-        replace(inputs, current_price=200),
+    inputs = policy_solve_inputs()
+    lower_price = engine.value(
+        replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.0))
+    ).value_per_share
+    upper_price = engine.value(
+        replace(inputs, assumptions=replace(inputs.assumptions, revenue_growth=0.08))
+    ).value_per_share
+    inputs = replace(inputs, current_price=engine.value(inputs).value_per_share)
+    result = engine.solve(
+        inputs,
         "revenue_growth",
         0,
         0.08,
+        eligibility=verified_growth_metadata(inputs),
+    )
+    assert result.implied_assumption == pytest.approx(0.04)
+    assert result.modeled_price == pytest.approx(inputs.current_price)
+    no_match_inputs = replace(inputs, current_price=upper_price + 100)
+    diagnostics, brackets, _ = engine.diagnose_solve_range(
+        no_match_inputs,
+        "revenue_growth",
+        0,
+        0.08,
+        eligibility=verified_growth_metadata(no_match_inputs),
     )
     assert not brackets
-    assert diagnostics["lower_endpoint_price"] == pytest.approx(99.5)
-    assert diagnostics["upper_endpoint_price"] == pytest.approx(107.5)
-    assert diagnostics["nearest_boundary_gap"] == pytest.approx(92.5)
-    assert diagnostics["nearest_boundary_gap_pct_target"] == pytest.approx(46.25)
+    assert diagnostics["lower_endpoint_price"] == pytest.approx(lower_price)
+    assert diagnostics["upper_endpoint_price"] == pytest.approx(upper_price)
+    assert diagnostics["nearest_boundary_gap"] == pytest.approx(100)
+    assert diagnostics["nearest_boundary_gap_pct_target"] == pytest.approx(
+        100 / no_match_inputs.current_price * 100
+    )
     assert "sampled range only" in diagnostics["range_qualification"]
     with pytest.raises(ValueError, match="not bracketed"):
-        engine.solve(replace(inputs, current_price=200), "revenue_growth", 0, 0.08)
+        engine.solve(
+            no_match_inputs,
+            "revenue_growth",
+            0,
+            0.08,
+            eligibility=verified_growth_metadata(no_match_inputs),
+        )
 
 
 def test_nonfinite_projection_and_investment_never_escape():
@@ -369,6 +447,19 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     assert value["status"] == "available"
     assert value["reason"] is None
     assert value["version"] == "reverse-dcf-v16-explicit-input-quality"
+    growth_solve = exported[str(cid)]["implied"]["revenue_growth"]
+    eligibility = growth_solve["eligibility"]
+    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v2"
+    assert eligibility["status"] == "supported"
+    assert eligibility["domain"] == {
+        "lower_bound": -0.10,
+        "upper_bound": 0.30,
+        "bounds_inclusive": True,
+        "candidate_policy": "sample the full declared range; any invalid sampled candidate refuses the axis",
+    }
+    assert "initial revenue growth fades linearly" in eligibility["root_interpretation"]
+    assert eligibility["fixed_assumptions"]["discount_rate"]["evidence_references"]
+    assert {item["status"] for item in eligibility["evidence_prerequisites"]} == {"met"}
     provenance = value["assumption_provenance"]
     assert set(provenance) == set(value["assumptions"])
     assert provenance["revenue_growth"]["origin"] == "company_history"
@@ -422,7 +513,8 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
-    assert rules["dcf_result_contract"] == "dcf-result-contract-v1"
+    assert rules["dcf_result_contract"] == "dcf-result-contract-v2"
+    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v2"
     original = json.loads(executed["outputs"])
     replayed = replay_run(conn, executed["run_id"])
     assert replayed["outputs"] == original
