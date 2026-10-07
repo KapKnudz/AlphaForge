@@ -66,8 +66,10 @@ service and cannot recover pre-retention overwritten values.
 revision, executing source-file digests (including taxonomy, financial,
 valuation, ranking, readiness and reconstruction/schema code), Python and SQLite
 runtimes, selection/scoring/DCF/input-quality/required-return/dividend versions,
-accepted age limits, DCF defaults and declared solve-axis registry/domains, size
-hurdles and scale/split assumptions.
+accepted age limits, DCF defaults, the declared solve-axis registry and growth-domain
+scope, arithmetic, endpoint conversion, boundary and sampling policies, size hurdles
+and scale/split assumptions. Per-run derived and requested bounds remain in the retained
+eligibility/output record rather than masquerading as static registry bounds.
 Actual source digests also identify dirty development execution; the Git revision
 alone is not represented as sufficient code identity. A version string alone
 cannot hide an unversioned formula correction.

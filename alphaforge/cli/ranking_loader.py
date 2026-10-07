@@ -45,8 +45,15 @@ from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
 )
+from alphaforge.core.valuation.growth_domain import (
+    growth_coverage_error,
+    growth_history_identity,
+)
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
-from alphaforge.core.valuation.reinvestment import qualify_calibration
+from alphaforge.core.valuation.reinvestment import (
+    calibration_operands_identity,
+    qualify_calibration,
+)
 from alphaforge.core.valuation.reverse_dcf import (
     UnsupportedEconomicPolicy,
     UnsupportedValuationModel,
@@ -63,7 +70,14 @@ SELECTION_VERSION = "verified-dates-consecutive-annual-denomination-v1"
 MAX_PRICE_AGE_DAYS = 7
 
 
-def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, currency: str | None):
+def _select_reinvestment_calibration(
+    conn,
+    company_id: int,
+    cutoff: date,
+    currency: str | None,
+    *,
+    growth_inputs=None,
+):
     """Retain rejection reasons; deterministic choice by fiscal end/content identity."""
     if not conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reinvestment_calibrations'"
@@ -83,21 +97,58 @@ def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, curren
             qualified = qualify_calibration(record, as_of=cutoff, currency=currency, tax_rate=0.21)
             if qualified.identity != row["identity"]:
                 raise ValueError("calibration content identity mismatch")
-            admitted.append((record["period_end"], qualified.identity, record))
+            admitted.append(
+                (
+                    record["period_end"],
+                    qualified.identity,
+                    calibration_operands_identity(record),
+                    "reverse_growth_coverage" in record,
+                    record,
+                )
+            )
             reason = None
         except (ValueError, TypeError, KeyError, OverflowError, AttributeError) as exc:
             reason = str(exc)
         candidates.append({"identity": row["identity"], "rejection_reason": reason})
-    selected = max(admitted, key=lambda x: (x[0], x[1])) if admitted else None
-    # Conflicting reviews for the same latest fiscal period require a new review,
-    # not a hash-order business choice.
-    if selected and sum(x[0] == selected[0] for x in admitted) > 1:
-        return None, {
-            "selected_identity": None,
-            "candidates": candidates,
-            "refusal": "ambiguous_calibration",
-        }
-    return (selected[2] if selected else None), {
+    selected = None
+    if admitted:
+        latest_period = max(item[0] for item in admitted)
+        latest = [item for item in admitted if item[0] == latest_period]
+        operand_identities = {item[2] for item in latest}
+        reviewed = [item for item in latest if item[3]]
+        unreviewed = [item for item in latest if not item[3]]
+        if len(operand_identities) > 1:
+            return None, {
+                "selected_identity": None,
+                "candidates": candidates,
+                "refusal": "ambiguous_calibration",
+            }
+        if growth_inputs is None:
+            # Identical operands seed the fixed basis, independently of coverage.
+            # The second pass selects a review against that basis, not append order.
+            selected = (unreviewed or reviewed)[0]
+        else:
+            matching = []
+            for item in reviewed:
+                candidate_inputs = replace(
+                    growth_inputs,
+                    assumptions=replace(growth_inputs.assumptions, calibration_identity=item[1]),
+                    growth_domain_context={
+                        **growth_inputs.growth_domain_context,
+                        "calibration_record": item[4],
+                    },
+                )
+                if growth_coverage_error(candidate_inputs) is None:
+                    matching.append(item)
+            if len(matching) > 1:
+                return None, {
+                    "selected_identity": None,
+                    "candidates": candidates,
+                    "refusal": "ambiguous_calibration",
+                }
+            # Missing/stale coverage must not invalidate these shared forward operands.
+            selected = matching[0] if matching else (reviewed or unreviewed)[0]
+    return (selected[4] if selected else None), {
         "selected_identity": selected[1] if selected else None,
         "candidates": candidates,
     }
@@ -148,7 +199,12 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         return DcfResultStatus.NONCONVERGENCE
     if "not bracketed" in reason or "no solve bracket" in reason:
         return DcfResultStatus.NO_CROSSING
-    if "finite" in reason or "must be positive" in reason or "must exceed" in reason:
+    if (
+        reason == "invalid_growth_domain_inputs"
+        or "finite" in reason
+        or "must be positive" in reason
+        or "must exceed" in reason
+    ):
         return DcfResultStatus.INVALID_INPUT
     if reason == "unavailable_constant_margin_only" or reason.startswith(
         "market-cap hurdle policy is defined for SEK; received "
@@ -179,6 +235,10 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         "unsupported_capital_release",
         "unsupported_financing",
         "invalid_candidate_economics",
+        "empty_admissible_domain",
+        "degenerate_admissible_domain",
+        "numerically_unresolvable_domain",
+        "admissible_domain_not_certified",
     }:
         return DcfResultStatus.DOMAIN_UNAVAILABLE
     if (
@@ -203,8 +263,13 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
 
 
 def _dcf_solve_status(
-    solution_status: str | None, reason: str | None, error: str | None
+    solution_status: str | None,
+    reason: str | None,
+    error: str | None,
+    failure_status: str | None = None,
 ) -> DcfResultStatus:
+    if failure_status is not None:
+        return DcfResultStatus(failure_status)
     if solution_status == "not_identifiable":
         return DcfResultStatus.NOT_IDENTIFIABLE
     if solution_status == "sampled_match_region":
@@ -248,14 +313,14 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "available": False,
             "solution_status": "unavailable",
             "reason": eligibility.reason,
+            "failure_status": eligibility.status,
             "eligibility": metadata,
             "candidate_roots": [],
             "candidate_solution_count": 0,
             "qualification": definition.root_interpretation,
         }
 
-    lower = eligibility.domain["lower_bound"]
-    upper = eligibility.domain["upper_bound"]
+    lower, upper = eligibility.domain["requested_bounds"]
     try:
         diagnostics, brackets, sampled_matches = engine.diagnose_solve_range(
             inputs, axis, lower, upper, eligibility=eligibility
@@ -399,6 +464,11 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "solution_status": "unavailable",
             "reason": "invalid_candidate_economics",
             "error": str(exc),
+            "failure_status": _dcf_exception_status(exc).value,
+            "candidate_assumption": getattr(exc, "candidate_assumption", None),
+            "boundary_evaluation_failure": (
+                getattr(exc, "candidate_assumption", None) in (lower, upper)
+            ),
             "eligibility": metadata,
             "candidate_roots": [],
             "candidate_solution_count": 0,
@@ -1997,7 +2067,61 @@ def load_results_for_company(
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
                         eligibility_context_identity=eligibility_context_identity,
+                        growth_domain_context={
+                            "company_id": company_id,
+                            "as_of": as_of,
+                            "currency": dcf_current_report.currency,
+                            "packet_hash": eligibility_context_facts["packet_hash"],
+                            "route_decision_identity": dcf_route_decision.decision_identity,
+                            "selected_history_identity": growth_history_identity(
+                                asdict(input_quality_view),
+                                [
+                                    asdict(report)
+                                    for report in (*historical_annuals, latest_annual)
+                                    if report is not None
+                                ],
+                            ),
+                            "calibration_record": calibration_record,
+                        },
                     )
+                    current_calibration, current_selection = _select_reinvestment_calibration(
+                        conn,
+                        company_id,
+                        cutoff,
+                        dcf_current_report.currency,
+                        growth_inputs=dcf_inputs,
+                    )
+                    selection["reinvestment_calibration"] = current_selection
+                    if current_calibration is None:
+                        raise ValueError(current_selection.get("refusal", "ambiguous_calibration"))
+                    if (
+                        current_selection["selected_identity"]
+                        != calibration_selection["selected_identity"]
+                    ):
+                        selected_calibration = qualify_calibration(
+                            current_calibration,
+                            as_of=cutoff,
+                            currency=dcf_current_report.currency,
+                            tax_rate=dcf_policy_decision.assumptions.tax_rate,
+                        )
+                        selected_assumptions = replace(
+                            dcf_policy_decision.assumptions,
+                            calibration_identity=selected_calibration.identity,
+                        )
+                        dcf_policy_decision = replace(
+                            dcf_policy_decision,
+                            assumptions=selected_assumptions,
+                            calibration=selected_calibration,
+                        )
+                        calibration_record = current_calibration
+                        dcf_inputs = replace(
+                            dcf_inputs,
+                            assumptions=selected_assumptions,
+                            growth_domain_context={
+                                **dcf_inputs.growth_domain_context,
+                                "calibration_record": calibration_record,
+                            },
+                        )
                     engine = ReverseDcfEngine()
                     dcf_value = engine.value(dcf_inputs)
                     reverse_dcf["dcf"] = {
@@ -2100,7 +2224,8 @@ def load_results_for_company(
                             "evidence_references": (),
                         },
                     }
-                    # The registry supplies the declared full domains and every axis decision.
+                    # The registry derives the full funded domain before candidate prices;
+                    # absent analyst coverage refuses reverse without affecting forward.
                     for _assump in SOLVE_AXIS_REGISTRY:
                         _eligibility = solve_axis_metadata(
                             _assump,
@@ -2236,6 +2361,7 @@ def load_results_for_company(
             solve_result.get("solution_status"),
             solve_result.get("reason"),
             solve_result.get("error"),
+            solve_result.get("failure_status"),
         )
         solve_result_version = (
             dcf_policy_decision.policy_version if dcf_policy_decision is not None else None

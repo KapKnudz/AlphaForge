@@ -1584,8 +1584,9 @@ def test_qualified_calibration_exports_fade_and_refused_solve_axes(monkeypatch, 
     assert dcf["negative_modeled_equity"] is False
 
     growth = result["implied"]["revenue_growth"]
-    assert growth["reason"] == "invalid_candidate_economics"
-    assert "unsupported_capital_release" in growth["error"]
+    assert growth["reason"] == "full_interval_starting_capital_coverage_unavailable"
+    assert growth["status"] == "insufficient_evidence"
+    assert growth["candidate_roots"] == []
     assert "lower_endpoint_price" not in growth
     terminal = result["implied"]["terminal_growth"]
     assert terminal["solution_status"] == "not_identifiable"
@@ -2366,7 +2367,7 @@ def test_consecutive_dcf_growth_has_new_exported_policy_provenance(monkeypatch, 
             "evidence_references": [{"source_id": "document:1", "anchor": "document:1#page:1"}],
         },
     )
-    expected = "reverse-dcf-v16-explicit-input-quality"
+    expected = "reverse-dcf-v17-admissible-growth-domain"
     assert loaded["dcf"]["policy"].policy_version == expected
     assert loaded["dcf"]["policy"].assumptions.revenue_growth == pytest.approx(0.1)
     assert loaded["reverse_dcf"]["dcf"]["policy_version"] == expected

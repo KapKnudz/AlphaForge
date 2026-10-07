@@ -47,7 +47,7 @@ ranking never masquerades as a discounted-cash-flow.
 ## Auditable DCF (policy + engine)
 
 * **Policy:** `alphaforge/core/valuation/dcf_policy.py`
-  (`VERSION = "reverse-dcf-v16-explicit-input-quality"`) — historical growth
+  (`VERSION = "reverse-dcf-v17-admissible-growth-domain"`) — historical growth
   uses the latest consecutive positive-revenue suffix without bridging missing
   or nonpositive observations; this calculation is distinct from v11.
   An unresolved annual slot inside the selected fiscal span removes historical
@@ -150,20 +150,103 @@ ranking never masquerades as a discounted-cash-flow.
   forecast is mathematically invariant. Both axes export empty root lists without
   endpoint prices or implied assumptions. A direct terminal-growth scenario must
   link the explicit growth endpoint to gT; it does not re-enable solving.
-  Original bounds remain recorded `(-10..30%, 0..50%, -1..4%)`. The revenue-growth
-  range contains unsupported contraction/financing candidates, so automatic range
-  diagnostics refuse with `invalid_candidate_economics`, no endpoint prices or roots.
-  Bounds are not narrowed and invalid candidates are not skipped to manufacture a root.
-  Direct arithmetic calls on a fully admissible positive-growth range retain deterministic
-  sampled diagnostics; revenue growth means initial growth fading to the fixed mature
-  endpoint, not constant CAGR. The shared `solve_eligibility.py` registry declares each
-  axis domain, evidence prerequisites, refusal reason, and root interpretation. Both direct
-  solve and range diagnostics refuse before sampling unless supplied eligibility has every
-  prerequisite verified and its fixed-assumption values and provenance match the current
-  inputs. The eligibility identity binds numerical inputs to company, frozen packet, route,
-  and the exact exported evidence record; omitting eligibility creates an unverified decision
-  and therefore refuses. Provenance validation accepts policy-approved defaults only with
-  their recorded limitations and no fabricated source references.
+  **Admissible initial-growth domain (S-M4):** `growth_domain.py` derives the
+  five-year mature funding interval before observing candidate prices or roots. The
+  retained `[0,.30]` registry declaration is a search-coverage scope, not a maturity
+  threshold or a financing guarantee. `DcfAssumptionPolicy.SOLVE_BOUNDS` is a
+  compatibility scope declaration only; replay exports it as `solve_scope_bounds`.
+  Actual executable and requested bounds belong to each solve eligibility record.
+  For fixed mature growth t, initial marginal-return assumption q0 and hurdle r:
+
+  ```text
+  U1 = (q0 - .25*t)/.75
+  U2 = (.75*q0 + .25*r - .50*t)/.50
+  U3 = (.50*q0 + .50*r - .75*t)/.25
+  U = min(.30,U1,U2,U3)
+  A = [0,U], provided t <= .25*q0+.75*r and 0 <= t < r
+  ```
+
+  Each constraint is the existing end-of-period funding rule
+  `0 <= investment <= NOPAT`, or `0 <= next profit growth <= q`, over all six
+  funding rows. Positive constant margin and tax below one let revenue scale cancel
+  in those inequalities. Negative initial growth still refuses capital release;
+  unfunded growth still refuses financing. No cash/debt recycling, spending cap,
+  new year-zero spending, high-growth transition or margin economics are introduced.
+  Certificate construction requires finite positive revenue, shares and current price,
+  finite net debt, a supported branch value, the fixed five-year convention/endpoints,
+  positive margin/returns and a legal tax rate. Ordinary route, history, calibration and
+  provenance qualification still precedes derivation; after those prerequisites pass,
+  invalid, empty or degenerate domain outcomes are reported before missing interval-wide
+  coverage. An empty interval (`empty_admissible_domain`) or singleton
+  (`degenerate_admissible_domain`) refuses search rather than being widened.
+  Affine constraints establish a continuous real-economic interval; hypothetical
+  non-affine/holey domains require a different approved contract, not sampled clipping.
+
+  **Explicit interval-wide review is required.** The canonical evaluator assumes
+  year-one capital is already installed; it does not fund R0→R1. A forward calibration's
+  starting-capital premise does not automatically cover every reverse candidate.
+  A trusted analyst must append a reviewed calibration with `reverse_growth_coverage`:
+  `version="reverse-growth-domain-v1"`, `scope="full_derived_domain"`,
+  `capital_timing="year_one_installed"`,
+  `constant_margin_and_return_path="conditional_for_full_derived_domain"`,
+  nonempty `starting_capacity_rationale` and `approval_id`, and `approved_on <= as_of`.
+  Review must explain installed year-one scale R0*(1+x), fixed positive margin,
+  maintenance, capital perimeter and return assumptions throughout A. This is a
+  conditional analyst premise, not automatically verified spare capacity.
+  No acquisition, migration or loader fills it in. Missing/stale coverage leaves
+  forward valuation independent but reverse growth `insufficient_evidence`.
+
+  Coverage `fixed_basis` must exactly match `growth_fixed_basis(inputs)`:
+  company/currency/million units, current_revenue, ebit_margin, tax_rate,
+  projection_years, terminal_growth, discount_rate, reinvestment_return,
+  economic_convention, packet_hash, route_decision_identity, selected_history_identity
+  and calibration_operands_identity. The latter hashes calibration JSON excluding
+  coverage, avoiding a circular hash; final calibration identity includes the review.
+  History binds qualified operands and quality facts without DB surrogate ids.
+  Qualification checks dates, structure and exact basis, not accounting truth.
+  At the latest fiscal period, genuinely different calibration operand identities remain
+  ambiguous. For one shared operand identity, fixed-basis construction is independent of
+  coverage and does not require an unreviewed predecessor. The sole coverage review matching
+  that basis is selected; stale or malformed reviews remain retained but do not block a
+  corrected append. When no review matches, qualified forward valuation survives while reverse
+  coverage remains unavailable. Multiple matching current reviews remain ambiguous. No old
+  record is edited; append order does not choose the review.
+
+  Derivation uses exact rational arithmetic over captured finite float operands and
+  directed inward conversion to executable float endpoints. Public rank samples the
+  **full** derived interval (200 intervals/201 points), using price tolerance `1e-6`,
+  assumption tolerance `1e-10`, at most 200 bisection iterations and the canonical
+  `value()` for each sample and bisection candidate. These settings are certificate- and
+  run-identity inputs; this policy version refuses caller overrides. An explicitly
+  restricted lower-level request
+  is separately recorded, identity-bound, and must lie wholly inside A. Out-of-domain
+  requests refuse before sampling: never silently intersect, skip invalid samples or
+  select a root-bearing subinterval. Internal brackets must remain inside that request.
+  Real-economic certification is not machine-safety or root-completeness proof.
+  Any actually evaluated invalid candidate discards the entire axis result, including
+  earlier candidates. Closed investment=NOPAT equality is economically allowed, but
+  strict canonical rounding failures at an endpoint still refuse with
+  `invalid_candidate_economics`/underlying error and boundary detail: no epsilon,
+  inward retry, or alternate price evaluator. Forward arithmetic remains unchanged.
+
+  With q0=.20,r=.15,t=.02, the bounds derive to approximately [0,.26]: row one
+  binds; .261 and .30 require unsupported financing. In the qualified synthetic
+  fixture, price13 yields a conditional initial-growth candidate near .04215994;
+  price10/30 yield honest no sampled crossing on the same interval. Bounds/certificate
+  exclude target price and the forward growth estimate; full solve input identity still
+  binds both. A new live price crossing a market-cap hurdle bucket legitimately changes
+  fixed r and can change admissibility; it is not a target-driven domain adjustment.
+  q0=.15 and .02 demonstrate strict rounded boundary refusals despite real-economic
+  equality. See `tests/test_growth_admissible_domain.py` for public export/CLI replay,
+  no-crossing, coverage, boundary, restricted-request and tamper acceptance.
+
+  The shared `solve_eligibility.py` registry remains the domain/prerequisite/interpretation
+  owner. Both direct solve and diagnostics require verified prerequisites, fixed-assumption
+  values/provenance, the recomputed funding certificate and complete current-input binding.
+  Omitting eligibility refuses; default provenance requires policy values, recorded
+  limitations and no fabricated source references. Authentic issuers lacking qualified
+  packet/route/history/capital/interval-wide review remain unavailable; neither numerical
+  solving nor evidence-root portability grants source qualification.
   Canonical results retain conditional sign-change candidates, endpoint matches, and sampled
   tolerance regions distinctly, including sign-change candidates that coexist with a sampled
   match region. Point matches already represented by a sign-change bracket are omitted from
@@ -206,13 +289,16 @@ ranking never masquerades as a discounted-cash-flow.
   and nonconvergence while preserving
   detailed reasons; the explicit non-SEK hurdle refusal is `unsupported`, not
   missing evidence.
-  The v2 result-contract and `reverse-dcf-solve-registry-v2` identities are part of the
-  replay rules identity, so old incompatible outputs are refused rather than reinterpreted.
+  The `dcf-result-contract-v3-admissible-growth`,
+  `reverse-dcf-solve-registry-v3-admissible-growth` and `reverse-growth-domain-v1`
+  identities, scope/conversion/boundary/sampling policies are part of replay rules.
+  Old outputs remain immutable; incompatible rules/code refuse replay rather than
+  reinterpreting a historical refusal or injecting a coverage approval.
 * **Provenance:** migration 019 adds append-only calibration records; trusted analyst
   admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.
   There is deliberately no public acquisition command. The loader reports rejected
-  candidate identities/reasons and refuses conflicting reviews for the same latest
-  period. Capture retains **all** calibration candidates, their exact source/accounting
+  candidate identities/reasons and applies the append-only current-basis review selection
+  above. Capture retains **all** calibration candidates, their exact source/accounting
   record JSON and content identity, not just the selected one. Numerical encoding v2
   binds calibration/economic-policy identities and source digests; older incompatible
   runs refuse `unsupported_rules_or_code` without changing their stored artifacts.

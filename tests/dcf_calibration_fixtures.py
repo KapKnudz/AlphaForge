@@ -1,8 +1,10 @@
 """Synthetic numerical disclosures only; never issuer or sector evidence."""
 
+from dataclasses import replace
 from datetime import date, timedelta
 
-from alphaforge.core.valuation.reinvestment import CALIBRATION_VERSION
+from alphaforge.core.valuation.growth_domain import GROWTH_DOMAIN_POLICY_VERSION, growth_fixed_basis
+from alphaforge.core.valuation.reinvestment import CALIBRATION_VERSION, calibration_identity
 from alphaforge.db.reinvestment import append_reinvestment_calibration
 
 
@@ -62,4 +64,42 @@ def synthetic_calibration_fixture(conn, cid, **kwargs):
     record["company_id"] = cid
     return append_reinvestment_calibration(
         conn, cid, record, as_of=date.fromisoformat(record["sources"]["capital_end"]["observed_on"])
+    )
+
+
+def synthetic_reverse_coverage(basis):
+    """An explicit synthetic analyst assertion, never suitable for issuer admission."""
+    return {
+        "version": GROWTH_DOMAIN_POLICY_VERSION,
+        "scope": "full_derived_domain",
+        "capital_timing": "year_one_installed",
+        "constant_margin_and_return_path": "conditional_for_full_derived_domain",
+        "fixed_basis": basis,
+        "starting_capacity_rationale": (
+            "SYNTHETIC TEST ONLY: assume installed year-one capacity covers R0*(1+x) "
+            "throughout the entire derived funding interval, with unchanged positive "
+            "margin, earnings/capital perimeter, maintenance and assumed marginal-return path."
+        ),
+        "approval_id": "synthetic-reverse-test-only",
+        "approved_on": "2026-06-01",
+    }
+
+
+def reviewed_growth_inputs(inputs):
+    """Bind direct-engine synthetic inputs to a separately stated coverage review."""
+    record = synthetic_record(future_return=inputs.assumptions.reinvestment_return)
+    context = {
+        "company_id": 1,
+        "as_of": "2026-06-01",
+        "currency": "SEK",
+        "packet_hash": "synthetic-test-packet",
+        "route_decision_identity": "synthetic-test-route",
+        "selected_history_identity": "synthetic-test-history",
+        "calibration_record": record,
+    }
+    inputs = replace(inputs, growth_domain_context=context)
+    record["reverse_growth_coverage"] = synthetic_reverse_coverage(growth_fixed_basis(inputs))
+    return replace(
+        inputs,
+        assumptions=replace(inputs.assumptions, calibration_identity=calibration_identity(record)),
     )

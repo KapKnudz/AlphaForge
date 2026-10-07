@@ -151,7 +151,7 @@ class DcfPolicyDecision:
 class DcfAssumptionPolicy:
     """Build auditable FCFF assumptions only from stored company evidence."""
 
-    VERSION = "reverse-dcf-v16-explicit-input-quality"
+    VERSION = "reverse-dcf-v17-admissible-growth-domain"
     INPUT_QUALITY_VERSION = "dcf-input-quality-v1-two-qualified-consecutive-annual-periods"
     REQUIRED_SELECTED_ANNUAL_PERIODS = 2
     PROJECTION_YEARS = FIXED_DEFAULT_ASSUMPTION_POLICY["projection_years"][0]
@@ -164,6 +164,8 @@ class DcfAssumptionPolicy:
     WINDOW_DISAGREEMENT = 0.05
     MATERIAL_INVESTING_MARGIN = 0.15
     EXTREME_INVESTING_YEAR = 0.30
+    # Compatibility declaration only: scope ceilings, not executable growth bounds.
+    # Per-input funded bounds and the requested interval live in solve eligibility.
     SOLVE_BOUNDS = {
         axis: (definition.lower_bound, definition.upper_bound)
         for axis, definition in SOLVE_AXIS_REGISTRY.items()
