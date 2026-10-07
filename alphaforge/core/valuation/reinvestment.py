@@ -29,6 +29,12 @@ def calibration_identity(record: dict) -> str:
     return sha256(calibration_json(record).encode()).hexdigest()
 
 
+def calibration_operands_identity(record: dict) -> str:
+    return calibration_identity(
+        {key: value for key, value in record.items() if key != "reverse_growth_coverage"}
+    )
+
+
 @dataclass(frozen=True)
 class ReinvestmentCalibration:
     identity: str

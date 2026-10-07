@@ -47,7 +47,10 @@ from alphaforge.core.valuation.dividend_yield import (
 )
 from alphaforge.core.valuation.growth_domain import growth_history_identity
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
-from alphaforge.core.valuation.reinvestment import qualify_calibration
+from alphaforge.core.valuation.reinvestment import (
+    calibration_operands_identity,
+    qualify_calibration,
+)
 from alphaforge.core.valuation.reverse_dcf import (
     UnsupportedEconomicPolicy,
     UnsupportedValuationModel,
@@ -84,21 +87,33 @@ def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, curren
             qualified = qualify_calibration(record, as_of=cutoff, currency=currency, tax_rate=0.21)
             if qualified.identity != row["identity"]:
                 raise ValueError("calibration content identity mismatch")
-            admitted.append((record["period_end"], qualified.identity, record))
+            admitted.append(
+                (
+                    record["period_end"],
+                    qualified.identity,
+                    calibration_operands_identity(record),
+                    "reverse_growth_coverage" in record,
+                    record,
+                )
+            )
             reason = None
         except (ValueError, TypeError, KeyError, OverflowError, AttributeError) as exc:
             reason = str(exc)
         candidates.append({"identity": row["identity"], "rejection_reason": reason})
-    selected = max(admitted, key=lambda x: (x[0], x[1])) if admitted else None
-    # Conflicting reviews for the same latest fiscal period require a new review,
-    # not a hash-order business choice.
-    if selected and sum(x[0] == selected[0] for x in admitted) > 1:
-        return None, {
-            "selected_identity": None,
-            "candidates": candidates,
-            "refusal": "ambiguous_calibration",
-        }
-    return (selected[2] if selected else None), {
+    selected = None
+    if admitted:
+        latest_period = max(item[0] for item in admitted)
+        latest = [item for item in admitted if item[0] == latest_period]
+        operand_identities = {item[2] for item in latest}
+        reviewed = [item for item in latest if item[3]]
+        if len(operand_identities) > 1 or len(reviewed) > 1:
+            return None, {
+                "selected_identity": None,
+                "candidates": candidates,
+                "refusal": "ambiguous_calibration",
+            }
+        selected = reviewed[0] if reviewed else latest[0]
+    return (selected[4] if selected else None), {
         "selected_identity": selected[1] if selected else None,
         "candidates": candidates,
     }

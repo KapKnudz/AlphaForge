@@ -279,9 +279,16 @@ class ReverseDcfEngine:
             if coverage_error:
                 raise UnsupportedEconomicPolicy(coverage_error)
             certificate = derive_growth_domain(inputs, metadata.fixed_assumptions)
+            requested_bounds = metadata.domain.get("requested_bounds")
             expected_domain = {
                 **certificate,
-                "requested_bounds": metadata.domain.get("requested_bounds"),
+                "requested_bounds": requested_bounds,
+                "request_coverage": (
+                    "full_derived_domain"
+                    if requested_bounds
+                    == [certificate["lower_bound"], certificate["upper_bound"]]
+                    else "restricted_interval"
+                ),
             }
             if metadata.domain != expected_domain:
                 raise ValueError("solve eligibility domain does not match derived certificate")

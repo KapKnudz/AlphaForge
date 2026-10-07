@@ -32,14 +32,16 @@ from alphaforge.core.valuation.growth_domain import (
     growth_coverage_error,
     growth_history_identity,
 )
+from alphaforge.core.valuation.reinvestment import calibration_identity
 from alphaforge.core.valuation.reverse_dcf import (
     DcfAssumptions,
     ReverseDcfEngine,
     ReverseDcfInputs,
     UnsupportedEconomicPolicy,
+    forward_investment,
 )
 from alphaforge.core.valuation.solve_eligibility import solve_axis_metadata, solve_input_identity
-from alphaforge.db.numerical_runs import ReplayRefusal, canonical, replay_run
+from alphaforge.db.numerical_runs import ReplayRefusal, canonical, digest, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
 
 
@@ -72,11 +74,8 @@ def public_fixture(target=13, q=0.20, review=True):
     conn.execute("UPDATE prices SET close=?", (target,))
     record = synthetic_record(future_return=q)
     record["company_id"] = cid
-    conn.execute("SAVEPOINT provisional_synthetic_review")
     append_reinvestment_calibration(conn, cid, record, as_of=date.fromisoformat(CUTOFF))
     if review:
-        # Synthetic setup only: inspect the fixed basis BEFORE candidate evaluation.
-        # This is an explicit test analyst assertion, not a production backfill.
         unreviewed = load_results_for_company(
             conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route()
         )
@@ -85,10 +84,7 @@ def public_fixture(target=13, q=0.20, review=True):
         ]
         assert unreviewed["reverse_dcf"]["implied"]["revenue_growth"]["candidate_roots"] == []
         record["reverse_growth_coverage"] = synthetic_reverse_coverage(basis)
-        # Roll back provisional setup before admitting the reviewed synthetic fixture.
-        conn.execute("ROLLBACK TO provisional_synthetic_review")
         append_reinvestment_calibration(conn, cid, record, as_of=date.fromisoformat(CUTOFF))
-    conn.execute("RELEASE provisional_synthetic_review")
     conn.commit()
     return conn, cid
 
@@ -118,6 +114,7 @@ def test_public_full_funded_domain_and_frozen_replay(
     assert d["lower_bound"] == 0
     assert d["upper_bound"] == 0.26
     assert d["requested_bounds"] == [0, 0.26]
+    assert d["request_coverage"] == "full_derived_domain"
     assert d["binding_constraints"] == ["funding_year_1"]
     assert d["interval_validation"] == "analytic_real_economics"
     assert d["coverage_approval"]["approval_id"] == "synthetic-reverse-test-only"
@@ -286,6 +283,13 @@ def test_requested_interval_is_refused_not_clipped(lo, hi, reason):
                 inputs, assumptions=replace(inputs.assumptions, revenue_growth=lo if lo < 0 else hi)
             )
         )
+    if hi == 0.261:
+        first_nopat = 121 * (1 + hi) * 0.20 * (1 - 0.21)
+        next_growth = 0.75 * hi + 0.25 * 0.02
+        next_nopat = first_nopat * (1 + next_growth)
+        investment = forward_investment(first_nopat, next_nopat, 0.20)
+        assert next_growth == pytest.approx(0.20075)
+        assert investment / first_nopat == pytest.approx(1.00375)
 
 
 @pytest.mark.parametrize(
@@ -306,6 +310,35 @@ def test_empty_and_singleton_domains_do_not_become_searches(q, reason):
         assert ReverseDcfEngine().value(inputs).value_per_share == pytest.approx(10.215752526360529)
 
 
+def test_domain_failures_precede_missing_interval_coverage():
+    for q, expected in (
+        (0.004, "empty_admissible_domain"),
+        (0.005, "degenerate_admissible_domain"),
+    ):
+        inputs = mature_inputs(q=q, growth=0)
+        record = json.loads(canonical(inputs.growth_domain_context["calibration_record"]))
+        record.pop("reverse_growth_coverage")
+        inputs = replace(
+            inputs,
+            growth_domain_context={**inputs.growth_domain_context, "calibration_record": record},
+            assumptions=replace(inputs.assumptions, calibration_identity=calibration_identity(record)),
+        )
+        metadata = verified_growth_metadata(inputs)
+        assert metadata.status == "domain_unavailable"
+        assert metadata.reason == expected
+
+
+@pytest.mark.parametrize("q", [0.004, 0.005, 0.006])
+def test_public_low_return_forward_refusal_never_reaches_reverse_search(q):
+    conn, cid = public_fixture(q=q)
+    result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())[
+        "reverse_dcf"
+    ]
+    assert result["dcf"]["status"] == "domain_unavailable"
+    assert result["dcf"]["reason"] == "unsupported_financing"
+    assert result.get("implied", {}) == {}
+
+
 @pytest.mark.parametrize("q,upper", [(0.02, 0.02), (0.15, 0.1933333333333333)])
 def test_strict_numerical_boundary_failure_refuses_whole_interval(q, upper):
     inputs = mature_inputs(q=q, growth=0)
@@ -318,6 +351,12 @@ def test_strict_numerical_boundary_failure_refuses_whole_interval(q, upper):
     assert result["boundary_evaluation_failure"]
     assert result["candidate_roots"] == []
     assert "lower_endpoint_price" not in result
+
+
+def test_raw_displayed_boundary_remains_a_strict_financing_refusal():
+    inputs = mature_inputs(q=0.15, growth=0.19333333333333333)
+    with pytest.raises(UnsupportedEconomicPolicy, match="unsupported_financing"):
+        ReverseDcfEngine().value(inputs)
 
 
 def test_small_interval_can_have_decreasing_prices_and_scope_ceiling_can_bind():
@@ -359,28 +398,55 @@ def test_restricted_request_and_brackets_are_bound_to_declared_coverage():
     assert g["solution_status"] == "no_candidate_solution"
     assert g["eligibility"]["domain"]["upper_bound"] == 0.26
     assert g["eligibility"]["domain"]["requested_bounds"] == [0, 0.08]
+    assert g["eligibility"]["domain"]["request_coverage"] == "restricted_interval"
+    assert meta.input_identity != verified_growth_metadata(inputs).input_identity
     with pytest.raises(ValueError, match="requested interval"):
         ReverseDcfEngine().solve(inputs, "revenue_growth", 0.08, 0.09, eligibility=meta)
     with pytest.raises(ValueError, match="full requested interval"):
         ReverseDcfEngine().diagnose_solve_range(inputs, "revenue_growth", 0, 0.04, eligibility=meta)
 
 
-@pytest.mark.parametrize("field", ["current_revenue", "discount_rate", "packet_hash", "approval"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "current_revenue",
+        "ebit_margin",
+        "discount_rate",
+        "reinvestment_return",
+        "packet_hash",
+        "route_decision_identity",
+        "selected_history_identity",
+        "calibration_operands_identity",
+        "approval",
+    ],
+)
 def test_stale_coverage_and_tampered_certificate_are_rejected(field):
     inputs = mature_inputs()
     if field == "current_revenue":
         inputs = replace(inputs, current_revenue=122)
+    elif field == "ebit_margin":
+        inputs = replace(
+            inputs,
+            assumptions=replace(inputs.assumptions, ebit_margin=0.21, ebit_margin_start=0.21),
+        )
     elif field == "discount_rate":
         inputs = replace(inputs, assumptions=replace(inputs.assumptions, discount_rate=0.135))
-    elif field == "packet_hash":
+    elif field == "reinvestment_return":
+        inputs = replace(inputs, assumptions=replace(inputs.assumptions, reinvestment_return=0.19))
+    elif field in {
+        "packet_hash",
+        "route_decision_identity",
+        "selected_history_identity",
+    }:
         inputs = replace(
-            inputs, growth_domain_context={**inputs.growth_domain_context, "packet_hash": "other"}
+            inputs, growth_domain_context={**inputs.growth_domain_context, field: "other"}
         )
     else:
         record = json.loads(canonical(inputs.growth_domain_context["calibration_record"]))
-        record["reverse_growth_coverage"]["approved_on"] = "2026-06-02"
-        from alphaforge.core.valuation.reinvestment import calibration_identity
-
+        if field == "calibration_operands_identity":
+            record["future_return_rationale"] = "different synthetic reviewed rationale"
+        else:
+            record["reverse_growth_coverage"]["approved_on"] = "2026-06-02"
         inputs = replace(
             inputs,
             growth_domain_context={**inputs.growth_domain_context, "calibration_record": record},
@@ -397,6 +463,23 @@ def test_stale_coverage_and_tampered_certificate_are_rejected(field):
     tampered = replace(tampered, input_identity=solve_input_identity(original, tampered))
     with pytest.raises(ValueError, match="derived certificate"):
         ReverseDcfEngine().solve(original, "revenue_growth", 0, 0.30, eligibility=tampered)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("current_price", 0),
+        ("shares_outstanding", 0),
+        ("current_revenue", 0),
+        ("net_debt", float("inf")),
+        ("branch_id", True),
+    ],
+)
+def test_unqualified_fixed_inputs_never_emit_a_certificate(field, value):
+    metadata = verified_growth_metadata(replace(mature_inputs(), **{field: value}))
+    assert metadata.status == "invalid_input"
+    assert metadata.reason == "invalid_growth_domain_inputs"
+    assert "certificate_identity" not in metadata.domain
 
 
 def test_provenance_changes_certificate_identity_without_changing_funding_bounds():
@@ -440,6 +523,57 @@ def test_public_scope_ceiling_can_bind_without_financing_relaxation(monkeypatch,
     assert g["diagnostic_grid_points"] == 201
     row = conn.execute("SELECT run_id,outputs FROM executed_numerical_runs").fetchone()
     assert replay_run(conn, row["run_id"])["outputs"] == json.loads(row["outputs"])
+
+
+def test_append_only_coverage_successor_preserves_conflict_detection():
+    conn, cid = public_fixture()
+    selection = load_results_for_company(
+        conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route()
+    )["selection"]["reinvestment_calibration"]
+    assert selection.get("refusal") is None
+    assert len(selection["candidates"]) == 2
+    conflicting = synthetic_record(future_return=0.25)
+    conflicting["company_id"] = cid
+    append_reinvestment_calibration(conn, cid, conflicting, as_of=date.fromisoformat(CUTOFF))
+    result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())
+    assert result["selection"]["reinvestment_calibration"]["refusal"] == "ambiguous_calibration"
+    assert result["reverse_dcf"]["dcf"]["status"] == "insufficient_evidence"
+
+
+def test_rule_scope_conversion_and_sampling_changes_are_identity_bound(monkeypatch):
+    import alphaforge.db.numerical_runs as numerical_runs
+
+    original = rules_bundle()["growth_domain"]
+    changes = (
+        ("GROWTH_DOMAIN_POLICY_VERSION", "different-domain-rule"),
+        ("GROWTH_SCOPE", (0.0, 0.29)),
+        ("ENDPOINT_CONVERSION", "different-directed-conversion"),
+        ("SAMPLE_INTERVALS", 199),
+    )
+    for name, value in changes:
+        with monkeypatch.context() as patch:
+            patch.setattr(numerical_runs, name, value)
+            assert digest(rules_bundle()["growth_domain"]) != digest(original)
+
+
+def test_private_authentic_snapshot_remains_unavailable():
+    snapshot = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_SNAPSHOT")
+    cutoff = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_AS_OF")
+    if not snapshot or not cutoff:
+        pytest.skip("private authentic DCF snapshot not supplied")
+    path = Path(snapshot).resolve()
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    expected = {"BACTI B", "CLAS B", "EVO", "MIPS"}
+    rows = conn.execute(
+        "SELECT id,ticker FROM companies WHERE ticker IN ('BACTI B','CLAS B','EVO','MIPS')"
+    ).fetchall()
+    assert {row["ticker"] for row in rows} == expected
+    for row in rows:
+        result = load_results_for_company(conn, row["id"], cutoff)["reverse_dcf"]
+        growth = result.get("implied", {}).get("revenue_growth")
+        assert result["dcf"]["status"] != "available"
+        assert growth is None or growth["candidate_roots"] == []
 
 
 def test_interval_certificate_is_exact_and_contains_all_six_funding_rows():

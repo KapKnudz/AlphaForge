@@ -34,6 +34,8 @@ from alphaforge.core.valuation.dividend_yield import (
 )
 from alphaforge.core.valuation.growth_domain import (
     ASSUMPTION_TOLERANCE,
+    CERTIFICATE_ARITHMETIC,
+    ENDPOINT_CONVERSION,
     GROWTH_DOMAIN_POLICY_VERSION,
     GROWTH_SCOPE,
     MAX_ITERATIONS,
@@ -174,8 +176,8 @@ def rules_bundle() -> dict:
         "growth_domain": {
             "version": GROWTH_DOMAIN_POLICY_VERSION,
             "scope_bounds": GROWTH_SCOPE,
-            "certificate_arithmetic": "exact rational binary operands",
-            "endpoint_conversion": "directed inward float conversion",
+            "certificate_arithmetic": CERTIFICATE_ARITHMETIC,
+            "endpoint_conversion": ENDPOINT_CONVERSION,
             "boundary_failure_policy": "refuse whole requested axis; no inward retry or epsilon",
             "sample_intervals": SAMPLE_INTERVALS,
             "price_tolerance": PRICE_TOLERANCE,

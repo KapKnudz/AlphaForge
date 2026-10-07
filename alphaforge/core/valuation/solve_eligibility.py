@@ -293,20 +293,19 @@ def solve_axis_metadata(
     prerequisites = tuple(prerequisites_list)
 
     status, reason = definition.status, definition.reason
-    if status == "supported":
-        unmet = next(
-            (
-                item
-                for item in prerequisites
-                if item["status"] != "met"
-                or not item["evidence_references"]
-                and item["name"] != "fixed_assumptions_with_provenance"
-            ),
-            None,
-        )
-        if unmet is not None:
-            status = "insufficient_evidence"
-            reason = unmet["reason"] or f"solve_evidence_unavailable:{unmet['name']}"
+    unmet = next(
+        (
+            item
+            for item in prerequisites
+            if item["status"] != "met"
+            or not item["evidence_references"]
+            and item["name"] != "fixed_assumptions_with_provenance"
+        ),
+        None,
+    )
+    if status == "supported" and unmet is not None:
+        status = "insufficient_evidence"
+        reason = unmet["reason"] or f"solve_evidence_unavailable:{unmet['name']}"
 
     domain = {
         "lower_bound": definition.lower_bound,
@@ -316,18 +315,53 @@ def solve_axis_metadata(
     }
     if axis == "revenue_growth":
         domain = {"scope_bounds": list(GROWTH_SCOPE), "lower_bound": None, "upper_bound": None}
-        if inputs is not None and fixed_provenance_complete:
+        coverage = next(
+            item
+            for item in prerequisites
+            if item["name"] == "full_interval_starting_capital_coverage"
+        )
+        ordinary_unmet = next(
+            (
+                item
+                for item in prerequisites
+                if item["name"] != "full_interval_starting_capital_coverage"
+                and (
+                    item["status"] != "met"
+                    or not item["evidence_references"]
+                    and item["name"] != "fixed_assumptions_with_provenance"
+                )
+            ),
+            None,
+        )
+        if definition.status == "supported" and ordinary_unmet is not None:
+            status = "insufficient_evidence"
+            reason = ordinary_unmet["reason"] or (
+                f"solve_evidence_unavailable:{ordinary_unmet['name']}"
+            )
+        elif inputs is not None and fixed_provenance_complete:
             try:
                 domain = derive_growth_domain(inputs, fixed)
-                if status == "supported" and domain["reason"]:
+                if domain["reason"]:
                     status, reason = "domain_unavailable", domain["reason"]
+                elif coverage["status"] != "met" or not coverage["evidence_references"]:
+                    status = "insufficient_evidence"
+                    reason = coverage["reason"] or (
+                        "solve_evidence_unavailable:full_interval_starting_capital_coverage"
+                    )
+                else:
+                    status, reason = definition.status, definition.reason
             except ValueError as exc:
-                if status == "supported":
-                    status, reason = "invalid_input", str(exc)
-        domain["requested_bounds"] = (
+                status, reason = "invalid_input", str(exc)
+        request = (
             list(requested_bounds)
             if requested_bounds is not None
             else [domain["lower_bound"], domain["upper_bound"]]
+        )
+        domain["requested_bounds"] = request
+        domain["request_coverage"] = (
+            "full_derived_domain"
+            if request == [domain["lower_bound"], domain["upper_bound"]]
+            else "restricted_interval"
         )
 
     metadata = SolveAxisMetadata(

@@ -12,12 +12,14 @@ from math import inf, isfinite, nextafter
 
 from alphaforge.core.valuation.reinvestment import (
     ECONOMIC_CONVENTION,
-    calibration_identity,
+    calibration_operands_identity,
     qualify_calibration,
 )
 
 GROWTH_DOMAIN_POLICY_VERSION = "reverse-growth-domain-v1"
 GROWTH_SCOPE = (0.0, 0.30)
+CERTIFICATE_ARITHMETIC = "exact rational binary operands"
+ENDPOINT_CONVERSION = "directed inward float conversion"
 SAMPLE_INTERVALS = 200
 PRICE_TOLERANCE = 1e-6
 ASSUMPTION_TOLERANCE = 1e-10
@@ -73,9 +75,7 @@ def growth_fixed_basis(inputs) -> dict:
         "packet_hash": context.get("packet_hash"),
         "route_decision_identity": context.get("route_decision_identity"),
         "selected_history_identity": context.get("selected_history_identity"),
-        "calibration_operands_identity": calibration_identity(
-            {key: value for key, value in record.items() if key != "reverse_growth_coverage"}
-        ),
+        "calibration_operands_identity": calibration_operands_identity(record),
     }
 
 
@@ -136,12 +136,22 @@ def _exact(value: Fraction) -> dict:
 def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
     """Intersect every affine funding constraint before any price evaluation."""
     a = inputs.assumptions
+    fixed_inputs = (
+        inputs.current_price,
+        inputs.shares_outstanding,
+        inputs.current_revenue,
+        inputs.net_debt,
+    )
     operands = (
+        a.revenue_growth,
         a.reinvestment_return,
         a.discount_rate,
         a.terminal_growth,
         a.ebit_margin,
         a.tax_rate,
+        a.net_reinvestment_rate,
+        a.revenue_growth_fade_to,
+        a.ebit_margin_start,
     )
     if (
         type(a.projection_years) is not int
@@ -149,8 +159,15 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         or a.economic_convention != ECONOMIC_CONVENTION
         or any(
             isinstance(x, bool) or not isinstance(x, (float, int)) or not isfinite(x)
-            for x in operands
+            for x in fixed_inputs + operands
         )
+        or inputs.current_price <= 0
+        or inputs.shares_outstanding <= 0
+        or inputs.current_revenue <= 0
+        or isinstance(inputs.branch_id, bool)
+        or inputs.branch_id is not None
+        and (not isinstance(inputs.branch_id, int) or inputs.branch_id <= 0)
+        or a.revenue_growth < 0
         or a.reinvestment_return <= 0
         or a.discount_rate <= 0
         or a.ebit_margin <= 0
@@ -165,7 +182,9 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         raise ValueError("varying_margin_capital_evidence_unavailable")
     if a.revenue_growth_fade_to != a.terminal_growth:
         raise ValueError("explicit growth endpoint must equal terminal growth")
-    q, r, t = map(Fraction, operands[:3])
+    q, r, t = map(
+        Fraction, (a.reinvestment_return, a.discount_rate, a.terminal_growth)
+    )
     funding_returns = [q + (r - q) * Fraction(index, 4) for index in range(4)] + [r, r]
     limits = [
         (funding_returns[index] - t * Fraction(index + 1, 4)) / (1 - Fraction(index + 1, 4))
@@ -220,7 +239,8 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         "constraints": constraints,
         "binding_constraints": (["scope_ceiling"] if upper == Fraction(GROWTH_SCOPE[1]) else [])
         + [f"funding_year_{index + 1}" for index, limit in enumerate(limits) if limit == upper],
-        "endpoint_conversion": "exact rational binary operands; directed inward float conversion",
+        "certificate_arithmetic": CERTIFICATE_ARITHMETIC,
+        "endpoint_conversion": ENDPOINT_CONVERSION,
         "interval_validation": "analytic_real_economics",
         "coverage_approval": record.get("reverse_growth_coverage"),
     }
