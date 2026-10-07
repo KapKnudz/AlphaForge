@@ -405,14 +405,13 @@ to an older eligible observation. History-window filtering precedes retained
 object lookup and verification, so an expired artifact cannot block a current
 read.
 
-New PDF bytes are retained by `LocalPdfArtifactStore` below
-`data/evidence/objects/sha256/` under their lowercase SHA-256. Writes use a
-same-filesystem temporary file and install without replacement; reads verify
-hash, size, PDF magic, and resource limits. Missing or corrupt retained objects
-fail with typed `artifact_unavailable` / `artifact_checksum_mismatch` outcomes
-and never trigger URL or cross-release substitution. The immutable DB record
-stores a relative `file:` object URI; legacy attachment hashes without retained
-bytes remain audit-only until exact bytes are reacquired and verified.
+PDF retention roots and caller pairing are defined in
+[Immutable PDF object storage](#immutable-pdf-object-storage). Missing or corrupt
+retained objects fail with typed `artifact_unavailable` /
+`artifact_checksum_mismatch` outcomes and never trigger URL or cross-release
+substitution. The immutable DB record stores a relative `file:` object URI;
+legacy attachment hashes without retained bytes remain audit-only until exact
+bytes are reacquired and verified.
 
 Packets stamp the consumed `selection_manifest_id`. The bounded AQ inventory
 and defective-run provenance live authoritatively in
