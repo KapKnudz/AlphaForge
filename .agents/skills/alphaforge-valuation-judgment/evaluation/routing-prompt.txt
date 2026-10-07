@@ -1,0 +1,10 @@
+This is a routing-only probe; do not perform any task, inspect task evidence, or edit files. For each situation below, decide which advertised skill(s), if any, you would load before financial judgment. Read candidate skill instructions when selecting them as in an ordinary session. Report selection and reason per ID. Do not assume that saying ambiguity alone is a trigger.
+
+P1: A financial review asks whether retail ROCE can be the future incremental return in a mature forecast.
+P2: Reported EBIT contains an acquisition liability gain; the analyst wants to compare it to adjusted recurring profit.
+P3: Newly acquired closing capital and pre-acquisition full-year earnings are paired, with EUR/SEK operands. Can this ratio enter valuation?
+P4: Every PDF is present yet valuation refuses after tests pass. Does this indicate a financial bug or missing qualification?
+P5: A software supplier sells to banks; should it be valued as a bank? A profitable quarter coexists with annual negative EBIT.
+N1: Make a UI button blue without changing valuation data or text meaning.
+N2: Format a Markdown table of already approved financial figures, preserving every value and label.
+N3: Mechanically rename a local variable and preserve all financial formulas, inputs and outputs.

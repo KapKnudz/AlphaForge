@@ -28,8 +28,10 @@ The deterministic core, not this helper, enforces AlphaForge admission/refusals.
 
 Use synthetic facts; keep authentic source data and evaluation transcripts
 private. No live-model CI, evaluation platform or production changes are required.
-Check discovery with the runtime's actual loader/startup, not a grep for skill
-text. Then use these representative prompts:
+For the exact initial synthetic prompts, three read-only Pi commands and trace
+interpretation, see [repeatable evaluation](evaluation/README.md). Check discovery
+with the runtime's actual loader/startup, not a grep for skill text. These are the
+representative situations covered:
 
 | Prompt situation | Expected selection / conclusion |
 | --- | --- |
