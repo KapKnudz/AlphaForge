@@ -26,6 +26,15 @@ ASSUMPTION_TOLERANCE = 1e-10
 MAX_ITERATIONS = 200
 
 
+def growth_numerical_policy() -> dict:
+    return {
+        "sample_intervals": SAMPLE_INTERVALS,
+        "price_tolerance": PRICE_TOLERANCE,
+        "assumption_tolerance": ASSUMPTION_TOLERANCE,
+        "max_iterations": MAX_ITERATIONS,
+    }
+
+
 def domain_digest(value) -> str:
     def encode(item):
         if isinstance(item, date):
@@ -167,6 +176,7 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         or isinstance(inputs.branch_id, bool)
         or inputs.branch_id is not None
         and (not isinstance(inputs.branch_id, int) or inputs.branch_id <= 0)
+        or inputs.branch_id in {68, 69, 70, 75}
         or a.revenue_growth < 0
         or a.reinvestment_return <= 0
         or a.discount_rate <= 0
@@ -242,6 +252,7 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         "certificate_arithmetic": CERTIFICATE_ARITHMETIC,
         "endpoint_conversion": ENDPOINT_CONVERSION,
         "interval_validation": "analytic_real_economics",
+        "numerical_policy": growth_numerical_policy(),
         "coverage_approval": record.get("reverse_growth_coverage"),
     }
     return {

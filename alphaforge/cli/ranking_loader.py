@@ -45,7 +45,10 @@ from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
 )
-from alphaforge.core.valuation.growth_domain import growth_history_identity
+from alphaforge.core.valuation.growth_domain import (
+    growth_coverage_error,
+    growth_history_identity,
+)
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.reinvestment import (
     calibration_operands_identity,
@@ -67,7 +70,14 @@ SELECTION_VERSION = "verified-dates-consecutive-annual-denomination-v1"
 MAX_PRICE_AGE_DAYS = 7
 
 
-def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, currency: str | None):
+def _select_reinvestment_calibration(
+    conn,
+    company_id: int,
+    cutoff: date,
+    currency: str | None,
+    *,
+    growth_inputs=None,
+):
     """Retain rejection reasons; deterministic choice by fiscal end/content identity."""
     if not conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reinvestment_calibrations'"
@@ -106,13 +116,57 @@ def _select_reinvestment_calibration(conn, company_id: int, cutoff: date, curren
         latest = [item for item in admitted if item[0] == latest_period]
         operand_identities = {item[2] for item in latest}
         reviewed = [item for item in latest if item[3]]
-        if len(operand_identities) > 1 or len(reviewed) > 1:
+        unreviewed = [item for item in latest if not item[3]]
+        if len(operand_identities) > 1:
             return None, {
                 "selected_identity": None,
                 "candidates": candidates,
                 "refusal": "ambiguous_calibration",
             }
-        selected = reviewed[0] if reviewed else latest[0]
+        if growth_inputs is None:
+            if unreviewed:
+                selected = unreviewed[0]
+            elif len(reviewed) == 1:
+                selected = reviewed[0]
+            else:
+                return None, {
+                    "selected_identity": None,
+                    "candidates": candidates,
+                    "refusal": "ambiguous_calibration",
+                }
+        else:
+            matching = []
+            for item in reviewed:
+                candidate_inputs = replace(
+                    growth_inputs,
+                    assumptions=replace(
+                        growth_inputs.assumptions, calibration_identity=item[1]
+                    ),
+                    growth_domain_context={
+                        **growth_inputs.growth_domain_context,
+                        "calibration_record": item[4],
+                    },
+                )
+                if growth_coverage_error(candidate_inputs) is None:
+                    matching.append(item)
+            if len(matching) > 1:
+                return None, {
+                    "selected_identity": None,
+                    "candidates": candidates,
+                    "refusal": "ambiguous_calibration",
+                }
+            if matching:
+                selected = matching[0]
+            elif len(reviewed) == 1:
+                selected = reviewed[0]
+            elif unreviewed:
+                selected = unreviewed[0]
+            else:
+                return None, {
+                    "selected_identity": None,
+                    "candidates": candidates,
+                    "refusal": "ambiguous_calibration",
+                }
     return (selected[4] if selected else None), {
         "selected_identity": selected[1] if selected else None,
         "candidates": candidates,
@@ -2049,6 +2103,43 @@ def load_results_for_company(
                             "calibration_record": calibration_record,
                         },
                     )
+                    current_calibration, current_selection = _select_reinvestment_calibration(
+                        conn,
+                        company_id,
+                        cutoff,
+                        dcf_current_report.currency,
+                        growth_inputs=dcf_inputs,
+                    )
+                    selection["reinvestment_calibration"] = current_selection
+                    if current_calibration is None:
+                        raise ValueError(current_selection.get("refusal", "ambiguous_calibration"))
+                    if current_selection["selected_identity"] != calibration_selection[
+                        "selected_identity"
+                    ]:
+                        selected_calibration = qualify_calibration(
+                            current_calibration,
+                            as_of=cutoff,
+                            currency=dcf_current_report.currency,
+                            tax_rate=dcf_policy_decision.assumptions.tax_rate,
+                        )
+                        selected_assumptions = replace(
+                            dcf_policy_decision.assumptions,
+                            calibration_identity=selected_calibration.identity,
+                        )
+                        dcf_policy_decision = replace(
+                            dcf_policy_decision,
+                            assumptions=selected_assumptions,
+                            calibration=selected_calibration,
+                        )
+                        calibration_record = current_calibration
+                        dcf_inputs = replace(
+                            dcf_inputs,
+                            assumptions=selected_assumptions,
+                            growth_domain_context={
+                                **dcf_inputs.growth_domain_context,
+                                "calibration_record": calibration_record,
+                            },
+                        )
                     engine = ReverseDcfEngine()
                     dcf_value = engine.value(dcf_inputs)
                     reverse_dcf["dcf"] = {

@@ -43,6 +43,7 @@ from alphaforge.core.valuation.reverse_dcf import (
 from alphaforge.core.valuation.solve_eligibility import solve_axis_metadata, solve_input_identity
 from alphaforge.db.numerical_runs import ReplayRefusal, canonical, digest, replay_run, rules_bundle
 from alphaforge.db.reinvestment import append_reinvestment_calibration
+from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
 
 
 def mature_inputs(q=0.20, target=13, growth=0.10):
@@ -117,6 +118,12 @@ def test_public_full_funded_domain_and_frozen_replay(
     assert d["request_coverage"] == "full_derived_domain"
     assert d["binding_constraints"] == ["funding_year_1"]
     assert d["interval_validation"] == "analytic_real_economics"
+    assert d["numerical_policy"] == {
+        "sample_intervals": 200,
+        "price_tolerance": 1e-6,
+        "assumption_tolerance": 1e-10,
+        "max_iterations": 200,
+    }
     assert d["coverage_approval"]["approval_id"] == "synthetic-reverse-test-only"
     if target == 13:
         assert g["candidate_solution_count"] == 1
@@ -473,6 +480,8 @@ def test_stale_coverage_and_tampered_certificate_are_rejected(field):
         ("current_revenue", 0),
         ("net_debt", float("inf")),
         ("branch_id", True),
+        ("branch_id", 68),
+        ("branch_id", 75),
     ],
 )
 def test_unqualified_fixed_inputs_never_emit_a_certificate(field, value):
@@ -540,6 +549,105 @@ def test_append_only_coverage_successor_preserves_conflict_detection():
     assert result["reverse_dcf"]["dcf"]["status"] == "insufficient_evidence"
 
 
+def test_multiple_current_same_operand_approvals_remain_ambiguous():
+    conn, cid = public_fixture()
+    rows = conn.execute(
+        "SELECT record_json FROM reinvestment_calibrations WHERE company_id=?", (cid,)
+    ).fetchall()
+    reviewed = next(
+        json.loads(row["record_json"])
+        for row in rows
+        if "reverse_growth_coverage" in json.loads(row["record_json"])
+    )
+    reviewed["reverse_growth_coverage"]["approval_id"] = "competing-current-review"
+    append_reinvestment_calibration(conn, cid, reviewed, as_of=date.fromisoformat(CUTOFF))
+    result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())
+    assert result["selection"]["reinvestment_calibration"]["refusal"] == "ambiguous_calibration"
+    assert result["reverse_dcf"]["dcf"]["status"] == "invalid_input"
+
+
+def test_current_basis_reapproval_supersedes_stale_and_malformed_coverage():
+    conn, cid = public_fixture()
+    conn.execute("UPDATE prices SET close=110")
+    stale = load_results_for_company(
+        conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route()
+    )
+    stale_growth = stale["reverse_dcf"]["implied"]["revenue_growth"]
+    assert stale_growth["reason"] == "reverse_growth_coverage_basis_mismatch"
+    basis = stale_growth["eligibility"]["domain"]["fixed_basis"]
+    rows = conn.execute(
+        "SELECT record_json FROM reinvestment_calibrations WHERE company_id=?", (cid,)
+    ).fetchall()
+    base = next(
+        json.loads(row["record_json"])
+        for row in rows
+        if "reverse_growth_coverage" not in json.loads(row["record_json"])
+    )
+    malformed = json.loads(canonical(base))
+    malformed["reverse_growth_coverage"] = synthetic_reverse_coverage({"stale": True})
+    malformed["reverse_growth_coverage"]["approval_id"] = "malformed-stale-review"
+    append_reinvestment_calibration(conn, cid, malformed, as_of=date.fromisoformat(CUTOFF))
+    corrected = json.loads(canonical(base))
+    corrected["reverse_growth_coverage"] = synthetic_reverse_coverage(basis)
+    corrected["reverse_growth_coverage"]["approval_id"] = "current-basis-review"
+    append_reinvestment_calibration(conn, cid, corrected, as_of=date.fromisoformat(CUTOFF))
+    result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())
+    selection = result["selection"]["reinvestment_calibration"]
+    assert selection.get("refusal") is None
+    assert len(selection["candidates"]) == 4
+    growth = result["reverse_dcf"]["implied"]["revenue_growth"]
+    assert growth["status"] == "no_crossing"
+    assert (
+        growth["eligibility"]["domain"]["coverage_approval"]["approval_id"]
+        == "current-basis-review"
+    )
+
+
+def test_canonical_numerical_policy_is_identity_bound_and_enforced(monkeypatch):
+    import alphaforge.core.valuation.growth_domain as growth_domain
+
+    inputs = mature_inputs()
+    metadata = verified_growth_metadata(inputs)
+    original_identity = metadata.domain["certificate_identity"]
+    with monkeypatch.context() as patch:
+        patch.setattr(growth_domain, "SAMPLE_INTERVALS", 199)
+        changed = verified_growth_metadata(inputs)
+    assert changed.domain["numerical_policy"]["sample_intervals"] == 199
+    assert changed.domain["certificate_identity"] != original_identity
+    assert changed.input_identity != metadata.input_identity
+
+    class EvaluationTrap(ReverseDcfEngine):
+        def _value_with(self, *args):
+            raise AssertionError("noncanonical policy reached evaluation")
+
+    engine = EvaluationTrap()
+    with pytest.raises(ValueError, match="canonical numerical policy"):
+        engine.diagnose_solve_range(
+            inputs, "revenue_growth", 0, 0.26, sample_intervals=1, eligibility=metadata
+        )
+    with pytest.raises(ValueError, match="canonical numerical policy"):
+        engine.diagnose_solve_range(
+            inputs, "revenue_growth", 0, 0.26, price_tolerance=1e-5, eligibility=metadata
+        )
+    with pytest.raises(ValueError, match="canonical numerical policy"):
+        engine.solve(
+            inputs, "revenue_growth", 0, 0.26, price_tolerance=1e-5, eligibility=metadata
+        )
+    with pytest.raises(ValueError, match="canonical numerical policy"):
+        engine.solve(
+            inputs,
+            "revenue_growth",
+            0,
+            0.26,
+            assumption_tolerance=1e-9,
+            eligibility=metadata,
+        )
+    with pytest.raises(ValueError, match="canonical numerical policy"):
+        engine.solve(
+            inputs, "revenue_growth", 0, 0.26, max_iterations=1, eligibility=metadata
+        )
+
+
 def test_rule_scope_conversion_and_sampling_changes_are_identity_bound(monkeypatch):
     import alphaforge.db.numerical_runs as numerical_runs
 
@@ -559,21 +667,54 @@ def test_rule_scope_conversion_and_sampling_changes_are_identity_bound(monkeypat
 def test_private_authentic_snapshot_remains_unavailable():
     snapshot = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_SNAPSHOT")
     cutoff = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_AS_OF")
-    if not snapshot or not cutoff:
+    evidence_root = os.environ.get("ALPHAFORGE_AUTHENTIC_EVIDENCE_ROOT")
+    if not snapshot or not cutoff or not evidence_root:
         pytest.skip("private authentic DCF snapshot not supplied")
     path = Path(snapshot).resolve()
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
     conn.row_factory = sqlite3.Row
-    expected = {"BACTI B", "CLAS B", "EVO", "MIPS"}
+    store = LocalPdfArtifactStore(Path(evidence_root).resolve())
+    expected = {225: "BACTI B", 36: "CLAS B", 446: "EVO", 890: "MIPS"}
     rows = conn.execute(
-        "SELECT id,ticker FROM companies WHERE ticker IN ('BACTI B','CLAS B','EVO','MIPS')"
+        "SELECT id,ticker FROM companies WHERE id IN (225,36,446,890)"
     ).fetchall()
-    assert {row["ticker"] for row in rows} == expected
-    for row in rows:
-        result = load_results_for_company(conn, row["id"], cutoff)["reverse_dcf"]
-        growth = result.get("implied", {}).get("revenue_growth")
-        assert result["dcf"]["status"] != "available"
-        assert growth is None or growth["candidate_roots"] == []
+    assert {row["id"]: row["ticker"] for row in rows} == expected
+    results = {
+        row["id"]: load_results_for_company(
+            conn, row["id"], cutoff, artifact_store=store
+        )
+        for row in rows
+    }
+    assert results[225]["research_evidence"]["evidence_lane"] is False
+    assert results[36]["research_evidence"]["evidence_lane"] is False
+    assert results[446]["research_evidence"]["evidence_lane"] is True
+    assert results[890]["research_evidence"]["evidence_lane"] is True
+    for result in results.values():
+        reverse = result["reverse_dcf"]
+        assert reverse["dcf"]["status"] == "insufficient_evidence"
+        assert reverse["dcf"]["reason"] == "dated_positive_roic"
+        assert reverse["dcf"]["missing_information"] == ["dated_positive_roic"]
+        assert reverse["routing"]["status"] == "insufficient_evidence"
+        assert reverse["routing"]["reason"] == "archetype_unknown_or_mixed"
+        assert result["selection"]["reinvestment_calibration"] == {
+            "selected_identity": None,
+            "candidates": [],
+        }
+        assert result["dcf"]["implied"] == {}
+    bactiguard = results[225]
+    quality = bactiguard["selection"]["dcf_input_quality"]["decision"]
+    assert quality["available"] is False
+    assert quality["selected_depth"] == 1
+    assert quality["reasons"] == ["qualified_consecutive_annual_history_unavailable"]
+    assert bactiguard["selection"]["annual_history"]["period_ends"] == ["2025-12-31"]
+    assert bactiguard["selection"]["annual_history"]["reasons"] == [
+        "annual periods are not consecutive fiscal anniversaries"
+    ]
+    assert bactiguard["financial"].operating_margin < 0
+    annual_margin = bactiguard["reverse_dcf"]["dcf"]["normalized_financial_view"][
+        "normalization"
+    ]["selected_window"]["ebit_margin"]
+    assert annual_margin < 0
 
 
 def test_interval_certificate_is_exact_and_contains_all_six_funding_rows():

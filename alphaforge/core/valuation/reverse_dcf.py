@@ -404,6 +404,12 @@ class ReverseDcfEngine:
         eligibility: SolveAxisMetadata | None = None,
     ) -> ReverseDcfResult:
         self._solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility)
+        if assumption == "revenue_growth" and (
+            price_tolerance != PRICE_TOLERANCE
+            or assumption_tolerance != ASSUMPTION_TOLERANCE
+            or max_iterations != MAX_ITERATIONS
+        ):
+            raise ValueError("growth solve settings must match the canonical numerical policy")
         self._validate(inputs)
         if price_tolerance <= 0 or assumption_tolerance <= 0 or max_iterations <= 0:
             raise ValueError("solver tolerances and max_iterations must be positive")
@@ -525,6 +531,10 @@ class ReverseDcfEngine:
     ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
         self._solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility)
+        if assumption == "revenue_growth" and (
+            sample_intervals != SAMPLE_INTERVALS or price_tolerance != PRICE_TOLERANCE
+        ):
+            raise ValueError("growth diagnostics must match the canonical numerical policy")
         self._validate(inputs)
         if sample_intervals <= 0 or price_tolerance <= 0:
             raise ValueError("range diagnostic settings must be positive")
