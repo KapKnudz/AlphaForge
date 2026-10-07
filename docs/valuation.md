@@ -172,7 +172,12 @@ ranking never masquerades as a discounted-cash-flow.
   in those inequalities. Negative initial growth still refuses capital release;
   unfunded growth still refuses financing. No cash/debt recycling, spending cap,
   new year-zero spending, high-growth transition or margin economics are introduced.
-  An empty interval (`empty_admissible_domain`) or singleton
+  Certificate construction requires finite positive revenue, shares and current price,
+  finite net debt, a supported branch value, the fixed five-year convention/endpoints,
+  positive margin/returns and a legal tax rate. Ordinary route, history, calibration and
+  provenance qualification still precedes derivation; after those prerequisites pass,
+  invalid, empty or degenerate domain outcomes are reported before missing interval-wide
+  coverage. An empty interval (`empty_admissible_domain`) or singleton
   (`degenerate_admissible_domain`) refuses search rather than being widened.
   Affine constraints establish a continuous real-economic interval; hypothetical
   non-affine/holey domains require a different approved contract, not sampled clipping.
@@ -199,12 +204,19 @@ ranking never masquerades as a discounted-cash-flow.
   coverage, avoiding a circular hash; final calibration identity includes the review.
   History binds qualified operands and quality facts without DB surrogate ids.
   Qualification checks dates, structure and exact basis, not accounting truth.
-  Existing conflicting reviews for one fiscal period still refuse; no old record is edited.
+  At the latest fiscal period, genuinely different calibration operand identities remain
+  ambiguous. For one shared operand identity, the sole coverage review matching the current
+  fixed basis is selected; stale or malformed reviews remain retained but do not block a
+  corrected append. Multiple matching current reviews remain ambiguous. No old record is
+  edited.
 
   Derivation uses exact rational arithmetic over captured finite float operands and
   directed inward conversion to executable float endpoints. Public rank samples the
-  **full** derived interval (200 intervals/201 points), using the canonical `value()`
-  for each sample and bisection candidate. An explicitly restricted lower-level request
+  **full** derived interval (200 intervals/201 points), using price tolerance `1e-6`,
+  assumption tolerance `1e-10`, at most 200 bisection iterations and the canonical
+  `value()` for each sample and bisection candidate. These settings are certificate- and
+  run-identity inputs; this policy version refuses caller overrides. An explicitly
+  restricted lower-level request
   is separately recorded, identity-bound, and must lie wholly inside A. Out-of-domain
   requests refuse before sampling: never silently intersect, skip invalid samples or
   select a root-bearing subinterval. Internal brackets must remain inside that request.
@@ -283,8 +295,8 @@ ranking never masquerades as a discounted-cash-flow.
 * **Provenance:** migration 019 adds append-only calibration records; trusted analyst
   admission uses `alphaforge.db.reinvestment.append_reinvestment_calibration`.
   There is deliberately no public acquisition command. The loader reports rejected
-  candidate identities/reasons and refuses conflicting reviews for the same latest
-  period. Capture retains **all** calibration candidates, their exact source/accounting
+  candidate identities/reasons and applies the append-only current-basis review selection
+  above. Capture retains **all** calibration candidates, their exact source/accounting
   record JSON and content identity, not just the selected one. Numerical encoding v2
   binds calibration/economic-policy identities and source digests; older incompatible
   runs refuse `unsupported_rules_or_code` without changing their stored artifacts.

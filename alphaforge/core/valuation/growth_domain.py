@@ -192,9 +192,7 @@ def derive_growth_domain(inputs, fixed_assumptions: dict | None = None) -> dict:
         raise ValueError("varying_margin_capital_evidence_unavailable")
     if a.revenue_growth_fade_to != a.terminal_growth:
         raise ValueError("explicit growth endpoint must equal terminal growth")
-    q, r, t = map(
-        Fraction, (a.reinvestment_return, a.discount_rate, a.terminal_growth)
-    )
+    q, r, t = map(Fraction, (a.reinvestment_return, a.discount_rate, a.terminal_growth))
     funding_returns = [q + (r - q) * Fraction(index, 4) for index in range(4)] + [r, r]
     limits = [
         (funding_returns[index] - t * Fraction(index + 1, 4)) / (1 - Fraction(index + 1, 4))

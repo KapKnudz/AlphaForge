@@ -285,8 +285,7 @@ class ReverseDcfEngine:
                 "requested_bounds": requested_bounds,
                 "request_coverage": (
                     "full_derived_domain"
-                    if requested_bounds
-                    == [certificate["lower_bound"], certificate["upper_bound"]]
+                    if requested_bounds == [certificate["lower_bound"], certificate["upper_bound"]]
                     else "restricted_interval"
                 ),
             }

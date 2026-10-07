@@ -374,6 +374,6 @@ def solve_axis_metadata(
         fixed_assumptions=fixed,
         root_interpretation=definition.root_interpretation,
     )
-    if inputs is None:
+    if inputs is None or status == "invalid_input":
         return metadata
     return replace(metadata, input_identity=solve_input_identity(inputs, metadata))

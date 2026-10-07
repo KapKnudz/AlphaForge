@@ -328,7 +328,9 @@ def test_domain_failures_precede_missing_interval_coverage():
         inputs = replace(
             inputs,
             growth_domain_context={**inputs.growth_domain_context, "calibration_record": record},
-            assumptions=replace(inputs.assumptions, calibration_identity=calibration_identity(record)),
+            assumptions=replace(
+                inputs.assumptions, calibration_identity=calibration_identity(record)
+            ),
         )
         metadata = verified_growth_metadata(inputs)
         assert metadata.status == "domain_unavailable"
@@ -337,7 +339,7 @@ def test_domain_failures_precede_missing_interval_coverage():
 
 @pytest.mark.parametrize("q", [0.004, 0.005, 0.006])
 def test_public_low_return_forward_refusal_never_reaches_reverse_search(q):
-    conn, cid = public_fixture(q=q)
+    conn, cid = public_fixture(q=q, review=False)
     result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())[
         "reverse_dcf"
     ]
@@ -569,9 +571,7 @@ def test_multiple_current_same_operand_approvals_remain_ambiguous():
 def test_current_basis_reapproval_supersedes_stale_and_malformed_coverage():
     conn, cid = public_fixture()
     conn.execute("UPDATE prices SET close=110")
-    stale = load_results_for_company(
-        conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route()
-    )
+    stale = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())
     stale_growth = stale["reverse_dcf"]["implied"]["revenue_growth"]
     assert stale_growth["reason"] == "reverse_growth_coverage_basis_mismatch"
     basis = stale_growth["eligibility"]["domain"]["fixed_basis"]
@@ -630,9 +630,7 @@ def test_canonical_numerical_policy_is_identity_bound_and_enforced(monkeypatch):
             inputs, "revenue_growth", 0, 0.26, price_tolerance=1e-5, eligibility=metadata
         )
     with pytest.raises(ValueError, match="canonical numerical policy"):
-        engine.solve(
-            inputs, "revenue_growth", 0, 0.26, price_tolerance=1e-5, eligibility=metadata
-        )
+        engine.solve(inputs, "revenue_growth", 0, 0.26, price_tolerance=1e-5, eligibility=metadata)
     with pytest.raises(ValueError, match="canonical numerical policy"):
         engine.solve(
             inputs,
@@ -643,9 +641,7 @@ def test_canonical_numerical_policy_is_identity_bound_and_enforced(monkeypatch):
             eligibility=metadata,
         )
     with pytest.raises(ValueError, match="canonical numerical policy"):
-        engine.solve(
-            inputs, "revenue_growth", 0, 0.26, max_iterations=1, eligibility=metadata
-        )
+        engine.solve(inputs, "revenue_growth", 0, 0.26, max_iterations=1, eligibility=metadata)
 
 
 def test_rule_scope_conversion_and_sampling_changes_are_identity_bound(monkeypatch):
@@ -675,14 +671,10 @@ def test_private_authentic_snapshot_remains_unavailable():
     conn.row_factory = sqlite3.Row
     store = LocalPdfArtifactStore(Path(evidence_root).resolve())
     expected = {225: "BACTI B", 36: "CLAS B", 446: "EVO", 890: "MIPS"}
-    rows = conn.execute(
-        "SELECT id,ticker FROM companies WHERE id IN (225,36,446,890)"
-    ).fetchall()
+    rows = conn.execute("SELECT id,ticker FROM companies WHERE id IN (225,36,446,890)").fetchall()
     assert {row["id"]: row["ticker"] for row in rows} == expected
     results = {
-        row["id"]: load_results_for_company(
-            conn, row["id"], cutoff, artifact_store=store
-        )
+        row["id"]: load_results_for_company(conn, row["id"], cutoff, artifact_store=store)
         for row in rows
     }
     assert results[225]["research_evidence"]["evidence_lane"] is False
@@ -705,15 +697,15 @@ def test_private_authentic_snapshot_remains_unavailable():
     quality = bactiguard["selection"]["dcf_input_quality"]["decision"]
     assert quality["available"] is False
     assert quality["selected_depth"] == 1
-    assert quality["reasons"] == ["qualified_consecutive_annual_history_unavailable"]
+    assert quality["reasons"] == ("qualified_consecutive_annual_history_unavailable",)
     assert bactiguard["selection"]["annual_history"]["period_ends"] == ["2025-12-31"]
     assert bactiguard["selection"]["annual_history"]["reasons"] == [
         "annual periods are not consecutive fiscal anniversaries"
     ]
     assert bactiguard["financial"].operating_margin < 0
-    annual_margin = bactiguard["reverse_dcf"]["dcf"]["normalized_financial_view"][
-        "normalization"
-    ]["selected_window"]["ebit_margin"]
+    annual_margin = bactiguard["reverse_dcf"]["dcf"]["normalized_financial_view"]["normalization"][
+        "selected_window"
+    ]["ebit_margin"]
     assert annual_margin < 0
 
 

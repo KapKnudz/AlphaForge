@@ -139,9 +139,7 @@ def _select_reinvestment_calibration(
             for item in reviewed:
                 candidate_inputs = replace(
                     growth_inputs,
-                    assumptions=replace(
-                        growth_inputs.assumptions, calibration_identity=item[1]
-                    ),
+                    assumptions=replace(growth_inputs.assumptions, calibration_identity=item[1]),
                     growth_domain_context={
                         **growth_inputs.growth_domain_context,
                         "calibration_record": item[4],
@@ -2113,9 +2111,10 @@ def load_results_for_company(
                     selection["reinvestment_calibration"] = current_selection
                     if current_calibration is None:
                         raise ValueError(current_selection.get("refusal", "ambiguous_calibration"))
-                    if current_selection["selected_identity"] != calibration_selection[
-                        "selected_identity"
-                    ]:
+                    if (
+                        current_selection["selected_identity"]
+                        != calibration_selection["selected_identity"]
+                    ):
                         selected_calibration = qualify_calibration(
                             current_calibration,
                             as_of=cutoff,
