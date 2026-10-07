@@ -79,6 +79,9 @@ principles and current contract owners:
 Look for facts/assumptions, consistency checks, disconfirmation and scoped
 conclusions. In treatment, verify actual skill/reference reads and current owner
 checks; in baseline, do not supply the treatment's answers or instructions.
+`--no-skills` disables advertising, not file access: the model may independently
+find and read the helper with `read`. If the baseline reads it, mark the paired
+comparison contaminated/inconclusive rather than claiming a without-skill effect.
 Record misses as misses rather than narrowing prompts or discarding responses.
 
 The initial baseline and treatment both reasoned correctly; treatment added
