@@ -32,6 +32,14 @@ from alphaforge.core.valuation.dividend_yield import (
     DIVIDEND_YIELD_POLICY_VERSION,
     trailing_dividend_window,
 )
+from alphaforge.core.valuation.growth_domain import (
+    ASSUMPTION_TOLERANCE,
+    GROWTH_DOMAIN_POLICY_VERSION,
+    GROWTH_SCOPE,
+    MAX_ITERATIONS,
+    PRICE_TOLERANCE,
+    SAMPLE_INTERVALS,
+)
 from alphaforge.core.valuation.reinvestment import CALIBRATION_VERSION, ECONOMIC_CONVENTION
 from alphaforge.core.valuation.required_return import RequiredReturnPolicy
 from alphaforge.core.valuation.solve_eligibility import SOLVE_REGISTRY_VERSION
@@ -162,7 +170,18 @@ def rules_bundle() -> dict:
         "dcf_routing": DCF_ROUTING_POLICY_VERSION,
         "reinvestment_calibration": CALIBRATION_VERSION,
         "economic_convention": ECONOMIC_CONVENTION,
-        "solve_bounds": DcfAssumptionPolicy.SOLVE_BOUNDS,
+        "solve_scope_bounds": DcfAssumptionPolicy.SOLVE_BOUNDS,
+        "growth_domain": {
+            "version": GROWTH_DOMAIN_POLICY_VERSION,
+            "scope_bounds": GROWTH_SCOPE,
+            "certificate_arithmetic": "exact rational binary operands",
+            "endpoint_conversion": "directed inward float conversion",
+            "boundary_failure_policy": "refuse whole requested axis; no inward retry or epsilon",
+            "sample_intervals": SAMPLE_INTERVALS,
+            "price_tolerance": PRICE_TOLERANCE,
+            "assumption_tolerance": ASSUMPTION_TOLERANCE,
+            "max_iterations": MAX_ITERATIONS,
+        },
         "required_return": RequiredReturnPolicy.VERSION,
         "dividend_yield": DIVIDEND_YIELD_POLICY_VERSION,
         "report_amounts_and_shares_scale": 1000000,

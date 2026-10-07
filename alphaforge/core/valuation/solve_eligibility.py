@@ -11,8 +11,13 @@ from alphaforge.core.valuation.dcf_contract import (
     FIXED_DEFAULT_ASSUMPTION_POLICY,
     AssumptionOrigin,
 )
+from alphaforge.core.valuation.growth_domain import (
+    GROWTH_SCOPE,
+    derive_growth_domain,
+    growth_coverage_error,
+)
 
-SOLVE_REGISTRY_VERSION = "reverse-dcf-solve-registry-v2"
+SOLVE_REGISTRY_VERSION = "reverse-dcf-solve-registry-v3-admissible-growth"
 
 # Validate the existing DcfAssumptionPolicy provenance contract; this does not acquire evidence.
 _ASSUMPTION_ORIGIN_CONTRACT = {
@@ -62,8 +67,8 @@ SOLVE_AXIS_REGISTRY = MappingProxyType(
     {
         "revenue_growth": SolveAxisDefinition(
             axis="revenue_growth",
-            lower_bound=-0.10,
-            upper_bound=0.30,
+            lower_bound=GROWTH_SCOPE[0],
+            upper_bound=GROWTH_SCOPE[1],
             status="supported",
             reason=None,
             evidence_prerequisites=(
@@ -71,9 +76,12 @@ SOLVE_AXIS_REGISTRY = MappingProxyType(
                 "qualified_consecutive_annual_history",
                 "qualified_reinvestment_calibration",
                 "fixed_assumptions_with_provenance",
+                "full_interval_starting_capital_coverage",
             ),
             root_interpretation=(
-                "initial revenue growth fades linearly to the fixed mature endpoint; sampled "
+                "initial revenue growth fades linearly to the fixed mature endpoint; funded bounds "
+                "are derived before candidate prices, conditional on reviewed installed year-one "
+                "capacity and fixed margin/return coverage for the entire interval; sampled "
                 "conditional candidates do not establish uniqueness or completeness"
             ),
         ),
@@ -203,6 +211,7 @@ def solve_input_identity(inputs: Any, metadata: SolveAxisMetadata) -> str | None
         "net_debt": inputs.net_debt,
         "branch_id": inputs.branch_id,
         "assumptions": asdict(assumptions) if is_dataclass(assumptions) else dict(assumptions),
+        "growth_domain_context": getattr(inputs, "growth_domain_context", None),
         "eligibility": eligibility_record,
     }
     encoded = json.dumps(
@@ -218,6 +227,7 @@ def solve_axis_metadata(
     assumption_provenance: Mapping[str, Any] | None = None,
     prerequisite_evidence: Mapping[str, Mapping[str, Any]] | None = None,
     inputs: Any = None,
+    requested_bounds: tuple[float, float] | None = None,
 ) -> SolveAxisMetadata:
     """Build the exported preflight record from the same axis declaration the solver uses."""
     definition = solve_axis_definition(axis)
@@ -260,6 +270,18 @@ def solve_axis_metadata(
         if name == "fixed_assumptions_with_provenance" and not fixed_provenance_complete:
             status = "unmet"
             reason = reason or "fixed_assumption_provenance_incomplete"
+        if name == "full_interval_starting_capital_coverage":
+            reason = (
+                growth_coverage_error(inputs)
+                if inputs is not None
+                else "full_interval_starting_capital_coverage_unavailable"
+            )
+            status = "unmet" if reason else "met"
+            supplied = {
+                "evidence_references": supplied_prerequisites.get(
+                    "qualified_reinvestment_calibration", {}
+                ).get("evidence_references", ()),
+            }
         prerequisites_list.append(
             {
                 "name": name,
@@ -271,7 +293,7 @@ def solve_axis_metadata(
     prerequisites = tuple(prerequisites_list)
 
     status, reason = definition.status, definition.reason
-    if status == "supported" and prerequisite_evidence is not None:
+    if status == "supported":
         unmet = next(
             (
                 item
@@ -286,17 +308,32 @@ def solve_axis_metadata(
             status = "insufficient_evidence"
             reason = unmet["reason"] or f"solve_evidence_unavailable:{unmet['name']}"
 
+    domain = {
+        "lower_bound": definition.lower_bound,
+        "upper_bound": definition.upper_bound,
+        "bounds_inclusive": True,
+        "candidate_policy": "axis refused before sampling",
+    }
+    if axis == "revenue_growth":
+        domain = {"scope_bounds": list(GROWTH_SCOPE), "lower_bound": None, "upper_bound": None}
+        if inputs is not None and fixed_provenance_complete:
+            try:
+                domain = derive_growth_domain(inputs, fixed)
+                if status == "supported" and domain["reason"]:
+                    status, reason = "domain_unavailable", domain["reason"]
+            except ValueError as exc:
+                if status == "supported":
+                    status, reason = "invalid_input", str(exc)
+        domain["requested_bounds"] = (
+            list(requested_bounds)
+            if requested_bounds is not None
+            else [domain["lower_bound"], domain["upper_bound"]]
+        )
+
     metadata = SolveAxisMetadata(
         registry_version=SOLVE_REGISTRY_VERSION,
         axis=axis,
-        domain={
-            "lower_bound": definition.lower_bound,
-            "upper_bound": definition.upper_bound,
-            "bounds_inclusive": True,
-            "candidate_policy": (
-                "sample the full declared range; any invalid sampled candidate refuses the axis"
-            ),
-        },
+        domain=domain,
         status=status,
         reason=reason,
         evidence_prerequisites=prerequisites,

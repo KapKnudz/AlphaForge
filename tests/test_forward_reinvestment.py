@@ -8,7 +8,11 @@ from decimal import Decimal as D
 from decimal import localcontext
 
 import pytest
-from dcf_calibration_fixtures import synthetic_calibration_fixture, synthetic_record
+from dcf_calibration_fixtures import (
+    reviewed_growth_inputs,
+    synthetic_calibration_fixture,
+    synthetic_record,
+)
 from test_method_date_growth_selection import (
     CUTOFF,
     annual,
@@ -64,10 +68,12 @@ def hand_inputs(q=0.1, terminal=0.04, years=2):
 
 def policy_solve_inputs():
     inputs = hand_inputs(years=5, terminal=0.02)
-    return replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+    return reviewed_growth_inputs(
+        replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+    )
 
 
-def verified_growth_metadata(inputs):
+def verified_growth_metadata(inputs, requested_bounds=None):
     return solve_axis_metadata(
         "revenue_growth",
         assumptions=inputs.assumptions,
@@ -102,6 +108,7 @@ def verified_growth_metadata(inputs):
             }.items()
         },
         inputs=inputs,
+        requested_bounds=requested_bounds,
         prerequisite_evidence={
             name: {
                 "status": "met",
@@ -279,7 +286,7 @@ def test_admissible_growth_range_root_and_no_solution_are_independent_of_legacy_
         "revenue_growth",
         0,
         0.08,
-        eligibility=verified_growth_metadata(no_match_inputs),
+        eligibility=verified_growth_metadata(no_match_inputs, (0, 0.08)),
     )
     assert not brackets
     assert diagnostics["lower_endpoint_price"] == pytest.approx(lower_price)
@@ -446,20 +453,19 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     )
     assert value["status"] == "available"
     assert value["reason"] is None
-    assert value["version"] == "reverse-dcf-v16-explicit-input-quality"
+    assert value["version"] == "reverse-dcf-v17-admissible-growth-domain"
     growth_solve = exported[str(cid)]["implied"]["revenue_growth"]
     eligibility = growth_solve["eligibility"]
-    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v2"
-    assert eligibility["status"] == "supported"
-    assert eligibility["domain"] == {
-        "lower_bound": -0.10,
-        "upper_bound": 0.30,
-        "bounds_inclusive": True,
-        "candidate_policy": "sample the full declared range; any invalid sampled candidate refuses the axis",
-    }
+    assert eligibility["registry_version"] == "reverse-dcf-solve-registry-v3-admissible-growth"
+    assert eligibility["status"] == "insufficient_evidence"
+    assert eligibility["reason"] == "full_interval_starting_capital_coverage_unavailable"
+    assert eligibility["domain"]["scope_bounds"] == [0, 0.30]
+    assert eligibility["domain"]["lower_bound"] == 0
+    assert eligibility["domain"]["upper_bound"] == pytest.approx(0.26)
+    assert growth_solve["candidate_roots"] == []
     assert "initial revenue growth fades linearly" in eligibility["root_interpretation"]
     assert eligibility["fixed_assumptions"]["discount_rate"]["evidence_references"]
-    assert {item["status"] for item in eligibility["evidence_prerequisites"]} == {"met"}
+    assert {item["status"] for item in eligibility["evidence_prerequisites"]} == {"met", "unmet"}
     provenance = value["assumption_provenance"]
     assert set(provenance) == set(value["assumptions"])
     assert provenance["revenue_growth"]["origin"] == "company_history"
@@ -513,8 +519,8 @@ def test_public_qualified_run_exports_disabled_axes_and_exact_replay(monkeypatch
     }
     assert rules["economic_convention"] == ECONOMIC_CONVENTION
     assert rules["reinvestment_calibration"] == synthetic_record()["version"]
-    assert rules["dcf_result_contract"] == "dcf-result-contract-v2"
-    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v2"
+    assert rules["dcf_result_contract"] == "dcf-result-contract-v3-admissible-growth"
+    assert rules["dcf_solve_registry"] == "reverse-dcf-solve-registry-v3-admissible-growth"
     original = json.loads(executed["outputs"])
     replayed = replay_run(conn, executed["run_id"])
     assert replayed["outputs"] == original
@@ -728,7 +734,7 @@ def test_public_missing_invalid_or_unsupported_inputs_never_leak_values(case):
         assert dcf["dcf"]["status"] == "insufficient_evidence"
     else:
         assert dcf["dcf"]["status"] == "domain_unavailable"
-    assert dcf["dcf"]["version"] == "reverse-dcf-v16-explicit-input-quality"
+    assert dcf["dcf"]["version"] == "reverse-dcf-v17-admissible-growth-domain"
     if case in {"basis", "future", "hash", "company"}:
         candidates = result["selection"]["reinvestment_calibration"]["candidates"]
         assert candidates[0]["rejection_reason"]

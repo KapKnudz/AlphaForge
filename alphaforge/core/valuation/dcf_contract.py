@@ -11,7 +11,7 @@ from typing import Any
 
 from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION
 
-DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v2"
+DCF_RESULT_CONTRACT_VERSION = "dcf-result-contract-v3-admissible-growth"
 
 FIXED_DEFAULT_ASSUMPTION_POLICY = MappingProxyType(
     {

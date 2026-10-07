@@ -8,6 +8,14 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Literal
 
+from alphaforge.core.valuation.growth_domain import (
+    ASSUMPTION_TOLERANCE,
+    MAX_ITERATIONS,
+    PRICE_TOLERANCE,
+    SAMPLE_INTERVALS,
+    derive_growth_domain,
+    growth_coverage_error,
+)
 from alphaforge.core.valuation.reinvestment import ECONOMIC_CONVENTION, LEGACY_CONVENTION
 from alphaforge.core.valuation.solve_eligibility import (
     SOLVE_REGISTRY_VERSION,
@@ -72,6 +80,7 @@ class ReverseDcfInputs:
     assumptions: DcfAssumptions
     branch_id: int | None = None
     eligibility_context_identity: str | None = None
+    growth_domain_context: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +211,7 @@ class ReverseDcfEngine:
             raise ValueError("unsupported solve eligibility registry version")
         if metadata.axis != assumption:
             raise ValueError("solve eligibility axis does not match requested assumption")
-        if (
+        if assumption != "revenue_growth" and (
             metadata.domain.get("lower_bound") != definition.lower_bound
             or metadata.domain.get("upper_bound") != definition.upper_bound
         ):
@@ -218,6 +227,8 @@ class ReverseDcfEngine:
         if metadata.status == "supported" and metadata.reason != definition.reason:
             raise ValueError("solve eligibility reason does not match the declared registry")
         if metadata.status != "supported":
+            if metadata.status == "invalid_input":
+                raise ValueError(metadata.reason or metadata.status)
             raise UnsupportedEconomicPolicy(metadata.reason or metadata.status)
         if eligibility is None:
             raise UnsupportedEconomicPolicy("solve_evidence_unavailable:eligibility_metadata")
@@ -263,11 +274,45 @@ class ReverseDcfEngine:
             )
         if metadata.input_identity != current_input_identity:
             raise ValueError("solve eligibility input identity does not match current inputs")
-        if not definition.lower_bound <= lower_bound < upper_bound <= definition.upper_bound:
-            raise ValueError(
-                f"solve bounds must be within declared {assumption} domain "
-                f"[{definition.lower_bound}, {definition.upper_bound}]"
-            )
+        if assumption == "revenue_growth":
+            coverage_error = growth_coverage_error(inputs)
+            if coverage_error:
+                raise UnsupportedEconomicPolicy(coverage_error)
+            certificate = derive_growth_domain(inputs, metadata.fixed_assumptions)
+            expected_domain = {
+                **certificate,
+                "requested_bounds": metadata.domain.get("requested_bounds"),
+            }
+            if metadata.domain != expected_domain:
+                raise ValueError("solve eligibility domain does not match derived certificate")
+            if certificate["reason"]:
+                raise UnsupportedEconomicPolicy(certificate["reason"])
+            request = metadata.domain["requested_bounds"]
+            if (
+                not isinstance(request, list)
+                or len(request) != 2
+                or any(
+                    isinstance(x, bool) or not isinstance(x, (float, int)) or not isfinite(x)
+                    for x in (*request, lower_bound, upper_bound)
+                )
+            ):
+                raise ValueError("solve bounds must be finite numbers")
+            lo, hi = certificate["lower_bound"], certificate["upper_bound"]
+            if request[0] < lo or lower_bound < lo:
+                raise UnsupportedEconomicPolicy("unsupported_capital_release")
+            if request[1] > hi or upper_bound > hi:
+                reason = (
+                    "outside_declared_growth_scope"
+                    if certificate["binding_constraints"] == ["scope_ceiling"]
+                    else "unsupported_financing"
+                )
+                raise UnsupportedEconomicPolicy(reason)
+            if not lo <= request[0] < request[1] <= hi:
+                raise ValueError(
+                    "requested bounds must have positive width within admissible domain"
+                )
+            if not request[0] <= lower_bound < upper_bound <= request[1]:
+                raise ValueError("solve bracket must be within requested interval")
 
     def _forward_value(self, inputs: ReverseDcfInputs) -> DcfValue:
         a = inputs.assumptions
@@ -346,9 +391,9 @@ class ReverseDcfEngine:
         lower_bound: float,
         upper_bound: float,
         *,
-        price_tolerance: float = 1e-6,
-        assumption_tolerance: float = 1e-10,
-        max_iterations: int = 200,
+        price_tolerance: float = PRICE_TOLERANCE,
+        assumption_tolerance: float = ASSUMPTION_TOLERANCE,
+        max_iterations: int = MAX_ITERATIONS,
         eligibility: SolveAxisMetadata | None = None,
     ) -> ReverseDcfResult:
         self._solve_preflight(inputs, assumption, lower_bound, upper_bound, eligibility)
@@ -467,8 +512,8 @@ class ReverseDcfEngine:
         lower_bound: float,
         upper_bound: float,
         *,
-        sample_intervals: int = 200,
-        price_tolerance: float = 1e-6,
+        sample_intervals: int = SAMPLE_INTERVALS,
+        price_tolerance: float = PRICE_TOLERANCE,
         eligibility: SolveAxisMetadata | None = None,
     ) -> tuple[dict, tuple[tuple[float, float], ...], tuple[dict, ...]]:
         """Report endpoint and sampled range diagnostics without assuming monotonicity."""
@@ -477,10 +522,21 @@ class ReverseDcfEngine:
         if sample_intervals <= 0 or price_tolerance <= 0:
             raise ValueError("range diagnostic settings must be positive")
 
-        points = tuple(
-            lower_bound + (upper_bound - lower_bound) * index / sample_intervals
-            for index in range(sample_intervals + 1)
+        if (
+            assumption == "revenue_growth"
+            and [lower_bound, upper_bound] != eligibility.domain["requested_bounds"]
+        ):
+            raise ValueError("range diagnostics must cover the full requested interval")
+        points = (
+            (lower_bound,)
+            + tuple(
+                lower_bound + (upper_bound - lower_bound) * index / sample_intervals
+                for index in range(1, sample_intervals)
+            )
+            + (upper_bound,)
         )
+        if any(not lower_bound <= point <= upper_bound for point in points):
+            raise ValueError("numerically_unresolvable_domain")
         prices = tuple(
             self._value_with(inputs, assumption, point).value_per_share for point in points
         )
@@ -675,7 +731,11 @@ class ReverseDcfEngine:
         ):
             changes["revenue_growth_fade_to"] = value
         assumptions = replace(inputs.assumptions, **changes)
-        return self.value(replace(inputs, assumptions=assumptions))
+        try:
+            return self.value(replace(inputs, assumptions=assumptions))
+        except (ValueError, OverflowError) as exc:
+            exc.candidate_assumption = value
+            raise
 
     @staticmethod
     def _result(

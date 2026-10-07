@@ -45,6 +45,7 @@ from alphaforge.core.valuation.dividend_yield import (
     calculate_dividend_yield,
     trailing_dividend_window,
 )
+from alphaforge.core.valuation.growth_domain import growth_history_identity
 from alphaforge.core.valuation.raw_valuation import RawValuation, compute_raw_valuation
 from alphaforge.core.valuation.reinvestment import qualify_calibration
 from alphaforge.core.valuation.reverse_dcf import (
@@ -148,7 +149,12 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         return DcfResultStatus.NONCONVERGENCE
     if "not bracketed" in reason or "no solve bracket" in reason:
         return DcfResultStatus.NO_CROSSING
-    if "finite" in reason or "must be positive" in reason or "must exceed" in reason:
+    if (
+        reason == "invalid_growth_domain_inputs"
+        or "finite" in reason
+        or "must be positive" in reason
+        or "must exceed" in reason
+    ):
         return DcfResultStatus.INVALID_INPUT
     if reason == "unavailable_constant_margin_only" or reason.startswith(
         "market-cap hurdle policy is defined for SEK; received "
@@ -179,6 +185,10 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
         "unsupported_capital_release",
         "unsupported_financing",
         "invalid_candidate_economics",
+        "empty_admissible_domain",
+        "degenerate_admissible_domain",
+        "numerically_unresolvable_domain",
+        "admissible_domain_not_certified",
     }:
         return DcfResultStatus.DOMAIN_UNAVAILABLE
     if (
@@ -203,8 +213,13 @@ def _dcf_failure_status(reason: str | None) -> DcfResultStatus:
 
 
 def _dcf_solve_status(
-    solution_status: str | None, reason: str | None, error: str | None
+    solution_status: str | None,
+    reason: str | None,
+    error: str | None,
+    failure_status: str | None = None,
 ) -> DcfResultStatus:
+    if failure_status is not None:
+        return DcfResultStatus(failure_status)
     if solution_status == "not_identifiable":
         return DcfResultStatus.NOT_IDENTIFIABLE
     if solution_status == "sampled_match_region":
@@ -248,14 +263,14 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "available": False,
             "solution_status": "unavailable",
             "reason": eligibility.reason,
+            "failure_status": eligibility.status,
             "eligibility": metadata,
             "candidate_roots": [],
             "candidate_solution_count": 0,
             "qualification": definition.root_interpretation,
         }
 
-    lower = eligibility.domain["lower_bound"]
-    upper = eligibility.domain["upper_bound"]
+    lower, upper = eligibility.domain["requested_bounds"]
     try:
         diagnostics, brackets, sampled_matches = engine.diagnose_solve_range(
             inputs, axis, lower, upper, eligibility=eligibility
@@ -399,6 +414,11 @@ def _solve_axis_result(engine, inputs, axis: str, eligibility) -> dict[str, Any]
             "solution_status": "unavailable",
             "reason": "invalid_candidate_economics",
             "error": str(exc),
+            "failure_status": _dcf_exception_status(exc).value,
+            "candidate_assumption": getattr(exc, "candidate_assumption", None),
+            "boundary_evaluation_failure": (
+                getattr(exc, "candidate_assumption", None) in (lower, upper)
+            ),
             "eligibility": metadata,
             "candidate_roots": [],
             "candidate_solution_count": 0,
@@ -1997,6 +2017,22 @@ def load_results_for_company(
                         assumptions=dcf_policy_decision.assumptions,
                         branch_id=branch_id,
                         eligibility_context_identity=eligibility_context_identity,
+                        growth_domain_context={
+                            "company_id": company_id,
+                            "as_of": as_of,
+                            "currency": dcf_current_report.currency,
+                            "packet_hash": eligibility_context_facts["packet_hash"],
+                            "route_decision_identity": dcf_route_decision.decision_identity,
+                            "selected_history_identity": growth_history_identity(
+                                asdict(input_quality_view),
+                                [
+                                    asdict(report)
+                                    for report in (*historical_annuals, latest_annual)
+                                    if report is not None
+                                ],
+                            ),
+                            "calibration_record": calibration_record,
+                        },
                     )
                     engine = ReverseDcfEngine()
                     dcf_value = engine.value(dcf_inputs)
@@ -2100,7 +2136,8 @@ def load_results_for_company(
                             "evidence_references": (),
                         },
                     }
-                    # The registry supplies the declared full domains and every axis decision.
+                    # The registry derives the full funded domain before candidate prices;
+                    # absent analyst coverage refuses reverse without affecting forward.
                     for _assump in SOLVE_AXIS_REGISTRY:
                         _eligibility = solve_axis_metadata(
                             _assump,
@@ -2236,6 +2273,7 @@ def load_results_for_company(
             solve_result.get("solution_status"),
             solve_result.get("reason"),
             solve_result.get("error"),
+            solve_result.get("failure_status"),
         )
         solve_result_version = (
             dcf_policy_decision.policy_version if dcf_policy_decision is not None else None

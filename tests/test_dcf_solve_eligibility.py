@@ -2,6 +2,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from dcf_calibration_fixtures import reviewed_growth_inputs
 from test_forward_reinvestment import hand_inputs
 
 from alphaforge.cli.ranking_loader import _dcf_solve_status, _solve_axis_result
@@ -58,16 +59,13 @@ def _test_assumption_provenance(inputs):
 
 def _eligible_inputs():
     inputs = hand_inputs(years=5, terminal=0.02)
-    return replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+    return reviewed_growth_inputs(
+        replace(inputs, assumptions=replace(inputs.assumptions, tax_rate=0.21))
+    )
 
 
 def _supported_metadata(inputs):
-    return solve_axis_metadata(
-        "revenue_growth",
-        assumptions=inputs.assumptions,
-        assumption_provenance=_test_assumption_provenance(inputs),
-        inputs=inputs,
-    )
+    return _verified_metadata(inputs)
 
 
 def _verified_metadata(inputs, provenance=None):
@@ -93,11 +91,11 @@ def test_registry_is_the_explicit_domain_and_reason_owner():
         axis: (definition.lower_bound, definition.upper_bound)
         for axis, definition in SOLVE_AXIS_REGISTRY.items()
     }
-    assert DcfAssumptionPolicy.SOLVE_BOUNDS["revenue_growth"] == (-0.10, 0.30)
+    assert DcfAssumptionPolicy.SOLVE_BOUNDS["revenue_growth"] == (0, 0.30)
     assert SOLVE_AXIS_REGISTRY["revenue_growth"].status == "supported"
     assert SOLVE_AXIS_REGISTRY["ebit_margin"].reason == "unavailable_constant_margin_only"
     assert SOLVE_AXIS_REGISTRY["terminal_growth"].status == "not_identifiable"
-    assert SOLVE_REGISTRY_VERSION == "reverse-dcf-solve-registry-v2"
+    assert SOLVE_REGISTRY_VERSION == "reverse-dcf-solve-registry-v3-admissible-growth"
 
 
 @pytest.mark.parametrize("operation", ["solve", "diagnose_solve_range"])
@@ -468,7 +466,7 @@ def test_supported_growth_solves_initial_growth_and_keeps_mature_fade():
 
 
 def test_unbracketed_endpoint_match_is_not_promoted_to_a_root():
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _supported_metadata(inputs)
     endpoint = {
         "classification": "sampled_endpoint_match",
@@ -497,7 +495,7 @@ def test_unbracketed_endpoint_match_is_not_promoted_to_a_root():
 
 
 def test_sampled_tangency_and_flat_tolerance_region_are_not_roots():
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _supported_metadata(inputs)
     tangent = {
         "classification": "sampled_no_sign_change_match",
@@ -544,7 +542,7 @@ def test_sampled_tangency_and_flat_tolerance_region_are_not_roots():
 
 
 def test_candidate_roots_are_not_collapsed_to_a_unique_answer():
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _supported_metadata(inputs)
     diagnostics = {
         "sampled_match_regions": [],
@@ -599,7 +597,7 @@ def test_candidate_roots_are_not_collapsed_to_a_unique_answer():
 def test_exported_sampled_match_count_tracks_filtered_points(
     sampled_match_regions, solution_status
 ):
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _supported_metadata(inputs)
     bracketed_match = {
         "classification": "sampled_match_with_sign_change",
@@ -639,7 +637,7 @@ def test_exported_sampled_match_count_tracks_filtered_points(
 
 
 def test_no_crossing_nonconvergence_and_invalid_candidate_remain_distinct():
-    inputs = hand_inputs()
+    inputs = _eligible_inputs()
     metadata = _supported_metadata(inputs)
     no_crossing_diagnostics = {
         "sampled_match_regions": [],
