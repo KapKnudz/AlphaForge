@@ -897,7 +897,10 @@ def cmd_rank(args: argparse.Namespace) -> int:
         retain_outputs,
         rules_bundle,
     )
+    from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
 
+    evidence_root = getattr(args, "evidence_root", None)
+    artifact_store = LocalPdfArtifactStore(evidence_root) if evidence_root is not None else None
     companies.sort(key=lambda c: (c.ticker, c.id))
     source_rows = {}
     body, textual_context = capture_inputs(
@@ -906,6 +909,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         as_of,
         source_rows=source_rows,
         dcf_routing=dcf_routing,
+        artifact_store=artifact_store,
     )
     numerical_identity, financial_inputs_hash = retain_inputs(conn, body, rules_bundle())
     ranking, _, original_outputs = evaluate(body, textual_context)
@@ -1127,7 +1131,7 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     from alphaforge.config import Settings
     from alphaforge.db.connection import get_connection
     from alphaforge.db.migrations import migrate
-    from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
+    from alphaforge.evidence.artifact_store import DEFAULT_OBJECT_ROOT, LocalPdfArtifactStore
     from alphaforge.evidence.flow import EvidenceResourceLimits, OneCompanyEvidenceFlow
 
     settings = Settings.from_env(dsn=args.dsn) if args.dsn else Settings.from_env()
@@ -1142,7 +1146,10 @@ def cmd_evidence(args: argparse.Namespace) -> int:
         max_pages=args.max_pages,
         max_retries=args.max_retries,
     )
-    artifact_store = LocalPdfArtifactStore(max_pdf_bytes=limits.max_pdf_bytes)
+    artifact_store = LocalPdfArtifactStore(
+        getattr(args, "evidence_root", None) or DEFAULT_OBJECT_ROOT,
+        max_pdf_bytes=limits.max_pdf_bytes,
+    )
     flow = OneCompanyEvidenceFlow(conn, limits=limits, artifact_store=artifact_store)
     shadow_citation = None
     if args.shadow_source_id and args.shadow_anchor and args.shadow_excerpt:
@@ -1175,6 +1182,11 @@ def cmd_evidence(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="alphaforge")
     p.add_argument("--dsn", dest="dsn", default=None, help="ALPHAFORGE_DSN override")
+    p.add_argument(
+        "--evidence-root",
+        default=None,
+        help="PDF object root paired with --dsn (use an absolute path for saved DBs)",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     imp = sub.add_parser("import-watchlist", help="Import watchlist CSV")
