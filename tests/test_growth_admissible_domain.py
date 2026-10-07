@@ -6,7 +6,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -536,13 +536,33 @@ def test_public_scope_ceiling_can_bind_without_financing_relaxation(monkeypatch,
     assert replay_run(conn, row["run_id"])["outputs"] == json.loads(row["outputs"])
 
 
-def test_append_only_coverage_successor_preserves_conflict_detection():
-    conn, cid = public_fixture()
+def reviewed_only_public_fixture():
+    source, source_cid = public_fixture()
+    reviewed = next(
+        json.loads(row["record_json"])
+        for row in source.execute(
+            "SELECT record_json FROM reinvestment_calibrations WHERE company_id=?", (source_cid,)
+        )
+        if "reverse_growth_coverage" in json.loads(row["record_json"])
+    )
+    source.close()
+    conn, cid = setup(periods=[annual(2024, 100), annual(2025, 110), annual(2026, 121)])
+    assert cid == source_cid
+    packet(conn, cid)
+    conn.execute("UPDATE prices SET close=13")
+    append_reinvestment_calibration(conn, cid, reviewed, as_of=date.fromisoformat(CUTOFF))
+    conn.commit()
+    return conn, cid
+
+
+@pytest.mark.parametrize("unreviewed_predecessor", [True, False])
+def test_append_only_coverage_successor_preserves_conflict_detection(unreviewed_predecessor):
+    conn, cid = public_fixture() if unreviewed_predecessor else reviewed_only_public_fixture()
     selection = load_results_for_company(
         conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route()
     )["selection"]["reinvestment_calibration"]
     assert selection.get("refusal") is None
-    assert len(selection["candidates"]) == 2
+    assert len(selection["candidates"]) == (2 if unreviewed_predecessor else 1)
     conflicting = synthetic_record(future_return=0.25)
     conflicting["company_id"] = cid
     append_reinvestment_calibration(conn, cid, conflicting, as_of=date.fromisoformat(CUTOFF))
@@ -551,8 +571,9 @@ def test_append_only_coverage_successor_preserves_conflict_detection():
     assert result["reverse_dcf"]["dcf"]["status"] == "insufficient_evidence"
 
 
-def test_multiple_current_same_operand_approvals_remain_ambiguous():
-    conn, cid = public_fixture()
+@pytest.mark.parametrize("unreviewed_predecessor", [True, False])
+def test_multiple_current_same_operand_approvals_remain_ambiguous(unreviewed_predecessor):
+    conn, cid = public_fixture() if unreviewed_predecessor else reviewed_only_public_fixture()
     rows = conn.execute(
         "SELECT record_json FROM reinvestment_calibrations WHERE company_id=?", (cid,)
     ).fetchall()
@@ -566,6 +587,74 @@ def test_multiple_current_same_operand_approvals_remain_ambiguous():
     result = load_results_for_company(conn, cid, CUTOFF, dcf_routing=explicit_mature_dcf_route())
     assert result["selection"]["reinvestment_calibration"]["refusal"] == "ambiguous_calibration"
     assert result["reverse_dcf"]["dcf"]["status"] == "invalid_input"
+
+
+@pytest.mark.parametrize("basis_change", ["hurdle", "packet"])
+def test_reviewed_only_reapproval_keeps_forward_value_and_current_reverse_coverage(
+    monkeypatch, tmp_path, basis_change
+):
+    conn, cid = reviewed_only_public_fixture()
+    original_rows = conn.execute(
+        "SELECT identity,record_json FROM reinvestment_calibrations WHERE company_id=?", (cid,)
+    ).fetchall()
+    assert len(original_rows) == 1
+    original_record = json.loads(original_rows[0]["record_json"])
+    _, _, exported = rank_exports(
+        conn, monkeypatch, tmp_path, dcf_routing={cid: explicit_mature_dcf_route()}
+    )
+    assert exported[str(cid)]["dcf"]["status"] == "available"
+    assert exported[str(cid)]["implied"]["revenue_growth"]["status"] == "candidate_solutions"
+    frozen = conn.execute("SELECT run_id,outputs FROM executed_numerical_runs").fetchone()
+    cutoff = CUTOFF
+    if basis_change == "hurdle":
+        conn.execute("UPDATE prices SET close=110")
+    else:
+        cutoff = (date.fromisoformat(cutoff) + timedelta(days=1)).isoformat()
+        packet(conn, cid, cutoff)
+    stale = load_results_for_company(conn, cid, cutoff, dcf_routing=explicit_mature_dcf_route())
+    assert stale["reverse_dcf"]["dcf"]["status"] == "available"
+    stale_growth = stale["reverse_dcf"]["implied"]["revenue_growth"]
+    assert stale_growth["reason"] == "reverse_growth_coverage_basis_mismatch"
+    corrected = json.loads(canonical(original_record))
+    corrected["reverse_growth_coverage"] = synthetic_reverse_coverage(
+        stale_growth["eligibility"]["domain"]["fixed_basis"]
+    )
+    corrected["reverse_growth_coverage"]["approval_id"] = "reviewed-only-current-basis"
+    current_identity = append_reinvestment_calibration(
+        conn, cid, corrected, as_of=date.fromisoformat(cutoff)
+    )
+    result = load_results_for_company(conn, cid, cutoff, dcf_routing=explicit_mature_dcf_route())
+    assert result["selection"]["reinvestment_calibration"].get("refusal") is None
+    assert result["selection"]["reinvestment_calibration"]["selected_identity"] == current_identity
+    forward = result["reverse_dcf"]["dcf"]
+    assert forward["status"] == "available"
+    assert forward["value_per_share"] == stale["reverse_dcf"]["dcf"]["value_per_share"]
+    growth = result["reverse_dcf"]["implied"]["revenue_growth"]
+    assert growth["status"] == (
+        "no_crossing" if basis_change == "hurdle" else "candidate_solutions"
+    )
+    assert (
+        growth["eligibility"]["domain"]["coverage_approval"]["approval_id"]
+        == "reviewed-only-current-basis"
+    )
+    retained = conn.execute(
+        "SELECT identity,record_json FROM reinvestment_calibrations WHERE company_id=?", (cid,)
+    ).fetchall()
+    assert len(retained) == 2
+    assert dict(original_rows[0]) in [dict(row) for row in retained]
+    assert all("reverse_growth_coverage" in json.loads(row["record_json"]) for row in retained)
+
+    # When neither review matches a later packet, only reverse coverage becomes unavailable.
+    cutoff = (date.fromisoformat(cutoff) + timedelta(days=1)).isoformat()
+    packet(conn, cid, cutoff)
+    later = load_results_for_company(conn, cid, cutoff, dcf_routing=explicit_mature_dcf_route())
+    assert later["selection"]["reinvestment_calibration"].get("refusal") is None
+    assert later["reverse_dcf"]["dcf"]["status"] == "available"
+    assert (
+        later["reverse_dcf"]["implied"]["revenue_growth"]["reason"]
+        == "reverse_growth_coverage_basis_mismatch"
+    )
+    assert replay_run(conn, frozen["run_id"])["outputs"] == json.loads(frozen["outputs"])
 
 
 def test_current_basis_reapproval_supersedes_stale_and_malformed_coverage():

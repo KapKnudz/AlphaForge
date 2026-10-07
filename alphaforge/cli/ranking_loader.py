@@ -124,16 +124,9 @@ def _select_reinvestment_calibration(
                 "refusal": "ambiguous_calibration",
             }
         if growth_inputs is None:
-            if unreviewed:
-                selected = unreviewed[0]
-            elif len(reviewed) == 1:
-                selected = reviewed[0]
-            else:
-                return None, {
-                    "selected_identity": None,
-                    "candidates": candidates,
-                    "refusal": "ambiguous_calibration",
-                }
+            # Identical operands seed the fixed basis, independently of coverage.
+            # The second pass selects a review against that basis, not append order.
+            selected = (unreviewed or reviewed)[0]
         else:
             matching = []
             for item in reviewed:
@@ -153,18 +146,8 @@ def _select_reinvestment_calibration(
                     "candidates": candidates,
                     "refusal": "ambiguous_calibration",
                 }
-            if matching:
-                selected = matching[0]
-            elif len(reviewed) == 1:
-                selected = reviewed[0]
-            elif unreviewed:
-                selected = unreviewed[0]
-            else:
-                return None, {
-                    "selected_identity": None,
-                    "candidates": candidates,
-                    "refusal": "ambiguous_calibration",
-                }
+            # Missing/stale coverage must not invalidate these shared forward operands.
+            selected = matching[0] if matching else (reviewed or unreviewed)[0]
     return (selected[4] if selected else None), {
         "selected_identity": selected[1] if selected else None,
         "candidates": candidates,

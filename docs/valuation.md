@@ -205,10 +205,12 @@ ranking never masquerades as a discounted-cash-flow.
   History binds qualified operands and quality facts without DB surrogate ids.
   Qualification checks dates, structure and exact basis, not accounting truth.
   At the latest fiscal period, genuinely different calibration operand identities remain
-  ambiguous. For one shared operand identity, the sole coverage review matching the current
-  fixed basis is selected; stale or malformed reviews remain retained but do not block a
-  corrected append. Multiple matching current reviews remain ambiguous. No old record is
-  edited.
+  ambiguous. For one shared operand identity, fixed-basis construction is independent of
+  coverage and does not require an unreviewed predecessor. The sole coverage review matching
+  that basis is selected; stale or malformed reviews remain retained but do not block a
+  corrected append. When no review matches, qualified forward valuation survives while reverse
+  coverage remains unavailable. Multiple matching current reviews remain ambiguous. No old
+  record is edited; append order does not choose the review.
 
   Derivation uses exact rational arithmetic over captured finite float operands and
   directed inward conversion to executable float endpoints. Public rank samples the
