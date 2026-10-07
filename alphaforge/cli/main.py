@@ -900,7 +900,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
     from alphaforge.evidence.artifact_store import LocalPdfArtifactStore
 
     evidence_root = getattr(args, "evidence_root", None)
-    artifact_store = LocalPdfArtifactStore(evidence_root) if evidence_root is not None else None
+    artifact_store = LocalPdfArtifactStore(evidence_root) if evidence_root else None
     companies.sort(key=lambda c: (c.ticker, c.id))
     source_rows = {}
     body, textual_context = capture_inputs(

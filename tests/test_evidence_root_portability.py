@@ -126,6 +126,73 @@ def test_saved_evidence_public_loading_and_rank_are_cwd_independent(
             conn.close()
 
 
+@pytest.mark.parametrize("root_args", [[], ["--evidence-root", ""]])
+def test_cli_empty_and_omitted_roots_share_acquisition_and_loading_store(
+    tmp_path, monkeypatch, root_args
+):
+    monkeypatch.chdir(tmp_path)
+    database = tmp_path / "saved.db"
+    conn = get_connection(path=database)
+    init_db(conn)
+    company_id = _mapped_company(conn)
+    conn.execute(
+        "INSERT INTO watchlist(company_id,ticker,source_file,source_row_hash) VALUES (?,?,?,?)",
+        (company_id, "FLOW", "fixture", "fixture"),
+    )
+    conn.commit()
+    conn.close()
+    article = {
+        "source_url": "https://mfn.test/a/flow/q2",
+        "title": "Flow AB Interim Report Q2 2026",
+        "published_at": "2026-07-15T08:00:00Z",
+        "report_kind": "quarterly",
+        "attachment_url": "https://storage.mfn.test/flow/q2.pdf",
+        "attachment_tier": "mfn-primary",
+        "lang": "en",
+    }
+    content = _pdf()
+    response = SimpleNamespace(
+        status_code=200, headers={"Content-Type": "application/pdf"}, content=content
+    )
+
+    def fixture_flow(conn, **kwargs):
+        return OneCompanyEvidenceFlow(
+            conn,
+            scraper=_FakeScraper([article]),
+            now=lambda: datetime(2026, 9, 20, tzinfo=UTC),
+            **kwargs,
+        )
+
+    monkeypatch.setattr("alphaforge.evidence.flow.OneCompanyEvidenceFlow", fixture_flow)
+    parser = build_parser()
+    common = ["--dsn", f"sqlite:///{database}", *root_args]
+    evidence_args = parser.parse_args(
+        [
+            *common,
+            "evidence",
+            "--company-id",
+            str(company_id),
+            "--as-of",
+            "2026-09-20",
+        ]
+    )
+    with patch("alphaforge.evidence.flow.request_with_retry", return_value=response):
+        assert evidence_args.func(evidence_args) == 0
+    rank_args = parser.parse_args([*common, "rank", "--as-of", "2026-09-20"])
+    with patch(
+        "alphaforge.evidence.flow.request_with_retry",
+        side_effect=AssertionError("rank must read retained bytes without downloads"),
+    ):
+        assert rank_args.func(rank_args) == 0
+    conn = get_connection(path=database)
+    try:
+        sha = conn.execute("SELECT sha256 FROM evidence_artifacts").fetchone()[0]
+        assert LocalPdfArtifactStore().read_pdf(sha, expected_size=len(content)) == content
+        assert conn.execute("SELECT count(*) FROM executed_numerical_runs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("damage", ["missing", "hash", "size"])
 def test_explicit_root_preserves_retained_object_refusals(
     saved_evidence, tmp_path, monkeypatch, damage

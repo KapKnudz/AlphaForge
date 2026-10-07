@@ -198,8 +198,9 @@ alphaforge --dsn sqlite:////absolute/snapshot/saved.db \
 ```
 
 `--evidence-root` is a global option (before the subcommand), shared by `rank`
-and `evidence`. Omitting it preserves the legacy `data/evidence/objects`
-default relative to launch cwd; portable saved-data callers must supply it.
+and `evidence`. Omitting it or passing an empty string preserves the legacy
+`data/evidence/objects` default relative to launch cwd in both commands;
+portable saved-data callers must supply a non-empty explicit root.
 Python callers pair their connection with `LocalPdfArtifactStore(explicit_root)`
 and pass `artifact_store=store` to `load_results_for_company`, `capture_inputs`,
 or `load_evidence_view`. Subsequent evidence refresh must pass the same store
