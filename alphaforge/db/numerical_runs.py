@@ -178,6 +178,7 @@ def capture_inputs(
     *,
     source_rows: dict | None = None,
     dcf_routing: dict[int, object] | None = None,
+    artifact_store=None,
 ) -> tuple[dict, dict]:
     """Freeze the loader's candidate/selection domain before running any calculator.
 
@@ -273,7 +274,9 @@ def capture_inputs(
                 or verified_price_date(r) is None
                 or verified_price_date(r) > cutoff
             ]
-            packet, manifest = load_evidence_view(conn, company_id=cid, as_of=as_of)
+            packet, manifest = load_evidence_view(
+                conn, company_id=cid, as_of=as_of, artifact_store=artifact_store
+            )
             text[str(cid)] = {
                 "documents": [
                     {

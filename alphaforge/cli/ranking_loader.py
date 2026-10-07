@@ -1334,12 +1334,13 @@ def load_results_for_company(
     *,
     retained_research_evidence: dict | None = None,
     dcf_routing=None,
+    artifact_store: Any | None = None,
 ) -> dict[str, Any]:
     """Select cutoff-filtered stored observations, not historical vintages."""
     cutoff = date.fromisoformat(as_of[:10])
     if retained_research_evidence is None:
         evidence_packet, selection_manifest = load_evidence_view(
-            conn, company_id=company_id, as_of=as_of[:10]
+            conn, company_id=company_id, as_of=as_of[:10], artifact_store=artifact_store
         )
         docs = [
             {

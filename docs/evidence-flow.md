@@ -185,8 +185,31 @@ one-company flow, and V2 selection requires a matching immutable object record
 plus successful checksum and size verification. Historical metadata without
 retained verified bytes cannot qualify as new V2 evidence. By default the store writes objects at
 `data/evidence/objects/sha256/<first-two-hex>/<sha256>.pdf` and returns a URI
-relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`). It
-streams writes through a same-filesystem temporary file, validates the byte
+relative to that configured object root (`file:sha256/<prefix>/<sha>.pdf`).
+The store binds its root to an absolute path at construction time. For saved
+DBs, explicitly pair the DB with its PDF object root; no root is inferred from
+the DB path and no directory search or historical-row rewrite occurs:
+
+```sh
+alphaforge --dsn sqlite:////absolute/snapshot/saved.db \
+  --evidence-root /absolute/snapshot/pdf-objects rank --as-of 2026-09-20
+alphaforge --dsn sqlite:////absolute/snapshot/saved.db \
+  --evidence-root /absolute/snapshot/pdf-objects evidence --company-id 1 --as-of 2026-09-20
+```
+
+`--evidence-root` is a global option (before the subcommand), shared by `rank`
+and `evidence`. Omitting it or passing an empty string preserves the legacy
+`data/evidence/objects` default relative to launch cwd in both commands;
+portable saved-data callers must supply a non-empty explicit root.
+Python callers pair their connection with `LocalPdfArtifactStore(explicit_root)`
+and pass `artifact_store=store` to `load_results_for_company`, `capture_inputs`,
+or `load_evidence_view`. Subsequent evidence refresh must pass the same store
+to `OneCompanyEvidenceFlow` (or use the CLI option), never reacquire bytes just
+to compensate for a wrong root. Frozen numerical replay uses retained textual
+context and does not require this live artifact root. Object URIs, identities,
+size/hash checks and immutable history are unchanged.
+
+The store streams writes through a same-filesystem temporary file, validates the byte
 limit and PDF magic, fsyncs the file and directory hierarchy, and atomically
 installs without replacing an existing object. Existing objects are reused only
 after full checksum and size verification. Store operations reject symlinked or
@@ -383,14 +406,13 @@ to an older eligible observation. History-window filtering precedes retained
 object lookup and verification, so an expired artifact cannot block a current
 read.
 
-New PDF bytes are retained by `LocalPdfArtifactStore` below
-`data/evidence/objects/sha256/` under their lowercase SHA-256. Writes use a
-same-filesystem temporary file and install without replacement; reads verify
-hash, size, PDF magic, and resource limits. Missing or corrupt retained objects
-fail with typed `artifact_unavailable` / `artifact_checksum_mismatch` outcomes
-and never trigger URL or cross-release substitution. The immutable DB record
-stores a relative `file:` object URI; legacy attachment hashes without retained
-bytes remain audit-only until exact bytes are reacquired and verified.
+PDF retention roots and caller pairing are defined in
+[Immutable PDF object storage](#immutable-pdf-object-storage). Missing or corrupt
+retained objects fail with typed `artifact_unavailable` /
+`artifact_checksum_mismatch` outcomes and never trigger URL or cross-release
+substitution. The immutable DB record stores a relative `file:` object URI;
+legacy attachment hashes without retained bytes remain audit-only until exact
+bytes are reacquired and verified.
 
 Packets stamp the consumed `selection_manifest_id`. The bounded AQ inventory
 and defective-run provenance live authoritatively in

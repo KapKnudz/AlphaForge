@@ -60,7 +60,8 @@ class LocalPdfArtifactStore:
             raise ValueError("max_pdf_bytes must accommodate PDF magic bytes")
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
-        self.root = Path(root)
+        # Bind once at construction; later cwd changes must not redirect IO.
+        self.root = Path(root).absolute()
         self.max_pdf_bytes = max_pdf_bytes
         self.chunk_size = chunk_size
 
