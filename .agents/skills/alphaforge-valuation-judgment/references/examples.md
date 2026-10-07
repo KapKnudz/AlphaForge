@@ -96,7 +96,8 @@ as a request to attach today's date to a provider scalar.
 
 **Why it fails:** Document coverage, usable financial history, source-qualified
 capital, method suitability and actual analyst review are separate propositions.
-A packet hash binds its retained contents; it does not authenticate accounting
+A packet hash binds the stable packet identity projection, excluding run
+timestamps retained in stored JSON; it does not authenticate accounting
 interpretations or make old classifications current. Publication, observation
 and ingestion dates are different facts. [AlphaForge owners](alphaforge.md)
 
