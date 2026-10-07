@@ -285,7 +285,6 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         unique([a["id"] for a in allocations])
         for a in allocations:
             closed(a, "id kind lot_id amount cash_date eligibility_order")
-            o.event(a["id"])
             kind = a["kind"]
             _require(kind in totals and a["lot_id"] in lots, "tax_allocation_invalid")
             v = lots[a["lot_id"]]
@@ -299,6 +298,15 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 "tax_allocation_leg_mismatch",
             )
             amount = _amount(o, a, "amount", True)
+            bridge_category = "opening_current_tax" if lot["origin"] == "boundary_existing" else None
+            bridge_direction = (
+                "obligation"
+                if bridge_category and kind == "payment"
+                else "asset"
+                if bridge_category and kind == "refund"
+                else None
+            )
+            o.event(a["id"], bridge_category, bridge_direction, amount)
             _require(
                 amount <= v["remaining"]
                 or math.isclose(amount, v["remaining"], rel_tol=1e-8, abs_tol=1e-8),
@@ -423,9 +431,10 @@ def _assets(o, row, da, impairment, start, end, previous):
     disposal_nbvs = {}
     for d in sequence(row["disposals"]):
         closed(d, "id asset_class proceeds carrying_reduction gain_tax_basis")
-        o.event(d["id"])
         text(d["gain_tax_basis"])
-        disposal_cash += _amount(o, d, "proceeds", True)
+        proceeds = _amount(o, d, "proceeds", True)
+        o.event(d["id"], "nonoperating_assets", "asset", proceeds)
+        disposal_cash += proceeds
         c = text(d["asset_class"])
         disposal_nbvs[c] = disposal_nbvs.get(c, 0) + _amount(o, d, "carrying_reduction", True)
     controls = sequence(row["asset_controls"])
@@ -638,12 +647,13 @@ def _schedule(req, o):
         x = 0.0
         for settlement in sequence(row["settlements"]):
             closed(settlement, "id kind amount rationale")
-            o.event(settlement["id"])
             text(settlement["rationale"])
             _require(settlement["kind"] in {"outflow", "recovery"}, "settlement_kind_unsupported")
-            x += _amount(o, settlement, "amount", True) * (
-                1 if settlement["kind"] == "outflow" else -1
-            )
+            amount = _amount(o, settlement, "amount", True)
+            category = "legal_other" if settlement["kind"] == "outflow" else None
+            direction = "obligation" if category else None
+            o.event(settlement["id"], category, direction, amount)
+            x += amount * (1 if settlement["kind"] == "outflow" else -1)
         for d in sequence(row.get("financing_diagnostics", [])):
             closed(d, "id kind amount rationale")
             text(d["rationale"])
@@ -991,8 +1001,57 @@ def _bridge(req, o, operating_value, rows, rate):
     _require(
         {cat["id"] for cat in categories} == set(BRIDGE_CATEGORIES), "bridge_inventory_incomplete"
     )
+    boundary_lots = {
+        lot["id"]: lot
+        for lot in req["operating_schedule"]["tax_lots"]
+        if lot["origin"] == "boundary_existing" and number(lot["amount"]["value"]) > 0
+    }
+    cash_by_lot = {}
+    boundary_records = {}
+    boundary_pv = 0.0
+    for cash in sequence(b.get("boundary_cash", [])):
+        closed(cash, "id lot_id period_index direction amount claim_rate rationale")
+        identity = text(cash["id"])
+        _require(identity not in boundary_records, "double_counted_event", identity)
+        text(cash["rationale"])
+        _require(cash["direction"] in {"asset", "obligation"}, "boundary_direction_unsupported")
+        idx = integer(cash["period_index"], minimum=1)
+        claim_rate = _amount(o, cash, "claim_rate")
+        _require(claim_rate > 0, "claim_discount_invalid")
+        amount = _amount(o, cash, "amount", True)
+        if cash["lot_id"] is not None:
+            _require(cash["lot_id"] in boundary_lots, "boundary_lot_origin_mismatch")
+            lot = boundary_lots[cash["lot_id"]]
+            _require(
+                cash["direction"] == ("obligation" if lot["leg"] == "payable" else "asset"),
+                "boundary_direction_mismatch",
+            )
+            key = (cash["lot_id"], idx)
+            _require(key not in cash_by_lot, "double_counted_event", cash["lot_id"])
+            cash_by_lot[key] = amount
+            allocations = [
+                a
+                for r in req["operating_schedule"]["periods"]
+                for ll in r["tax_ledgers"]
+                for a in ll["allocations"]
+                if a["lot_id"] == cash["lot_id"] and r["index"] == idx and a["kind"] != "writeoff"
+            ]
+            reconcile(
+                amount,
+                sum(number(a["amount"]["value"]) for a in allocations),
+                "boundary_tax_cash_mismatch",
+            )
+        boundary_records[identity] = {
+            "amount": amount,
+            "direction": cash["direction"],
+            "lot_id": cash["lot_id"],
+        }
+        boundary_pv += (
+            amount / (1 + claim_rate) ** idx * (1 if cash["direction"] == "asset" else -1)
+        )
     items = sequence(b["items"])
     by_category = {}
+    linked_boundary = set()
     total = 0.0
     excluded_pairs = {}
     for item in items:
@@ -1023,15 +1082,29 @@ def _bridge(req, o, operating_value, rows, rate):
         elif category not in {"opening_current_tax", "existing_deferred_cash"}:
             _require(item["direction"] == "obligation", "bridge_direction_mismatch")
         if item["location"] == "bridge":
-            o.event(identity)
+            o.event(identity, category, item["direction"], v)
             total += v * (1 if item["direction"] == "asset" else -1)
         elif item["location"] == "operating_schedule":
-            _require(identity in o.events, "claim_operating_event_missing")
-        elif item["location"] == "boundary_schedule":
+            event = o.events.get(identity)
+            _require(event is not None, "claim_operating_event_missing", identity)
             _require(
-                identity in {r["id"] for r in b.get("boundary_cash", [])},
-                "claim_boundary_event_missing",
+                event["category"] == category and event["direction"] == item["direction"],
+                "claim_operating_event_mismatch",
+                identity,
             )
+            reconcile(v, event["amount"], "claim_operating_event_mismatch", identity)
+        elif item["location"] == "boundary_schedule":
+            event = boundary_records.get(identity)
+            _require(event is not None, "claim_boundary_event_missing", identity)
+            _require(
+                event["direction"] == item["direction"]
+                and (event["lot_id"] is None or category == "opening_current_tax"),
+                "claim_boundary_event_mismatch",
+                identity,
+            )
+            reconcile(v, event["amount"], "claim_boundary_event_mismatch", identity)
+            o.event(identity, category, item["direction"], v)
+            linked_boundary.add(identity)
         else:
             _require(v == 0, "excluded_matched_pair_value_nonzero")
             pair_id = text(item.get("matched_pair_id"))
@@ -1039,6 +1112,7 @@ def _bridge(req, o, operating_value, rows, rate):
                 (item["direction"], _amount(o, item, "excluded_amount", True))
             )
         by_category.setdefault(category, []).append(identity)
+    _require(set(boundary_records) == linked_boundary, "claim_boundary_event_missing")
     for pair in excluded_pairs.values():
         _require(
             len(pair) == 2 and {direction for direction, _ in pair} == {"asset", "obligation"},
@@ -1057,47 +1131,6 @@ def _bridge(req, o, operating_value, rows, rate):
             (cat["status"] == "valued") == bool(by_category.get(cat["id"])),
             "bridge_category_value_missing",
             cat["id"],
-        )
-    boundary_lots = {
-        lot["id"]: lot
-        for lot in req["operating_schedule"]["tax_lots"]
-        if lot["origin"] == "boundary_existing" and number(lot["amount"]["value"]) > 0
-    }
-    cash_by_lot = {}
-    boundary_pv = 0.0
-    for cash in sequence(b.get("boundary_cash", [])):
-        closed(cash, "id lot_id period_index direction amount claim_rate rationale")
-        text(cash["rationale"])
-        o.event(cash["id"])
-        _require(cash["direction"] in {"asset", "obligation"}, "boundary_direction_unsupported")
-        idx = integer(cash["period_index"], minimum=1)
-        claim_rate = _amount(o, cash, "claim_rate")
-        _require(claim_rate > 0, "claim_discount_invalid")
-        amount = _amount(o, cash, "amount", True)
-        if cash["lot_id"] is not None:
-            _require(cash["lot_id"] in boundary_lots, "boundary_lot_origin_mismatch")
-            lot = boundary_lots[cash["lot_id"]]
-            _require(
-                cash["direction"] == ("obligation" if lot["leg"] == "payable" else "asset"),
-                "boundary_direction_mismatch",
-            )
-            key = (cash["lot_id"], idx)
-            _require(key not in cash_by_lot, "double_counted_event", cash["lot_id"])
-            cash_by_lot[key] = amount
-            allocations = [
-                a
-                for r in req["operating_schedule"]["periods"]
-                for ll in r["tax_ledgers"]
-                for a in ll["allocations"]
-                if a["lot_id"] == cash["lot_id"] and r["index"] == idx and a["kind"] != "writeoff"
-            ]
-            reconcile(
-                amount,
-                sum(number(a["amount"]["value"]) for a in allocations),
-                "boundary_tax_cash_mismatch",
-            )
-        boundary_pv += (
-            amount / (1 + claim_rate) ** idx * (1 if cash["direction"] == "asset" else -1)
         )
     for identity, lot in boundary_lots.items():
         valued = [
@@ -1272,6 +1305,8 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
         return result
     tail_attempted = False
     try:
+        o.add(req.get("discount"))
+        o.add(req.get("terminal"))
         r = _discount(req, o)
         # Before terminal validation, an explicit-period diagnostic remains useful.
         horizon = len(rows)
@@ -1354,6 +1389,8 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             )
         return _finish(result, o)
     try:
+        o.add(req.get("bridge"))
+        o.add(req.get("ownership"))
         equity, boundary_pv = _bridge(req, o, value, rows, r)
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(
@@ -1421,10 +1458,12 @@ def _finish(result, o):
         "per_share": "common_equity_millions*1000000/basic_absolute_shares",
     }
     human = {
-        operand
-        for review in o.reviews.values()
-        if review["reviewer_kind"] == "human"
-        for operand in review["scope_operand_ids"]
+        identity
+        for identity in o.used
+        if any(
+            review_id in o.reviews and o.reviews[review_id]["reviewer_kind"] == "human"
+            for review_id in o.ids[identity]["provenance"]["review_ids"]
+        )
     }
     if o.used and o.used <= human:
         result["review_status"] = "human_reviewed"

@@ -285,6 +285,20 @@ def test_a11_share_units():
     assert val(result, "per_share") == pytest.approx(5)
 
 
+def test_limitation_targets_must_name_supported_outputs():
+    req, _ = request()
+    req["limitations"] = [
+        {
+            "id": "misspelled-equity-target",
+            "text": "Material equity claim remains unresolved",
+            "affected_outputs": ["common_equitty"],
+            "material": True,
+        }
+    ]
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["reason_codes"] == ["invalid_limitation_output"]
+
+
 def test_a13_real_material_claim_cannot_be_zeroed():
     req, f = request()
     complete_bridge(req, f)
@@ -307,6 +321,45 @@ def test_a14_double_counted_event_scoped_bridge():
     result = evaluate(req)
     val(result, "operating_value")
     assert result["common_equity"]["reason_codes"] == ["double_counted_event"]
+
+
+def test_bridge_operating_link_requires_matching_event_type_and_amount():
+    req, f = request()
+    allocation = req["operating_schedule"]["periods"][0]["tax_ledgers"][0]["allocations"][0]
+    item = claim(
+        req,
+        f,
+        allocation["id"],
+        "nonlease_debt",
+        allocation["amount"]["value"],
+    )
+    item["location"] = "operating_schedule"
+    complete_bridge(req, f, [item])
+    result = evaluate(req)
+    val(result, "operating_value")
+    assert result["common_equity"]["reason_codes"] == ["claim_operating_event_mismatch"]
+
+
+@pytest.mark.parametrize("module", ["discount", "terminal", "bridge", "ownership"])
+def test_optional_operand_duplicates_only_refuse_dependent_outputs(module):
+    req, f = request()
+    operating_id = req["operating_schedule"]["initial_wc"]["provenance"]["id"]
+    if module in {"bridge", "ownership"}:
+        items = [claim(req, f, "cash", "excess_distributable_cash", 10, "asset")]
+        complete_bridge(req, f, items)
+    targets = {
+        "discount": req["discount"]["rate"],
+        "terminal": req["terminal"]["growth"],
+        "bridge": req.get("bridge", {}).get("items", [{}])[0].get("value"),
+        "ownership": req.get("ownership", {}).get("ordinary_shares"),
+    }
+    targets[module]["provenance"]["id"] = operating_id
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    dependent = "operating_value" if module in {"discount", "terminal"} else "common_equity"
+    if dependent == "common_equity":
+        assert result["operating_value"]["available"]
+    assert result[dependent]["reason_codes"] == ["duplicate_operand_id"]
 
 
 @pytest.mark.parametrize("value", [True, float("nan"), float("inf"), None])
@@ -400,6 +453,51 @@ def test_a10_fact_source_cutoff_and_real_review():
         }
     ]
     assert evaluate(req)["operating_cash_flows"]["reason_codes"] == ["invalid_review_date_or_kind"]
+
+
+def test_human_review_status_requires_operand_backlinks():
+    req, _ = request()
+    used = set(evaluate(req)["equations"]["operand_ids"])
+
+    def link(tree):
+        if isinstance(tree, dict):
+            provenance = tree.get("provenance")
+            if isinstance(provenance, dict) and provenance.get("id") in used:
+                provenance["review_ids"] = ["review"]
+            for value in tree.values():
+                link(value)
+        elif isinstance(tree, list):
+            for value in tree:
+                link(value)
+
+    link(req)
+    req["reviews"] = [
+        {
+            "id": "review",
+            "reviewer": "Actual test human event",
+            "reviewer_kind": "human",
+            "reviewed_on": "2026-06-30",
+            "scope_operand_ids": sorted(used),
+            "basis_identity": "actual complete basis",
+            "conclusion": "conditional",
+            "limitations": [],
+        }
+    ]
+    assert evaluate(req)["review_status"] == "human_reviewed"
+
+    def unlink(tree, identity):
+        if isinstance(tree, dict):
+            provenance = tree.get("provenance")
+            if isinstance(provenance, dict) and provenance.get("id") == identity:
+                provenance["review_ids"] = []
+            for value in tree.values():
+                unlink(value, identity)
+        elif isinstance(tree, list):
+            for value in tree:
+                unlink(value, identity)
+
+    unlink(req, next(iter(used)))
+    assert evaluate(req)["review_status"] == "unreviewed"
 
 
 def test_a17_canonical_input_event_order_not_paths():

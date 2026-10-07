@@ -337,7 +337,51 @@ def test_a3_boundary_lots_writeoff_not_cash_and_bridge_once():
             "rationale": "Duplicate claim should refuse",
         }
     ]
+    scheduled = claim(req, f, "double-tax", "opening_current_tax", 40)
+    scheduled["location"] = "boundary_schedule"
+    req["bridge"]["items"].append(scheduled)
     assert evaluate(req)["common_equity"]["reason_codes"] == ["double_counted_event"]
+
+
+def test_boundary_cash_requires_complete_value_reconciled_inventory_links():
+    req, f = boundary_request()
+    items = [
+        claim(req, f, "scheduled-payable", "opening_current_tax", 40),
+        claim(req, f, "scheduled-refund", "opening_current_tax", 20, "asset"),
+    ]
+    for item in items:
+        item["location"] = "boundary_schedule"
+    complete_bridge(req, f, items)
+    req["bridge"]["boundary_cash"] = [
+        {
+            "id": "scheduled-payable",
+            "lot_id": "opening-payable",
+            "period_index": 1,
+            "direction": "obligation",
+            "amount": f.operand(40),
+            "claim_rate": f.operand(0.1),
+            "rationale": "Explicit opening payable cash",
+        },
+        {
+            "id": "scheduled-refund",
+            "lot_id": "opening-refund",
+            "period_index": 2,
+            "direction": "asset",
+            "amount": f.operand(20),
+            "claim_rate": f.operand(0.1),
+            "rationale": "Explicit opening refund cash",
+        },
+    ]
+    result = evaluate(req)
+    expected = D(40) / D("1.1") - D(20) / D("1.1") ** 2
+    assert result["common_equity"]["value"] == pytest.approx(
+        result["operating_value"]["value"] - float(expected)
+    )
+    req["bridge"]["items"][1]["value"]["value"] = 19
+    assert evaluate(req)["common_equity"]["reason_codes"] == ["claim_boundary_event_mismatch"]
+    req["bridge"]["items"][1]["value"]["value"] = 20
+    req["bridge"]["items"].pop()
+    assert evaluate(req)["common_equity"]["reason_codes"] == ["claim_boundary_event_missing"]
 
 
 def test_a10_adjustment_source_is_validated_and_never_overwritten():

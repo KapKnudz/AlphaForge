@@ -12,6 +12,7 @@ SCHEMA = "forward-fcff-input-v1"
 METHOD = "forward-fcff-schedule-v1"
 CONVENTION = "nominal-annual-end-year-unlevered-shield-excluded-v1"
 VALIDATION = "forward-fcff-controls-v1"
+OUTPUTS = {"operating_cash_flows", "operating_value", "common_equity", "per_share"}
 TOLERANCE = 1e-8
 
 
@@ -224,14 +225,17 @@ class Operands:
         self.sources = {}
         self.reviews = {}
         self.used = set()
-        self.events = set()
+        self.events = {}
         self.cutoff = iso_date(request["evidence_cutoff"])
         self.prepared = iso_date(request["prepared_on"])
         for limitation in sequence(request["limitations"]):
             closed(limitation, "id text affected_outputs material")
             text(limitation["id"])
             text(limitation["text"])
-            sequence(limitation["affected_outputs"])
+            targets = sequence(limitation["affected_outputs"])
+            unique(targets, limitation["id"])
+            if any(not isinstance(target, str) or target not in OUTPUTS for target in targets):
+                raise ContractError("invalid_limitation_output", limitation["id"])
             if not isinstance(limitation["material"], bool):
                 raise ContractError("invalid_limitation")
         unique([v["id"] for v in request["limitations"]])
@@ -296,23 +300,23 @@ class Operands:
             self.sources[text(s["id"])] = s
         unique([s["id"] for s in catalog["sources"]])
 
-        def collect(tree):
-            if isinstance(tree, dict):
-                if set(tree) == {"value", "provenance"}:
-                    p = tree["provenance"]
-                    if isinstance(p, dict) and isinstance(p.get("id"), str):
-                        identity = p["id"]
-                        if identity in self.ids:
-                            raise ContractError("duplicate_operand_id", identity)
-                        self.ids[identity] = tree
-                else:
-                    for v in tree.values():
-                        collect(v)
-            elif isinstance(tree, list):
-                for v in tree:
-                    collect(v)
+        self.add(request["operating_schedule"])
 
-        collect(request)
+    def add(self, tree):
+        if isinstance(tree, dict):
+            if set(tree) == {"value", "provenance"}:
+                p = tree["provenance"]
+                if isinstance(p, dict) and isinstance(p.get("id"), str):
+                    identity = p["id"]
+                    if identity in self.ids:
+                        raise ContractError("duplicate_operand_id", identity)
+                    self.ids[identity] = tree
+            else:
+                for value in tree.values():
+                    self.add(value)
+        elif isinstance(tree, list):
+            for value in tree:
+                self.add(value)
 
     def operand(self, operand, path="", nonnegative=False, _ancestors=()):
         closed(operand, "value provenance", path=path)
@@ -399,11 +403,15 @@ class Operands:
             raise ContractError("negative_operand", path)
         return v
 
-    def event(self, identity):
+    def event(self, identity, category=None, direction=None, amount=None):
         text(identity)
         if identity in self.events:
             raise ContractError("double_counted_event", identity)
-        self.events.add(identity)
+        self.events[identity] = {
+            "category": category,
+            "direction": direction,
+            "amount": amount,
+        }
 
 
 def close(lhs, rhs):

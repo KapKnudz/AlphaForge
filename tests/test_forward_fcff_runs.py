@@ -229,52 +229,17 @@ def test_a19_real_existing_rank_packet_and_calibration_bytes_survive_upgrade(tmp
     conn.close()
 
 
-def test_portable_reference_acceptance_consumer_offline(tmp_path):
+def test_portable_reference_acceptance_rejects_incomplete_matrix_under_optimization(tmp_path):
     import hashlib
     import subprocess
     import sys
-    from decimal import Decimal as D
     from pathlib import Path
 
-    req, _ = request()
-    (tmp_path / "input.json").write_text(canonical(req))
-    profits = [D(100), D(100), D(110), D(121), D("133.1"), D("146.41")]
-    expected_rows = []
-    previous = D(0)
-    for index, cash in enumerate(profits, 1):
-        payment = D(".15") * (cash + previous)
-        refund = D(".10") * previous
-        flow = cash - payment + refund
-        expected_rows.append(
-            {
-                "index": index,
-                "values": {
-                    "gross_tax_payment": str(payment),
-                    "gross_tax_refund": str(refund),
-                    "fcff_operations": str(flow),
-                    "book_da": "0",
-                    "economic_lease_additions": "0",
-                    "gross_economic_investment": "0",
-                },
-            }
-        )
-        previous = cash
-    explicit = D(85) / D("1.2") + D(80) / D("1.2") ** 2
-    terminal = D("88.5") / D(".1") / D("1.2") ** 2
-    expected = {
-        "rows": expected_rows,
-        "horizon": 2,
-        "terminal_numerator": "88.5",
-        "explicit_pv": str(explicit),
-        "terminal_pv": str(terminal),
-        "operating_value": str(explicit + terminal),
-    }
-    (tmp_path / "expected.json").write_text(canonical(expected))
     manifest = {
         "tolerance": {
             "absolute_millions": 2e-8,
             "relative": 2e-12,
-            "justification": "Independent Decimal equations versus finite IEEE-754, not replay tolerance",
+            "justification": "Independent Decimal equations versus finite IEEE-754",
         },
         "oracle_basis": "Written source-free gross-tax equations",
         "cases": [
@@ -299,6 +264,7 @@ def test_portable_reference_acceptance_consumer_offline(tmp_path):
     completed = subprocess.run(
         [
             sys.executable,
+            "-O",
             "-B",
             str(tool),
             "--cases",
@@ -312,9 +278,7 @@ def test_portable_reference_acceptance_consumer_offline(tmp_path):
         ],
         text=True,
         capture_output=True,
-        check=True,
     )
-    receipt = json.loads(completed.stdout)
-    assert receipt["cases"][0]["exact_replay"] is True
-    assert receipt["cases"][0]["equity_available"] is False
-    assert receipt["reference_before"] == receipt["reference_after"]
+    assert completed.returncode != 0
+    assert "acceptance case matrix incomplete" in completed.stderr
+    assert not (tmp_path / "acceptance" / "acceptance-receipt.json").exists()
