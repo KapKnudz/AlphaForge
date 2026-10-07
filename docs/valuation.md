@@ -1,7 +1,8 @@
 # Valuation — heuristic score vs auditable DCF
 
-AlphaForge keeps two valuation surfaces deliberately separate so a heuristic
-ranking never masquerades as a discounted-cash-flow.
+AlphaForge keeps heuristic ranking, admitted mature/reverse DCF and conditional
+supplied-schedule FCFF research separate. Research results do not confer issuer
+admission, calibration or readiness.
 
 ## Heuristic valuation_score (ranking)
 
@@ -310,6 +311,115 @@ ranking never masquerades as a discounted-cash-flow.
   `normalized_financial_view`, `warnings`, and `missing_information` are persisted;
   heuristic score and DCF are never merged. The input-quality retention and rules
   identity are specified by [executed-run replay](executed-run-replay.md).
+
+## Conditional supplied-schedule forward FCFF research
+
+`alphaforge forward-fcff --input-json FILE --exports-dir DIRECTORY` evaluates
+`forward-fcff-schedule-v1` through the pure
+[`forward_fcff.py`](../alphaforge/core/valuation/forward_fcff.py) interface.
+[`forward_fcff_contract.py`](../alphaforge/core/valuation/forward_fcff_contract.py)
+owns the closed, canonical frozen request and provenance/source/review resolver.
+The executable source-free request examples are in
+[`forward_fcff_fixtures.py`](../tests/forward_fcff_fixtures.py); the separate
+[retention/replay contract](executed-run-replay.md#forward-fcff-research-lane)
+owns publication and private reference acceptance.
+
+This additive lane accepts **original SEK or EUR**, one currency per request,
+amounts in millions, absolute basic shares, nominal annual rolling periods and
+end-year discounting. It requires a supplied same-currency annual-effective,
+financing-neutral **asset return, financing shields excluded**. It never uses the
+SEK market-cap hurdle as an EUR rate. Mature/reverse/ranking/readiness currency,
+required-return and refusal policies above are unchanged. No FX, WACC, APV,
+issuer builders, acquisition, calibration, reverse extension or model calls.
+
+Each material numerical operand is `{value, provenance}`; null is unknown, not
+zero. Provenance retains source facts separately from signed analyst adjustments
+and forecast assumptions, their rationale/mechanism/effective periods,
+uncertainty, actual reviews and limitations. Source references must resolve to
+retained catalog bodies and owned anchors. Catalog sources retain publication,
+observation (or explicit unknown) and UTC ingestion separately. `prepared_on` is
+actual preparation date; `evidence_cutoff` controls fact publication. A cutoff
+later than valuation requires `retrospective_research`. Empty reviews remain
+unreviewed; numerical consistency is never accounting approval.
+
+The envelope supplies company/scenario identity, object/perimeter/acquisition
+boundaries, accounting/earnings/capitalized-debt-like lease basis, denomination,
+evidence catalog plus hash, limitations/reviews, and an operating schedule.
+Annual periods start the day after valuation and remain consecutive full rolling
+years (February anniversaries clamp). Core imports no DB/provider/model layer.
+
+Rows supply cash operating profit C, compatible D&A D, other noncash charge N,
+identified positive cash purchases I and economic lease additions L, disposal
+cash V, WC opening/closing states and otherwise-unembedded cash settlements X.
+Aggregate class rollforwards reconcile commissioning, advances, transfers,
+D&A/impairment/disposal/other and closing active/construction balances. Transfers
+require dated transfer events. Optional cohorts validate supplied finite weights,
+residual and life; no default life or builder. Noncash items distinguish asset
+impairments from other charges; recurring stock compensation has no automatic
+free-cash addback. Financing principal/interest are diagnostics, not FCFF.
+
+Gross operating-unlevered tax ledgers supply taxable-basis reconciliation,
+current arising, refund entitlement, payable/receivable states, payment/refund,
+writeoff and explicitly allocated lot movements. Multiple jurisdictions/entities
+require earnings/D&A allocation that sums to the operating perimeter. Lots
+identify `boundary_existing` versus `forecast_created`, eligible amounts/dates,
+prerequisites and each annual cash allocation. No tax expense shortcut, legal
+setoff, negative-profit refund rule or deadline-to-payment inference. Writeoff
+has no second cash charge; deferred cash must be explicitly located, not deducted
+again as book DTL. Annual eligibility/order assumptions remain conditional.
+
+```text
+EBIT = C - D - N
+FCFF_operations = EBIT + D + N - (P - R) - I - L + V - delta_WC - X
+                = C - (P - R) - I - L + V - delta_WC - X
+```
+
+P/R exclude opening boundary lots. Opening claim cash and claim-adjusted FCFF
+are disclosed separately; they do not alter operating value. Gross investment,
+net book investment and net cash reinvestment are separate diagnostics, never
+three competing deductions. Economic lease addition is not necessarily upfront
+cash payment. Deficits are retained; operating value needs explicit continuing
+capacity and funding-access premises, not a cash-solvency forecast.
+
+Optional Gordon continuation requires **full N+1 and N+2 rows**, independently
+supplied geometric primitive templates, stationary active-class renewal/balance
+premises, exhausted finite states and mature gross tax queues/kernels. Every
+material primitive/gross leg is checked, not merely net FCFF equality. Queue
+source years must be in the selected geometric accrual regime, with correct
+remaining lots; payment/refund recurrences verify separately. The caller chooses
+N; failed transitions refuse, never silently extend. Refusal certificates retain
+failures and a diagnostic full next-year row, without a terminal-PV scalar.
+
+```text
+explicit_PV = sum(F_t / (1+r)^t, t=1..N)
+TV_N = full_scheduled_F_(N+1) / (r-g), with -1 < g < r
+operating_value_shields_excluded = explicit_PV + TV_N / (1+r)^N
+```
+
+Witness rows do not enter explicit PV. No transitional `F_N*(1+g)`, qT=r,
+NOPAT/r, exit-multiple or zero-tail substitution. Complete finite runoff with
+zero residual operating/tax/WC/asset states is the alternative; an incomplete
+schedule exposes explicit PV **only**, not EV. Versioned control rounding is
+`1e-8 * max(1, abs(lhs), abs(rhs))`, solely for reconciliation, never signs,
+rate/growth admission, eligibility or exact replay.
+
+Four distinct outputs expose conditional/insufficient-evidence/invalid-input/
+unsupported/not-requested status, reasons, missing inputs, conditions and values:
+operating cash rows, operating value, common equity and basic per-share. Optional
+rate/tail/bridge/ownership refusal does not poison valid upstream cash rows.
+A bridge needs a dated same-currency complete category inventory, already-valued
+claim PVs or separately discounted boundary cash, and count-once event allocation.
+Known opening tax claims cannot be declared absent; restricted cash/obligation
+pairs must be excluded together. Missing material cash/consideration/deferred/
+pension/legal/noncommon claims withhold **equity and per-share**, not operating
+value. A missing basic count alone withholds per-share, not equity. Externally
+valued rights are subtracted once with basic shares; exercise dilution and option
+pricing are unsupported. Negative equity is retained as nontradable, not floored.
+
+All results are conditional supplied-premise research. In particular, reproducing
+the corrected Evolution operating reference is **not a completed Evolution equity
+valuation or financial sign-off**. Authentic translations, sources and receipts
+remain private; only source-free independent tests and portable instructions ship.
 
 ## Börsdata field mapping (anti-leakage seam)
 

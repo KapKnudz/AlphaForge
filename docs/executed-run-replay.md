@@ -151,3 +151,106 @@ exercise real two-connection insertion interleaving through rank/export/replay,
 contradictory concurrent retention refusal, original-source/snapshot rejection-ID
 mapping after live-row removal, source-map atomicity/immutability and v17 upgrade
 without fabricated source IDs.
+
+## Forward FCFF research lane
+
+`alphaforge forward-fcff --input-json FILE --exports-dir DIRECTORY` and
+`alphaforge forward-fcff-replay --run-id ID` are **separate research commands**.
+[`db/forward_fcff_runs.py`](../alphaforge/db/forward_fcff_runs.py) retains tagged
+`forward-fcff-retained-v1` numerical bodies using the existing immutable input
+retention helper. [Migration 020](../db/migrations/020_forward_fcff_runs.sql) adds
+one append-only `forward_fcff_runs` table linked to numerical identity, **not**
+a ranking-run FK. No synthetic ranking, calibration or approval rows are created.
+Old records remain unchanged; old rank replay retains its honest code/rule
+incompatibility refusal. A v19 upgrade is additive; the sole existing migration
+assertion follows current schema version rather than hardcoding v19.
+
+`freeze` canonicalizes JSON keys and ID-keyed economic arrays; annual periods
+remain ordered. Catalog hashes are verified against supplied bodies before
+canonical source ordering is normalized. The numerical body includes the selected
+request and retained textual-context digest; catalog bodies/anchors stay in the
+separate context column. Both are integrity-bound. Identity excludes filesystem
+paths and collection wall time, but includes actually consumed preparation,
+publication/review facts and limitations. Rules pin schema/method/economic/control
+versions, executing sources and retention/CLI/schema helpers, Git revision and
+Python/SQLite runtime. No live source/company lookup occurs during replay.
+
+Input retention **commits before evaluation**. Canonical output and its hash
+commit before filesystem publication. Output-retention failure leaves at most
+an unused input body, no consumable research run. Triggers prohibit update,
+delete and replacement. Replay verifies all retained bodies/context/output hashes,
+requires compatible retained rules/runtime/code, then invokes the **same pure
+evaluator** and compares canonical output bytes exactly. No tolerance, display
+rounding, source reacquisition, rank evaluator or historical-code download.
+
+Write-once `DIRECTORY/forward-fcff/runs/<artifact_id>/` contains `input.json`,
+`context.json`, `outputs.json`, `run.json`, `cash-flows.csv` and `report.md`.
+The artifact ID binds the lane, local run ID, numerical/context/output identities.
+A completed staging directory is published only after retention; identical reuse
+checks every byte and conflicting directories refuse. There is no mutable ranking
+alias or score injection. Reports display date/currency/units, retrospective basis,
+review/AI premise status, shield exclusion, four output statuses, exact numerator,
+explicit horizon, gross tax legs and material bridge limitations.
+
+### Independent acceptance (A1–A21)
+
+Offline independent written equations and refusal cases live in
+[`test_forward_fcff.py`](../tests/test_forward_fcff.py),
+[`controls`](../tests/test_forward_fcff_controls.py) and
+[`CLI/retention tests`](../tests/test_forward_fcff_runs.py). Source-free SEK and EUR
+fixtures share economics without conversion or rate-policy fallback. Decimal
+expectations cover full next-year numerators, separate gross-leg cancellation,
+one/two-year lag horizons, finite runoff, commissioning, gross/net investment,
+lease financing exclusion, boundary claims/writeoffs, WC, provenance, units,
+scoped refusals, count-once bridges and exact replay. File-backed two-connection,
+retention/export failure, immutable-record, corruption and migration tests
+exercise the actual boundaries, not implementation-source text matching.
+
+Authentic corrected Evolution acceptance is **private** and complementary, not
+the public arithmetic oracle or issuer admission. Portable procedure:
+
+1. Pair an explicitly supplied frozen reference root with its freeze manifest;
+   verify every pinned original hash before and after. Never regenerate or edit
+   that reference, its sources or manifest.
+2. Independently translate preserved primitive/state CSVs into the general
+   request, retaining source catalog bodies/dates/anchors, actual boundary lots,
+   AI assumptions and unresolved material equity/ownership limitations. Do not
+   import issuer constants into the engine. Use original nominal EUR and supplied
+   financing-neutral EUR returns; no SEK hurdle or FX.
+3. Independently derive expected annual gross payment/refund, asset investments,
+   D&A/classes/leases, WC, FCFF and full terminal numerator from the preserved
+   written/Decimal reference equations, **not new evaluator output**. Derive
+   explicit and terminal PV separately and use declared written horizons. Test
+   all three main paths at each supplied return, both late-inflation alternatives,
+   and the late two-year refund-lag case. Also supply failing transitional tails
+   and separately corrected-horizon requests; matching EV alone is insufficient.
+4. Before comparisons declare absolute tolerance **2e-8 million units** and
+   relative tolerance **2e-12**. These accommodate 22-year IEEE-754 accumulation
+   versus 40-digit Decimal equations and are far smaller than the identified
+   terminal correction. They apply only to **financial reference comparisons**;
+   compatible retained replay must match canonical bytes exactly.
+5. Retain private `cases.json` with `tolerance` (keys `absolute_millions`,
+   `relative`, `justification`), `oracle_basis`, and `cases` (each `id`,
+   `input_file`, `expected_file`, optional `transitional_input_file`). Expected
+   files contain `rows` (`index`, `values`: dot-separated output paths to Decimal
+   strings), `horizon`, `terminal_numerator`, `explicit_pv`, `terminal_pv`,
+   `operating_value`. No expected field may be copied from the new evaluator.
+6. Run the portable consumer, with all private paths explicitly paired:
+
+   ```sh
+   python -B tools/check_forward_fcff_acceptance.py \
+     --cases PRIVATE/cases.json --out PRIVATE/acceptance \
+     --reference-freeze PRIVATE/reference-freeze.json \
+     --reference-root PRIVATE/corrected-reference
+   ```
+
+   It exercises the pure evaluator **and actual CLI/export/retained replay**, checks
+   annual legs plus numerator/horizon/PVs, refuses the transitional requests in
+   both paths and verifies exact replay for successful and refused runs. It
+   writes a private receipt with identities, tolerances, comparisons, original
+   freeze checks and explicitly unavailable equity/share outputs. Retain this
+   receipt with the private authentic translations. After code/rule changes use
+   a new compatible run; do not rewrite or pretend old runs remain compatible.
+
+This milestone produces reproducible **conditional operating values**, not a
+completed Evolution equity valuation, accounting review or financial sign-off.

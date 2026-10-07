@@ -680,7 +680,9 @@ def test_v18_upgrade_adds_empty_calibration_lane_without_backfill():
     conn.execute("DROP TABLE reinvestment_calibrations")
     conn.execute("PRAGMA user_version=18")
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
+    from alphaforge.config import SCHEMA_VERSION
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM reinvestment_calibrations").fetchone()[0] == 0
 
 
