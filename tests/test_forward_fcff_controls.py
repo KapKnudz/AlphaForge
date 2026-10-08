@@ -303,6 +303,27 @@ def boundary_request():
     return req, f
 
 
+def test_tax_lot_origin_period_and_boundary_date_are_bidirectional():
+    forecast, _ = request()
+    assert evaluate(forecast)["operating_cash_flows"]["available"]
+    forecast["operating_schedule"]["tax_lots"][0]["source_period"] = 0
+    assert evaluate(forecast)["operating_cash_flows"]["reason_codes"] == [
+        "tax_lot_origin_period_mismatch"
+    ]
+
+    boundary, _ = boundary_request()
+    assert evaluate(boundary)["operating_cash_flows"]["available"]
+    wrong_period = copy.deepcopy(boundary)
+    wrong_period["operating_schedule"]["tax_lots"][0]["source_period"] = 1
+    assert evaluate(wrong_period)["operating_cash_flows"]["reason_codes"] == [
+        "tax_lot_origin_period_mismatch"
+    ]
+    boundary["operating_schedule"]["tax_lots"][0]["accounting_date"] = "2026-06-29"
+    assert evaluate(boundary)["operating_cash_flows"]["reason_codes"] == [
+        "boundary_lot_date_mismatch"
+    ]
+
+
 def test_a3_boundary_lots_writeoff_not_cash_and_bridge_once():
     req, f = boundary_request()
     result = evaluate(req)
@@ -339,6 +360,7 @@ def test_a3_boundary_lots_writeoff_not_cash_and_bridge_once():
     ]
     scheduled = claim(req, f, "double-tax", "opening_current_tax", 40)
     scheduled["location"] = "boundary_schedule"
+    scheduled["period_index"] = 1
     req["bridge"]["items"].append(scheduled)
     assert evaluate(req)["common_equity"]["reason_codes"] == ["double_counted_event"]
 
@@ -349,8 +371,9 @@ def test_boundary_cash_requires_complete_value_reconciled_inventory_links():
         claim(req, f, "scheduled-payable", "opening_current_tax", 40),
         claim(req, f, "scheduled-refund", "opening_current_tax", 20, "asset"),
     ]
-    for item in items:
+    for period_index, item in enumerate(items, 1):
         item["location"] = "boundary_schedule"
+        item["period_index"] = period_index
     complete_bridge(req, f, items)
     req["bridge"]["boundary_cash"] = [
         {
@@ -485,6 +508,7 @@ def test_missing_basic_count_limitation_does_not_withhold_equity():
             "id": "basic-count-unknown",
             "text": "Only the basic count is unknown",
             "affected_outputs": ["per_share"],
+            "conditional_outputs": [],
             "material": True,
         }
     ]

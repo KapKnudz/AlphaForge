@@ -42,6 +42,12 @@ BRIDGE_CATEGORIES = (
 )
 RIGHTS = ("minority", "preferred", "options", "warrants")
 ASSETS = {"excess_distributable_cash", "nonoperating_assets"}
+SETTLEMENT_BRIDGE_DIRECTIONS = {
+    "acquisition_consideration": "obligation",
+    "pension_employee": "obligation",
+    "legal_other": "obligation",
+    "nonoperating_assets": "asset",
+}
 
 
 def _anniversary(d):
@@ -54,6 +60,16 @@ def _anniversary(d):
 def _require(condition, code, path=""):
     if not condition:
         raise ContractError(code, path)
+
+
+def _require_no_material_limitation(req, target, code):
+    for limitation in req["limitations"]:
+        if (
+            limitation["material"]
+            and target in limitation["affected_outputs"]
+            and target not in limitation["conditional_outputs"]
+        ):
+            raise ContractError(code, limitation["id"])
 
 
 def _amount(o, row, key, nonnegative=False):
@@ -124,10 +140,17 @@ def _lots(schedule, o):
         _require(lot["leg"] in {"payable", "refund"}, "tax_lot_leg_unsupported")
         integer(lot["source_period"])
         _require(
-            lot["origin"] != "boundary_existing" or lot["source_period"] == 0,
-            "boundary_lot_created_after_boundary",
+            (lot["origin"] == "boundary_existing") == (lot["source_period"] == 0),
+            "tax_lot_origin_period_mismatch",
+            identity,
         )
         iso_date(lot["accounting_date"])
+        if lot["origin"] == "boundary_existing":
+            _require(
+                lot["accounting_date"] == o.request["valuation_date"],
+                "boundary_lot_date_mismatch",
+                identity,
+            )
         if lot["eligible_date"] is not None:
             iso_date(lot["eligible_date"])
         text(lot["eligibility_basis"])
@@ -306,7 +329,7 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 if bridge_category and kind == "refund"
                 else None
             )
-            o.event(a["id"], bridge_category, bridge_direction, amount)
+            o.event(a["id"], bridge_category, bridge_direction, amount, index)
             _require(
                 amount <= v["remaining"]
                 or math.isclose(amount, v["remaining"], rel_tol=1e-8, abs_tol=1e-8),
@@ -433,7 +456,7 @@ def _assets(o, row, da, impairment, start, end, previous):
         closed(d, "id asset_class proceeds carrying_reduction gain_tax_basis")
         text(d["gain_tax_basis"])
         proceeds = _amount(o, d, "proceeds", True)
-        o.event(d["id"], "nonoperating_assets", "asset", proceeds)
+        o.event(d["id"], "nonoperating_assets", "asset", proceeds, row["index"])
         disposal_cash += proceeds
         c = text(d["asset_class"])
         disposal_nbvs[c] = disposal_nbvs.get(c, 0) + _amount(o, d, "carrying_reduction", True)
@@ -593,7 +616,8 @@ def _schedule(req, o):
     asset_prior = {}
     tax_prior = {}
     wc = _amount(o, s, "initial_wc")
-    start = iso_date(req["valuation_date"]) + timedelta(days=1)
+    boundary = iso_date(req["valuation_date"])
+    start = boundary + timedelta(days=1)
     result = []
     ids = []
     for index, row in enumerate(periods, 1):
@@ -604,7 +628,7 @@ def _schedule(req, o):
         )
         ids.append(text(row["id"]))
         _require(integer(row["index"], minimum=1) == index, "unsupported_period")
-        end = _anniversary(start) - timedelta(days=1)
+        end = _anniversary(boundary)
         _require(
             iso_date(row["start"]) == start and iso_date(row["end"]) == end,
             "unsupported_period",
@@ -646,13 +670,18 @@ def _schedule(req, o):
         p, r, bp, br, tax_legs = _tax(o, row, ebit, da, lots, tax_prior, index, start, end)
         x = 0.0
         for settlement in sequence(row["settlements"]):
-            closed(settlement, "id kind amount rationale")
+            closed(settlement, "id kind amount rationale bridge_category period_index")
             text(settlement["rationale"])
             _require(settlement["kind"] in {"outflow", "recovery"}, "settlement_kind_unsupported")
+            category = text(settlement["bridge_category"])
+            direction = SETTLEMENT_BRIDGE_DIRECTIONS.get(category)
+            _require(direction is not None, "settlement_bridge_category_unsupported", category)
+            expected_kind = "outflow" if direction == "obligation" else "recovery"
+            _require(settlement["kind"] == expected_kind, "settlement_bridge_direction_mismatch")
+            period_index = integer(settlement["period_index"], minimum=1)
+            _require(period_index == index, "settlement_period_mismatch", settlement["id"])
             amount = _amount(o, settlement, "amount", True)
-            category = "legal_other" if settlement["kind"] == "outflow" else None
-            direction = "obligation" if category else None
-            o.event(settlement["id"], category, direction, amount)
+            o.event(settlement["id"], category, direction, amount, period_index)
             x += amount * (1 if settlement["kind"] == "outflow" else -1)
         for d in sequence(row.get("financing_diagnostics", [])):
             closed(d, "id kind amount rationale")
@@ -706,6 +735,7 @@ def _schedule(req, o):
             }
         )
         wc = wc_close
+        boundary = end
         start = end + timedelta(days=1)
     unique(ids)
     ledger_ids = set(tax_prior)
@@ -993,9 +1023,6 @@ def _bridge(req, o, operating_value, rows, rate):
         and set(c["inventoried_categories"]) == set(BRIDGE_CATEGORIES),
         "bridge_material_claim_unresolved",
     )
-    for limit in req["limitations"]:
-        if limit["material"] and "common_equity" in limit["affected_outputs"]:
-            raise ContractError("bridge_material_claim_unresolved", limit["id"])
     categories = sequence(b["categories"])
     unique([cat["id"] for cat in categories])
     _require(
@@ -1045,6 +1072,7 @@ def _bridge(req, o, operating_value, rows, rate):
             "amount": amount,
             "direction": cash["direction"],
             "lot_id": cash["lot_id"],
+            "period_index": idx,
         }
         boundary_pv += (
             amount / (1 + claim_rate) ** idx * (1 if cash["direction"] == "asset" else -1)
@@ -1058,7 +1086,7 @@ def _bridge(req, o, operating_value, rows, rate):
         closed(
             item,
             "id category location direction value currency valuation_date classification_basis",
-            "matched_pair_id excluded_amount",
+            "matched_pair_id excluded_amount period_index",
         )
         identity = item["id"]
         category = item["category"]
@@ -1081,6 +1109,15 @@ def _bridge(req, o, operating_value, rows, rate):
             _require(item["direction"] == "asset", "bridge_direction_mismatch")
         elif category not in {"opening_current_tax", "existing_deferred_cash"}:
             _require(item["direction"] == "obligation", "bridge_direction_mismatch")
+        claimed_period = item.get("period_index")
+        if item["location"] in {"operating_schedule", "boundary_schedule"}:
+            _require(
+                isinstance(claimed_period, int) and not isinstance(claimed_period, bool),
+                "bridge_claim_period_missing",
+                identity,
+            )
+        else:
+            _require(claimed_period is None, "bridge_claim_period_unexpected", identity)
         if item["location"] == "bridge":
             o.event(identity, category, item["direction"], v)
             total += v * (1 if item["direction"] == "asset" else -1)
@@ -1088,7 +1125,9 @@ def _bridge(req, o, operating_value, rows, rate):
             event = o.events.get(identity)
             _require(event is not None, "claim_operating_event_missing", identity)
             _require(
-                event["category"] == category and event["direction"] == item["direction"],
+                event["category"] == category
+                and event["direction"] == item["direction"]
+                and event["period_index"] == claimed_period,
                 "claim_operating_event_mismatch",
                 identity,
             )
@@ -1098,12 +1137,13 @@ def _bridge(req, o, operating_value, rows, rate):
             _require(event is not None, "claim_boundary_event_missing", identity)
             _require(
                 event["direction"] == item["direction"]
+                and event["period_index"] == claimed_period
                 and (event["lot_id"] is None or category == "opening_current_tax"),
                 "claim_boundary_event_mismatch",
                 identity,
             )
             reconcile(v, event["amount"], "claim_boundary_event_mismatch", identity)
-            o.event(identity, category, item["direction"], v)
+            o.event(identity, category, item["direction"], v, event["period_index"])
             linked_boundary.add(identity)
         else:
             _require(v == 0, "excluded_matched_pair_value_nonzero")
@@ -1233,6 +1273,8 @@ def _refusal(error, optional=False):
         "ownership_claim_unvalued",
         "ownership_material_input_unresolved",
         "terminal_mature_queue_missing",
+        "operating_cash_flow_material_input_unresolved",
+        "operating_value_material_input_unresolved",
     }:
         status = "insufficient_evidence"
     elif "unsupported" in code or code in {
@@ -1287,6 +1329,11 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             }
         )
         rows, lots = _schedule(req, o)
+        _require_no_material_limitation(
+            req,
+            "operating_cash_flows",
+            "operating_cash_flow_material_input_unresolved",
+        )
         conditions = [
             "Supplied schedules and continuing capacity are assumptions, not issuer admission.",
             "No financial sign-off; financing shields excluded.",
@@ -1305,6 +1352,11 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
         return result
     tail_attempted = False
     try:
+        _require_no_material_limitation(
+            req,
+            "operating_value",
+            "operating_value_material_input_unresolved",
+        )
         o.add(req.get("discount"))
         o.add(req.get("terminal"))
         r = _discount(req, o)
@@ -1389,8 +1441,12 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             )
         return _finish(result, o)
     try:
+        _require_no_material_limitation(
+            req,
+            "common_equity",
+            "bridge_material_claim_unresolved",
+        )
         o.add(req.get("bridge"))
-        o.add(req.get("ownership"))
         equity, boundary_pv = _bridge(req, o, value, rows, r)
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(
@@ -1411,15 +1467,15 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
         )
         return _finish(result, o)
     try:
+        _require_no_material_limitation(
+            req,
+            "per_share",
+            "ownership_material_input_unresolved",
+        )
         own = req.get("ownership")
         _require(own is not None, "ownership_census_missing")
         _rights(req, own, req["bridge"])
-        for limitation in req["limitations"]:
-            _require(
-                not (limitation["material"] and "per_share" in limitation["affected_outputs"]),
-                "ownership_material_input_unresolved",
-                limitation["id"],
-            )
+        o.add(own["ordinary_shares"])
         shares = _amount(o, own, "ordinary_shares")
         provenance = own["ordinary_shares"]["provenance"]
         if provenance["class"] == "reported_fact":

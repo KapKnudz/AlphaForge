@@ -335,8 +335,12 @@ issuer builders, acquisition, calibration, reverse extension or model calls.
 Each material numerical operand is `{value, provenance}`; null is unknown, not
 zero. Provenance retains source facts separately from signed analyst adjustments
 and forecast assumptions, their rationale/mechanism/effective periods,
-uncertainty, actual reviews and limitations. Source references must resolve to
-retained catalog bodies and owned anchors. Catalog sources retain publication,
+uncertainty, actual reviews and limitations. Every material limitation names at
+least one of the four outputs; unresolved targets withhold that output plus its
+dependents, while fully specified conditional-premise targets must be explicitly
+listed in `conditional_outputs`. Source references must resolve to retained
+catalog bodies and owned anchors.
+Catalog sources retain publication,
 observation (or explicit unknown) and UTC ingestion separately. `prepared_on` is
 actual preparation date; `evidence_cutoff` controls fact publication. A cutoff
 later than valuation requires `retrospective_research`. Empty reviews remain
@@ -346,12 +350,17 @@ The envelope supplies company/scenario identity, object/perimeter/acquisition
 boundaries, accounting/earnings/capitalized-debt-like lease basis, denomination,
 evidence catalog plus hash, limitations/reviews, and an operating schedule.
 Annual periods start the day after valuation and remain consecutive full rolling
-years (February anniversaries clamp). Core imports no DB/provider/model layer.
+years whose inclusive ends repeat the valuation boundary's month/day, clamped
+for February. Thus a 2024-02-28 boundary produces 2024-02-29 through 2025-02-28,
+so the leap day remains in the full annual interval instead of shortening and
+shifting every later fiscal endpoint. Core imports no DB/provider/model layer.
 
 Rows supply cash operating profit C, compatible D&A D, other noncash charge N,
 identified positive cash purchases I and economic lease additions L, disposal
 cash V, WC opening/closing states and otherwise-unembedded cash settlements X.
-Aggregate class rollforwards reconcile commissioning, advances, transfers,
+Each settlement declares its bridge category and schedule period so count-once
+links reconcile category, direction, period and amount. Aggregate class
+rollforwards reconcile commissioning, advances, transfers,
 D&A/impairment/disposal/other and closing active/construction balances. Transfers
 require dated transfer events. Optional cohorts validate supplied finite weights,
 residual and life; no default life or builder. Noncash items distinguish asset
@@ -362,8 +371,9 @@ Gross operating-unlevered tax ledgers supply taxable-basis reconciliation,
 current arising, refund entitlement, payable/receivable states, payment/refund,
 writeoff and explicitly allocated lot movements. Multiple jurisdictions/entities
 require earnings/D&A allocation that sums to the operating perimeter. Lots
-identify `boundary_existing` versus `forecast_created`, eligible amounts/dates,
-prerequisites and each annual cash allocation. No tax expense shortcut, legal
+identify `boundary_existing` period-zero valuation-date balances versus
+`forecast_created` positive-period amounts, eligible dates, prerequisites and
+each annual cash allocation. No tax expense shortcut, legal
 setoff, negative-profit refund rule or deadline-to-payment inference. Writeoff
 has no second cash charge; deferred cash must be explicitly located, not deducted
 again as book DTL. Annual eligibility/order assumptions remain conditional.

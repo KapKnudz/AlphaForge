@@ -37,6 +37,18 @@ REQUIRED_CASES = {
     f"{group}-return-{return_number}": {
         "horizon": 16 if group == "late2_refund_two_year_lag" else 15,
         "transition": group in TRANSITION_GROUPS,
+        "transition_failure": (
+            {
+                "code": "tail_primitive_nonstationary",
+                "path": (
+                    "tax/tax/refund"
+                    if group == "late2_refund_two_year_lag"
+                    else "tax/tax/arising"
+                ),
+            }
+            if group in TRANSITION_GROUPS
+            else None
+        ),
     }
     for group in CASE_GROUPS
     for return_number in range(1, 4)
@@ -171,6 +183,38 @@ def check_output(actual, expected, absolute, relative, case_id):
     return checks + 4
 
 
+def check_transition_refusal(result, case_id):
+    dimensions = REQUIRED_CASES[case_id]
+    failure = dimensions["transition_failure"]
+    require(failure is not None, "unexpected transition case", case_id)
+    require(
+        result["operating_cash_flows"]["available"]
+        and not result["operating_value"]["available"],
+        "transition did not preserve cash and refuse value",
+        case_id,
+    )
+    require(
+        result["operating_value"]["reason_codes"] == [failure["code"]],
+        "transition refusal reason mismatch",
+        case_id,
+    )
+    require(
+        result["terminal"]["horizon"] == dimensions["horizon"] - 1,
+        "transition horizon mismatch",
+        case_id,
+    )
+    require(
+        result["terminal"]["certificate"]["failures"] == [failure],
+        "transition refusal certificate mismatch",
+        case_id,
+    )
+    require(
+        result["terminal"]["present_value"] is None,
+        "transition emitted terminal value",
+        case_id,
+    )
+
+
 def validate_manifest(manifest):
     require(
         set(manifest) == {"tolerance", "oracle_basis", "cases"},
@@ -283,31 +327,11 @@ def main():
                 "transition scenario identity mismatch",
                 case["id"],
             )
-            require(
-                failed["operating_cash_flows"]["available"]
-                and not failed["operating_value"]["available"],
-                "transition did not preserve cash and refuse value",
-                case["id"],
-            )
+            check_transition_refusal(failed, case["id"])
             require(
                 canonical(failed["operating_cash_flows"])
                 == canonical(pure["operating_cash_flows"]),
                 "transition pair changed operating cash flows",
-                case["id"],
-            )
-            require(
-                failed["terminal"]["horizon"] == expected["horizon"] - 1,
-                "transition horizon mismatch",
-                case["id"],
-            )
-            require(
-                bool(failed["terminal"]["certificate"]["failures"]),
-                "transition refusal certificate missing",
-                case["id"],
-            )
-            require(
-                failed["terminal"]["present_value"] is None,
-                "transition emitted terminal value",
                 case["id"],
             )
 
@@ -332,19 +356,14 @@ def main():
                 Path(transitional_run["export_directory"]) / "outputs.json"
             ).read_bytes()
             transitional_output = json.loads(transitional_bytes)
+            check_transition_refusal(transitional_output, case["id"])
             require(
-                transitional_output["operating_cash_flows"]["available"]
-                and not transitional_output["operating_value"]["available"],
-                "CLI transition did not preserve cash and refuse value",
+                transitional_bytes == canonical(failed).encode(),
+                "pure/CLI transition output mismatch",
                 case["id"],
             )
             transitional_replay = cli(
                 "forward-fcff-replay", "--run-id", str(transitional_run["run_id"])
-            )
-            require(
-                bool(transitional_output["terminal"]["certificate"]["failures"]),
-                "CLI transition refusal certificate missing",
-                case["id"],
             )
             require(
                 canonical(transitional_replay["outputs"]).encode() == transitional_bytes,

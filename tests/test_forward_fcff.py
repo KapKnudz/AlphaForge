@@ -161,6 +161,8 @@ def test_a1_a2_a4_basic_arithmetic_gross_net_leases():
             "kind": "outflow",
             "amount": f.operand(1),
             "rationale": "Otherwise unembedded cash",
+            "bridge_category": "legal_other",
+            "period_index": 1,
         }
     ]
     row["financing_diagnostics"] = [
@@ -292,11 +294,79 @@ def test_limitation_targets_must_name_supported_outputs():
             "id": "misspelled-equity-target",
             "text": "Material equity claim remains unresolved",
             "affected_outputs": ["common_equitty"],
+            "conditional_outputs": [],
             "material": True,
         }
     ]
     result = evaluate(req)
     assert result["operating_cash_flows"]["reason_codes"] == ["invalid_limitation_output"]
+
+
+def test_material_limitations_withhold_each_target_and_dependents():
+    for target in (
+        "operating_cash_flows",
+        "operating_value",
+        "common_equity",
+        "per_share",
+    ):
+        req, f = request()
+        complete_bridge(req, f)
+        req["limitations"] = [
+            {
+                "id": f"unresolved-{target}",
+                "text": "Material input remains unresolved",
+                "affected_outputs": [target],
+                "conditional_outputs": [],
+                "material": True,
+            }
+        ]
+        result = evaluate(req)
+        if target == "operating_cash_flows":
+            assert result[target]["reason_codes"] == [
+                "operating_cash_flow_material_input_unresolved"
+            ]
+            assert not result["operating_value"]["available"]
+        elif target == "operating_value":
+            assert result["operating_cash_flows"]["available"]
+            assert result[target]["reason_codes"] == [
+                "operating_value_material_input_unresolved"
+            ]
+            assert result["common_equity"]["reason_codes"] == ["operating_value_unavailable"]
+        elif target == "common_equity":
+            assert result["operating_value"]["available"]
+            assert result[target]["reason_codes"] == ["bridge_material_claim_unresolved"]
+            assert result["per_share"]["reason_codes"] == ["common_equity_unavailable"]
+        else:
+            assert result["common_equity"]["available"]
+            assert result[target]["reason_codes"] == ["ownership_material_input_unresolved"]
+
+
+def test_material_limitation_requires_a_target_but_nonmaterial_note_may_be_untargeted():
+    req, f = request()
+    complete_bridge(req, f)
+    req["limitations"] = [
+        {
+            "id": "unresolved-without-target",
+            "text": "Material input has no declared output",
+            "affected_outputs": [],
+            "conditional_outputs": [],
+            "material": True,
+        }
+    ]
+    assert evaluate(req)["operating_cash_flows"]["reason_codes"] == [
+        "invalid_limitation_output"
+    ]
+    req["limitations"][0].update(
+        affected_outputs=["operating_value"],
+        conditional_outputs=["operating_value"],
+    )
+    assert evaluate(req)["operating_value"]["available"]
+    req["limitations"][0].update(
+        affected_outputs=[],
+        conditional_outputs=[],
+        material=False,
+    )
+    assert evaluate(req)["per_share"]["available"]
 
 
 def test_a13_real_material_claim_cannot_be_zeroed():
@@ -307,6 +377,7 @@ def test_a13_real_material_claim_cannot_be_zeroed():
             "id": "actual-cash-unknown",
             "text": "Material actual issuer cash/claims not classified",
             "affected_outputs": ["common_equity", "per_share"],
+            "conditional_outputs": [],
             "material": True,
         }
     ]
@@ -323,6 +394,51 @@ def test_a14_double_counted_event_scoped_bridge():
     assert result["common_equity"]["reason_codes"] == ["double_counted_event"]
 
 
+@pytest.mark.parametrize(
+    "category", ["pension_employee", "acquisition_consideration", "legal_other"]
+)
+def test_settlement_bridge_links_reconcile_category_direction_period_and_amount(category):
+    req, f = request()
+    req["operating_schedule"]["periods"][0]["settlements"] = [
+        {
+            "id": "scheduled-claim",
+            "kind": "outflow",
+            "amount": f.operand(5),
+            "rationale": "Explicit scheduled claim cash",
+            "bridge_category": category,
+            "period_index": 1,
+        }
+    ]
+    item = claim(req, f, "scheduled-claim", category, 5)
+    item.update(location="operating_schedule", period_index=1)
+    complete_bridge(req, f, [item])
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["value"] == result["operating_value"]["value"]
+
+    wrong_direction = copy.deepcopy(req)
+    wrong_direction["operating_schedule"]["periods"][0]["settlements"][0]["kind"] = "recovery"
+    assert evaluate(wrong_direction)["operating_cash_flows"]["reason_codes"] == [
+        "settlement_bridge_direction_mismatch"
+    ]
+    wrong_period = copy.deepcopy(req)
+    wrong_period["operating_schedule"]["periods"][0]["settlements"][0]["period_index"] = 2
+    assert evaluate(wrong_period)["operating_cash_flows"]["reason_codes"] == [
+        "settlement_period_mismatch"
+    ]
+    wrong_link_period = copy.deepcopy(req)
+    wrong_link_period["bridge"]["items"][0]["period_index"] = 2
+    wrong_link = evaluate(wrong_link_period)
+    assert wrong_link["operating_value"]["available"]
+    assert wrong_link["common_equity"]["reason_codes"] == ["claim_operating_event_mismatch"]
+    wrong_amount = copy.deepcopy(req)
+    wrong_amount["bridge"]["items"][0]["value"]["value"] = 4
+    assert evaluate(wrong_amount)["common_equity"]["reason_codes"] == [
+        "claim_operating_event_mismatch"
+    ]
+
+
 def test_bridge_operating_link_requires_matching_event_type_and_amount():
     req, f = request()
     allocation = req["operating_schedule"]["periods"][0]["tax_ledgers"][0]["allocations"][0]
@@ -334,6 +450,7 @@ def test_bridge_operating_link_requires_matching_event_type_and_amount():
         allocation["amount"]["value"],
     )
     item["location"] = "operating_schedule"
+    item["period_index"] = 1
     complete_bridge(req, f, [item])
     result = evaluate(req)
     val(result, "operating_value")
@@ -353,13 +470,24 @@ def test_optional_operand_duplicates_only_refuse_dependent_outputs(module):
         "bridge": req.get("bridge", {}).get("items", [{}])[0].get("value"),
         "ownership": req.get("ownership", {}).get("ordinary_shares"),
     }
+    valid = evaluate(req)
+    assert valid["operating_value"]["available"]
+    if module in {"bridge", "ownership"}:
+        assert valid["common_equity"]["available"]
+    if module == "ownership":
+        assert valid["per_share"]["available"]
     targets[module]["provenance"]["id"] = operating_id
     result = evaluate(req)
     assert result["operating_cash_flows"]["available"]
-    dependent = "operating_value" if module in {"discount", "terminal"} else "common_equity"
-    if dependent == "common_equity":
+    if module in {"discount", "terminal"}:
+        assert result["operating_value"]["reason_codes"] == ["duplicate_operand_id"]
+    elif module == "bridge":
         assert result["operating_value"]["available"]
-    assert result[dependent]["reason_codes"] == ["duplicate_operand_id"]
+        assert result["common_equity"]["reason_codes"] == ["duplicate_operand_id"]
+    else:
+        assert result["operating_value"]["available"]
+        assert result["common_equity"]["available"]
+        assert result["per_share"]["reason_codes"] == ["duplicate_operand_id"]
 
 
 @pytest.mark.parametrize("value", [True, float("nan"), float("inf"), None])
@@ -402,6 +530,35 @@ def test_a11_a12_closed_shape(change):
     if change == "units":
         req["denomination"]["amount_units"] = "absolute"
     assert not evaluate(req)["operating_cash_flows"]["available"]
+
+
+def test_leap_day_stays_in_full_annual_period_without_shifting_endpoints():
+    req, _ = request()
+    req["valuation_date"] = "2024-02-28"
+    req["evidence_cutoff"] = "2024-02-28"
+    req["prepared_on"] = "2024-02-28"
+    expected = [
+        ("2024-02-29", "2025-02-28"),
+        ("2025-03-01", "2026-02-28"),
+        ("2026-03-01", "2027-02-28"),
+        ("2027-03-01", "2028-02-28"),
+        ("2028-02-29", "2029-02-28"),
+        ("2029-03-01", "2030-02-28"),
+    ]
+    for row, (start, end) in zip(req["operating_schedule"]["periods"], expected, strict=True):
+        row["start"] = start
+        row["end"] = end
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert [
+        (row["start"], row["end"]) for row in result["operating_cash_flows"]["value"]
+    ] == expected
+
+    shortened = copy.deepcopy(req)
+    shortened["operating_schedule"]["periods"][0]["end"] = "2025-02-27"
+    assert evaluate(shortened)["operating_cash_flows"]["reason_codes"] == [
+        "unsupported_period"
+    ]
 
 
 def test_a10_fact_source_cutoff_and_real_review():

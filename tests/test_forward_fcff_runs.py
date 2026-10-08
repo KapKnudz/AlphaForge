@@ -229,6 +229,42 @@ def test_a19_real_existing_rank_packet_and_calibration_bytes_survive_upgrade(tmp
     conn.close()
 
 
+def test_transition_acceptance_requires_catalogued_nonstationarity():
+    from tools.check_forward_fcff_acceptance import (
+        AcceptanceError,
+        check_transition_refusal,
+    )
+
+    case_id = "tail_inflation_1pct_after_year10-return-1"
+    output = {
+        "operating_cash_flows": {"available": True},
+        "operating_value": {
+            "available": False,
+            "reason_codes": ["tail_primitive_nonstationary"],
+        },
+        "terminal": {
+            "horizon": 14,
+            "present_value": None,
+            "certificate": {
+                "failures": [
+                    {
+                        "code": "tail_primitive_nonstationary",
+                        "path": "tax/tax/arising",
+                    }
+                ]
+            },
+        },
+    }
+    check_transition_refusal(output, case_id)
+    unrelated = json.loads(json.dumps(output))
+    unrelated["operating_value"]["reason_codes"] = ["terminal_growth_invalid"]
+    unrelated["terminal"]["certificate"]["failures"] = [
+        {"code": "terminal_growth_invalid", "path": ""}
+    ]
+    with pytest.raises(AcceptanceError, match="transition refusal reason mismatch"):
+        check_transition_refusal(unrelated, case_id)
+
+
 def test_portable_reference_acceptance_rejects_incomplete_matrix_under_optimization(tmp_path):
     import hashlib
     import subprocess

@@ -229,15 +229,24 @@ class Operands:
         self.cutoff = iso_date(request["evidence_cutoff"])
         self.prepared = iso_date(request["prepared_on"])
         for limitation in sequence(request["limitations"]):
-            closed(limitation, "id text affected_outputs material")
+            closed(limitation, "id text affected_outputs conditional_outputs material")
             text(limitation["id"])
             text(limitation["text"])
             targets = sequence(limitation["affected_outputs"])
+            conditional = sequence(limitation["conditional_outputs"])
             unique(targets, limitation["id"])
-            if any(not isinstance(target, str) or target not in OUTPUTS for target in targets):
+            unique(conditional, limitation["id"])
+            if (
+                any(not isinstance(target, str) or target not in OUTPUTS for target in targets)
+                or any(target not in targets for target in conditional)
+            ):
                 raise ContractError("invalid_limitation_output", limitation["id"])
             if not isinstance(limitation["material"], bool):
                 raise ContractError("invalid_limitation")
+            if limitation["material"] and not targets:
+                raise ContractError("invalid_limitation_output", limitation["id"])
+            if not limitation["material"] and conditional:
+                raise ContractError("invalid_limitation_output", limitation["id"])
         unique([v["id"] for v in request["limitations"]])
         for r in sequence(request["reviews"]):
             closed(
@@ -403,7 +412,7 @@ class Operands:
             raise ContractError("negative_operand", path)
         return v
 
-    def event(self, identity, category=None, direction=None, amount=None):
+    def event(self, identity, category=None, direction=None, amount=None, period_index=None):
         text(identity)
         if identity in self.events:
             raise ContractError("double_counted_event", identity)
@@ -411,6 +420,7 @@ class Operands:
             "category": category,
             "direction": direction,
             "amount": amount,
+            "period_index": period_index,
         }
 
 
