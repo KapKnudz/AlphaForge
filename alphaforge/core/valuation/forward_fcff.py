@@ -114,13 +114,22 @@ def _denomination(req):
     ):
         text(obj[k])
     sequence(obj["acquisitions"])
+    valuation_date = iso_date(req["valuation_date"])
     for a in obj["acquisitions"]:
         closed(a, "id description included control_date")
-        text(a["id"])
+        identity = text(a["id"])
         text(a["description"])
         _require(isinstance(a["included"], bool), "acquisition_perimeter_invalid")
+        path = f"object.acquisitions.{identity}.control_date"
+        if a["included"] and a["control_date"] is None:
+            raise ContractError("acquisition_control_date_missing", path)
         if a["control_date"] is not None:
-            iso_date(a["control_date"])
+            control_date = iso_date(a["control_date"])
+            _require(
+                not a["included"] or control_date <= valuation_date,
+                "future_acquisition_control_unsupported",
+                path,
+            )
     _require(obj["kind"] == "existing_consolidated_operations", "object_unsupported")
     _require(obj["lease_basis"] == "capitalized_debt_like", "lease_basis_unsupported")
 
@@ -886,6 +895,8 @@ def _tail(req, o, rows, lots, rate):
     exhausted = sequence(t["exhausted_states"])
     for state in exhausted:
         closed(state, "id path exhausted_by rationale")
+    unique([state["id"] for state in exhausted], "terminal.exhausted_states")
+    for state in exhausted:
         text(state["rationale"])
         by = integer(state["exhausted_by"], minimum=1)
         _require(by <= n and state["path"] in rows[by - 1]["legs"], "terminal_exhaustion_missing")
@@ -931,6 +942,31 @@ def _tail(req, o, rows, lots, rate):
         regime = regimes[accrual_path]
         queue = sequence(kernel["queues"])
         queue_ids = []
+        expected_queue = {}
+        for candidate in lots.values():
+            record = candidate["record"]
+            if not (
+                record["origin"] == "forecast_created"
+                and record["ledger_id"] == ledger
+                and record["leg"] == ("payable" if leg == "payment" else "refund")
+                and record["source_period"] <= n
+            ):
+                continue
+            remaining = candidate["amount"]
+            for rr in req["operating_schedule"]["periods"][:n]:
+                for ll in rr["tax_ledgers"]:
+                    remaining -= sum(
+                        number(a["amount"]["value"])
+                        for a in ll["allocations"]
+                        if a["lot_id"] == record["id"]
+                    )
+                    remaining += sum(
+                        number(movement["amount"]["value"])
+                        for movement in ll.get("lot_movements", [])
+                        if movement["lot_id"] == record["id"]
+                    )
+            if not math.isclose(remaining, 0.0, abs_tol=1e-8, rel_tol=1e-8):
+                expected_queue[record["id"]] = remaining
         for q in queue:
             closed(q, "id source_period lot_id remaining_at_tail")
             lot = lots.get(q["lot_id"])
@@ -946,22 +982,21 @@ def _tail(req, o, rows, lots, rate):
                 "terminal_queue_lot_mismatch",
             )
             remaining = _amount(o, q, "remaining_at_tail", True)
-            # Reconstruct residual at start of N+1, not after witness execution.
-            spent = 0.0
-            for rr in req["operating_schedule"]["periods"][:n]:
-                for ll in rr["tax_ledgers"]:
-                    for a in ll["allocations"]:
-                        if a["lot_id"] == record["id"]:
-                            spent += number(a["amount"]["value"])
-                    for movement in ll.get("lot_movements", []):
-                        if movement["lot_id"] == record["id"]:
-                            spent -= number(movement["amount"]["value"])
-            reconcile(remaining, lot["amount"] - spent, "terminal_queue_balance_mismatch")
+            reconcile(
+                remaining,
+                expected_queue.get(record["id"], 0.0),
+                "terminal_queue_balance_mismatch",
+            )
             queue_ids.append(record["id"])
             queue_receipts.append(
                 {"lot_id": record["id"], "source_period": source, "remaining_at_tail": remaining}
             )
         unique(queue_ids)
+        _require(
+            set(queue_ids) == set(expected_queue),
+            "terminal_mature_queue_missing",
+            f"terminal.tax_kernels.{ledger}.{leg}.queues",
+        )
         for tindex in (n + 1, n + 2):
             cash_expected = 0.0
             for w in weights:

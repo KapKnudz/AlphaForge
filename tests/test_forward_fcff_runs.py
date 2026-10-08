@@ -266,11 +266,56 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
         check_transition_refusal(unrelated, case_id)
 
 
-def test_transition_pair_rejects_changed_terminal_premises():
+def test_transition_pair_rejects_changed_terminal_premises_losslessly():
+    from forward_fcff_fixtures import set_tail
     from tools.check_forward_fcff_acceptance import AcceptanceError, check_transition_pair
 
-    corrected, _ = request(horizon=2)
-    transitional, _ = request(horizon=1)
+    corrected, corrected_inputs = request(horizon=2)
+    transitional, transitional_inputs = request(horizon=1)
+
+    def split_payable_lots(req):
+        replacements = {}
+        lots = []
+        for lot in req["operating_schedule"]["tax_lots"]:
+            if lot["leg"] != "payable":
+                lots.append(lot)
+                continue
+            split = []
+            for suffix in ("a", "b"):
+                part = json.loads(json.dumps(lot))
+                part["id"] = f"{lot['id']}-{suffix}"
+                part["amount"]["value"] /= 2
+                part["amount"]["provenance"]["id"] += f"-{suffix}"
+                lots.append(part)
+                split.append(part["id"])
+            replacements[lot["id"]] = split
+        req["operating_schedule"]["tax_lots"] = lots
+        for row in req["operating_schedule"]["periods"]:
+            for ledger in row["tax_ledgers"]:
+                allocations = []
+                for allocation in ledger["allocations"]:
+                    if allocation["lot_id"] not in replacements:
+                        allocations.append(allocation)
+                        continue
+                    for suffix, lot_id in zip(("a", "b"), replacements[allocation["lot_id"]]):
+                        part = json.loads(json.dumps(allocation))
+                        part["id"] += f"-{suffix}"
+                        part["lot_id"] = lot_id
+                        part["amount"]["value"] /= 2
+                        part["amount"]["provenance"]["id"] += f"-{suffix}"
+                        allocations.append(part)
+                ledger["allocations"] = allocations
+
+    split_payable_lots(corrected)
+    split_payable_lots(transitional)
+    set_tail(corrected, corrected_inputs, 2, 0.1, {"tax/tax/arising": 2, "tax/tax/entitlement": 2})
+    set_tail(
+        transitional,
+        transitional_inputs,
+        1,
+        0.1,
+        {"tax/tax/arising": 2, "tax/tax/entitlement": 2},
+    )
     for corrected_template, transitional_template in zip(
         corrected["terminal"]["templates"],
         transitional["terminal"]["templates"],
@@ -288,15 +333,40 @@ def test_transition_pair_rejects_changed_terminal_premises():
         "synthetic-transition",
     )
 
-    changed = json.loads(json.dumps(transitional))
-    changed["terminal"]["tax_kernels"][0]["weights"][0]["weight"]["value"] = 0.9
-    changed["terminal"]["tax_kernels"][0]["weights"][1]["weight"]["value"] = 0.1
+    reordered = json.loads(json.dumps(corrected))
+    reordered["terminal"]["tax_kernels"][0]["queues"].reverse()
+    for index, queue in enumerate(reordered["terminal"]["tax_kernels"][0]["queues"]):
+        queue["id"] = f"benign-queue-{index}"
+    check_transition_pair(
+        reordered,
+        transitional,
+        evaluate(reordered),
+        transitional_result,
+        "synthetic-transition",
+    )
+
+    changed_member = json.loads(json.dumps(corrected))
+    changed_member["terminal"]["tax_kernels"][0]["queues"][0]["remaining_at_tail"][
+        "provenance"
+    ]["rationale"] = "Changed premise for one same-age lot"
+    with pytest.raises(AcceptanceError, match="transition queue provenance mismatch"):
+        check_transition_pair(
+            changed_member,
+            transitional,
+            evaluate(changed_member),
+            transitional_result,
+            "synthetic-transition",
+        )
+
+    changed_weights = json.loads(json.dumps(transitional))
+    changed_weights["terminal"]["tax_kernels"][0]["weights"][0]["weight"]["value"] = 0.9
+    changed_weights["terminal"]["tax_kernels"][0]["weights"][1]["weight"]["value"] = 0.1
     with pytest.raises(AcceptanceError, match="transition kernel weights mismatch"):
         check_transition_pair(
             corrected,
-            changed,
+            changed_weights,
             corrected_result,
-            evaluate(changed),
+            evaluate(changed_weights),
             "synthetic-transition",
         )
 

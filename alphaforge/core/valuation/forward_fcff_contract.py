@@ -329,6 +329,45 @@ class Operands:
             for value in tree:
                 self.add(value)
 
+    def _source_lineage(self, provenance, seen=()):
+        source_ids = []
+        for ref in provenance["source_refs"]:
+            if ref["source_id"] not in source_ids:
+                source_ids.append(ref["source_id"])
+        for parent in provenance["derived_from"]:
+            if parent in seen:
+                continue
+            parent_provenance = self.ids[parent]["provenance"]
+            for source_id in self._source_lineage(parent_provenance, (*seen, parent)):
+                if source_id not in source_ids:
+                    source_ids.append(source_id)
+        return source_ids
+
+    def _record_review_chronology(self, identity, provenance):
+        for rid in provenance["review_ids"]:
+            review = self.reviews[rid]
+            for source_id in self._source_lineage(provenance, (identity,)):
+                source = self.sources[source_id]
+                publication = source["publication_date"]
+                code = None
+                if publication is None:
+                    code = "review_source_publication_unknown"
+                elif iso_date(review["reviewed_on"]) < iso_date(publication):
+                    code = "review_precedes_source_publication"
+                if code is None:
+                    continue
+                link = (identity, rid, source_id)
+                if link not in self.ineligible_review_links:
+                    self.ineligible_review_links.add(link)
+                    self.review_diagnostics.append(
+                        {
+                            "code": code,
+                            "operand_id": identity,
+                            "review_id": rid,
+                            "source_id": source_id,
+                        }
+                    )
+
     def operand(self, operand, path="", nonnegative=False, _ancestors=()):
         closed(operand, "value provenance", path=path)
         p = closed(
@@ -373,29 +412,16 @@ class Operands:
             for k in ("url", "sha256", "publication_date", "observation_date"):
                 if k in ref and ref[k] != s[k]:
                     raise ContractError("source_reference_mismatch", identity)
-            if p["class"] == "reported_fact" and (
-                s["publication_date"] is None or iso_date(s["publication_date"]) > self.cutoff
-            ):
-                raise ContractError("fact_not_cutoff_qualified", identity)
-            if p["class"] == "reported_fact":
+            if p["class"] == "reported_fact" and s["publication_date"] is not None:
                 observed = p["accounting_date"] or p["period_end"]
                 if observed is not None and iso_date(observed) > iso_date(s["publication_date"]):
                     raise ContractError("future_amount_not_observed_fact", identity)
-                for rid in p["review_ids"]:
-                    review = self.reviews[rid]
-                    if iso_date(review["reviewed_on"]) < iso_date(s["publication_date"]):
-                        link = (identity, rid, s["id"])
-                        if link not in self.ineligible_review_links:
-                            self.ineligible_review_links.add(link)
-                            self.review_diagnostics.append(
-                                {
-                                    "code": "review_precedes_source_publication",
-                                    "operand_id": identity,
-                                    "review_id": rid,
-                                    "source_id": s["id"],
-                                }
-                            )
+        self._record_review_chronology(identity, p)
         if p["class"] == "reported_fact":
+            for ref in p["source_refs"]:
+                publication = self.sources[ref["source_id"]]["publication_date"]
+                if publication is None or iso_date(publication) > self.cutoff:
+                    raise ContractError("fact_not_cutoff_qualified", identity)
             if (
                 not p["source_refs"]
                 or not (p["accounting_date"] or p["period_start"])

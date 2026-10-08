@@ -345,14 +345,20 @@ Source references must resolve to retained catalog bodies and owned anchors.
 Catalog sources retain publication, observation (or explicit unknown) and UTC
 ingestion separately. `prepared_on` is actual preparation date;
 `evidence_cutoff` controls fact publication. A cutoff later than valuation
-requires `retrospective_research`. A review predating a cited fact's publication
-is retained as a chronology diagnostic but cannot qualify the output as human
-reviewed. Empty reviews remain unreviewed; numerical consistency is never
-accounting approval.
+requires `retrospective_research`. A review predating any known publication in
+the operand's direct or derived source lineage is retained as a chronology
+diagnostic but cannot qualify the output as human reviewed. Unknown publication
+timing likewise prevents review qualification and emits an explicit diagnostic;
+it does not suppress otherwise supported conditional arithmetic. Empty reviews
+remain unreviewed; numerical consistency is never accounting approval.
 
 The envelope supplies company/scenario identity, object/perimeter/acquisition
 boundaries, accounting/earnings/capitalized-debt-like lease basis, denomination,
-evidence catalog plus hash, limitations/reviews, and an operating schedule.
+evidence catalog plus hash, limitations/reviews, and an operating schedule. An
+included acquisition requires a known control date on or before valuation;
+unknown inclusion is insufficient perimeter evidence and future inclusion is
+outside existing consolidated operations. Excluded acquisitions do not acquire
+an inferred control date or alter aggregate schedules.
 Annual periods start the day after valuation and remain consecutive full rolling
 years whose inclusive ends repeat the valuation boundary's month/day, clamped
 for February. Thus a 2024-02-28 boundary produces 2024-02-29 through 2025-02-28,
@@ -401,13 +407,18 @@ capacity and funding-access premises, not a cash-solvency forecast.
 Optional Gordon continuation requires **full N+1 and N+2 rows**, independently
 supplied geometric primitive templates, stationary active-class renewal/balance
 premises, exhausted finite states and mature gross tax queues/kernels. Every
-material primitive/gross leg is checked, not merely net FCFF equality. Queue
-source years must be in the selected geometric accrual regime, with correct
-remaining lots; payment/refund recurrences verify separately. The caller chooses
+material primitive/gross leg is checked, not merely net FCFF equality. Each
+kernel queue exactly inventories every nonzero forecast-created lot for its
+ledger and leg at start N+1, including multiple lots of the same age; opening
+boundary lots remain separate. Queue source years must be in the selected
+geometric accrual regime, with correct remaining amounts after movements and
+allocations; payment/refund recurrences verify separately. Exhausted-state IDs
+are unique. The caller chooses
 N; failed transitions refuse, never silently extend. Acceptance pairs preserve
 growth, kernels, perimeter, primitive definitions and absolute economic regime
 starts. Only the one-year horizon/tail coordinate and independently reconciled
-seed, queue and finite-state advancement may differ. Refusal certificates retain
+seed, losslessly compared queue multiset and finite-state advancement may differ.
+Queue display IDs and order do not change premise identity. Refusal certificates retain
 failures and a diagnostic full next-year row, without a terminal-PV scalar.
 
 ```text

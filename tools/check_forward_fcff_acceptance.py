@@ -259,6 +259,34 @@ def _check_terminal_coordinates(request, result, case_id):
             )
 
 
+def _queue_premises(terminal, kernel):
+    premises = []
+    for queue in kernel["queues"]:
+        provenance = {
+            key: value
+            for key, value in queue["remaining_at_tail"]["provenance"].items()
+            if key != "id"
+        }
+        premises.append(
+            (
+                terminal["horizon"] - queue["source_period"],
+                canonical(provenance),
+            )
+        )
+    return sorted(premises)
+
+
+def _exhausted_states(terminal, case_id):
+    states = terminal["exhausted_states"]
+    identities = [state["id"] for state in states]
+    require(
+        len(identities) == len(set(identities)),
+        "transition exhausted-state identity duplicated",
+        case_id,
+    )
+    return {state["id"]: state for state in states}
+
+
 def check_transition_pair(
     corrected_request, transitional_request, corrected, transitional, case_id
 ):
@@ -368,31 +396,14 @@ def check_transition_pair(
             "transition kernel weights mismatch",
             (case_id, identity),
         )
-        corrected_queue_premises = {
-            corrected_terminal["horizon"] - queue["source_period"]: {
-                key: value
-                for key, value in queue["remaining_at_tail"]["provenance"].items()
-                if key != "id"
-            }
-            for queue in corrected_kernel["queues"]
-        }
-        transitional_queue_premises = {
-            transitional_terminal["horizon"] - queue["source_period"]: {
-                key: value
-                for key, value in queue["remaining_at_tail"]["provenance"].items()
-                if key != "id"
-            }
-            for queue in transitional_kernel["queues"]
-        }
         require(
-            corrected_queue_premises == transitional_queue_premises,
+            _queue_premises(corrected_terminal, corrected_kernel)
+            == _queue_premises(transitional_terminal, transitional_kernel),
             "transition queue provenance mismatch",
             (case_id, identity),
         )
-    corrected_states = {state["id"]: state for state in corrected_terminal["exhausted_states"]}
-    transitional_states = {
-        state["id"]: state for state in transitional_terminal["exhausted_states"]
-    }
+    corrected_states = _exhausted_states(corrected_terminal, case_id)
+    transitional_states = _exhausted_states(transitional_terminal, case_id)
     all_states = set(corrected_states) | set(transitional_states)
     for identity in all_states:
         state = corrected_states.get(identity) or transitional_states[identity]

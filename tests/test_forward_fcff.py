@@ -340,6 +340,88 @@ def test_consumed_unresolved_operands_are_stage_scoped():
         assert result[key]["reason_codes"] == ["required_operand_unresolved"]
 
 
+def test_terminal_queue_covers_all_remaining_lots_beyond_witness_years():
+    req, _ = request(
+        profits=(100,) * 12,
+        tau=0.1,
+        rho=0.1,
+        lag=5,
+        horizon=5,
+        growth=0,
+    )
+    entitlement = next(
+        template
+        for template in req["terminal"]["templates"]
+        if template["path"] == "tax/tax/entitlement"
+    )
+    entitlement["regime_start"] = 1
+    assert evaluate(req)["operating_value"]["available"]
+    req["terminal"]["tax_kernels"][1]["queues"] = [
+        queue
+        for queue in req["terminal"]["tax_kernels"][1]["queues"]
+        if queue["source_period"] != 3
+    ]
+    omitted = evaluate(req)
+    assert omitted["operating_cash_flows"]["available"]
+    assert omitted["operating_value"]["reason_codes"] == ["terminal_mature_queue_missing"]
+    assert omitted["operating_value"]["missing_inputs"] == [
+        "terminal.tax_kernels.tax.refund.queues"
+    ]
+
+
+def test_exhausted_state_ids_are_unique_without_collapsing_distinct_states():
+    req, _ = request()
+    req["terminal"]["exhausted_states"] = [
+        {
+            "id": "plant-closing",
+            "path": "asset/plant/closing",
+            "exhausted_by": 1,
+            "rationale": "Synthetic zero state",
+        },
+        {
+            "id": "plant-construction",
+            "path": "asset/plant/construction_close",
+            "exhausted_by": 1,
+            "rationale": "Synthetic distinct zero state",
+        },
+    ]
+    assert evaluate(req)["operating_value"]["available"]
+    req["terminal"]["exhausted_states"][1]["id"] = "plant-closing"
+    duplicate = evaluate(req)
+    assert duplicate["operating_cash_flows"]["available"]
+    assert duplicate["operating_value"]["reason_codes"] == ["duplicate_id"]
+    assert duplicate["operating_value"]["missing_inputs"] == ["terminal.exhausted_states"]
+
+
+def test_acquisition_control_dates_gate_existing_operations_perimeter():
+    req, _ = request()
+    acquisition = {
+        "id": "acquisition",
+        "description": "Synthetic perimeter declaration",
+        "included": True,
+        "control_date": req["valuation_date"],
+    }
+    req["object"]["acquisitions"] = [acquisition]
+    assert evaluate(req)["operating_cash_flows"]["available"]
+
+    acquisition["control_date"] = "2027-01-01"
+    future = evaluate(req)
+    assert future["operating_cash_flows"]["reason_codes"] == [
+        "future_acquisition_control_unsupported"
+    ]
+    assert future["operating_cash_flows"]["missing_inputs"] == [
+        "object.acquisitions.acquisition.control_date"
+    ]
+
+    acquisition["control_date"] = None
+    unknown = evaluate(req)
+    assert unknown["operating_cash_flows"]["reason_codes"] == [
+        "acquisition_control_date_missing"
+    ]
+    acquisition["included"] = False
+    assert evaluate(req)["operating_cash_flows"]["available"]
+
+
 def test_a11_share_units():
     req, f = request(profits=(0.15, 0.15, 0.15), tau=0, rho=0, horizon=1, growth=0, rate=0.1)
     complete_bridge(req, f, shares=300000)
@@ -677,14 +759,7 @@ def test_prepublication_review_is_retained_but_cannot_qualify_output():
     req, _ = request()
     operand = req["discount"]["rate"]
     provenance = operand["provenance"]
-    provenance.update(
-        {
-            "class": "reported_fact",
-            "source_refs": [{"source_id": "source", "anchor": "p1"}],
-            "uncertainty": "source_observed",
-            "accounting_date": "2025-12-31",
-        }
-    )
+    provenance["source_refs"] = [{"source_id": "source", "anchor": "p1"}]
     catalog = {
         "sources": [
             {
@@ -742,6 +817,100 @@ def test_prepublication_review_is_retained_but_cannot_qualify_output():
     assert eligible["operating_value"]["value"] == early["operating_value"]["value"]
     assert eligible["review_status"] == "human_reviewed"
     assert "review_diagnostics" not in eligible
+
+    catalog["sources"][0]["publication_date"] = None
+    catalog["sources"][0]["limitations"] = ["publication_unknown"]
+    req["evidence_context"] = {"catalog": catalog, "catalog_hash": digest(catalog)}
+    unknown = evaluate(req)
+    assert unknown["operating_value"]["value"] == early["operating_value"]["value"]
+    assert unknown["review_status"] == "unreviewed"
+    assert unknown["review_diagnostics"] == [
+        {
+            "code": "review_source_publication_unknown",
+            "operand_id": provenance["id"],
+            "review_id": "review",
+            "source_id": "source",
+        }
+    ]
+
+
+def test_human_review_status_requires_transitive_source_chronology():
+    req, _ = request()
+    child = req["discount"]["rate"]["provenance"]
+    parent = req["operating_schedule"]["initial_wc"]["provenance"]
+    child["derived_from"] = [parent["id"]]
+    child["source_refs"] = [{"source_id": "old-source", "anchor": "p1"}]
+    parent["source_refs"] = [{"source_id": "new-source", "anchor": "p1"}]
+    catalog = {
+        "sources": [
+            {
+                "id": "old-source",
+                "url": "https://example.test/old",
+                "sha256": "a" * 64,
+                "publication_date": "2019-01-01",
+                "observation_date": "2018-12-31",
+                "ingested_at": "2026-01-02T00:00:00Z",
+                "anchors": {"p1": "Synthetic old premise"},
+                "limitations": [],
+            },
+            {
+                "id": "new-source",
+                "url": "https://example.test/new",
+                "sha256": "b" * 64,
+                "publication_date": "2026-01-01",
+                "observation_date": "2025-12-31",
+                "ingested_at": "2026-01-02T00:00:00Z",
+                "anchors": {"p1": "Synthetic parent premise"},
+                "limitations": [],
+            },
+        ]
+    }
+    req["evidence_context"] = {"catalog": catalog, "catalog_hash": digest(catalog)}
+    used = set(evaluate(req)["equations"]["operand_ids"])
+
+    def link(tree):
+        if isinstance(tree, dict):
+            provenance = tree.get("provenance")
+            if isinstance(provenance, dict) and provenance.get("id") in used:
+                provenance["review_ids"] = ["review"]
+            for value in tree.values():
+                link(value)
+        elif isinstance(tree, list):
+            for value in tree:
+                link(value)
+
+    link(req)
+    parent["review_ids"] = ["parent-review"]
+    req["reviews"] = [
+        {
+            "id": "review",
+            "reviewer": "Actual test human event",
+            "reviewer_kind": "human",
+            "reviewed_on": "2020-01-01",
+            "scope_operand_ids": sorted(used),
+            "basis_identity": "complete child scope",
+            "conclusion": "conditional",
+            "limitations": [],
+        },
+        {
+            "id": "parent-review",
+            "reviewer": "Actual parent review",
+            "reviewer_kind": "human",
+            "reviewed_on": "2026-02-01",
+            "scope_operand_ids": [parent["id"]],
+            "basis_identity": "eligible parent scope",
+            "conclusion": "conditional",
+            "limitations": [],
+        },
+    ]
+    result = evaluate(req)
+    assert result["operating_value"]["available"]
+    assert result["review_status"] == "unreviewed"
+    assert {
+        diagnostic["operand_id"]
+        for diagnostic in result["review_diagnostics"]
+        if diagnostic["code"] == "review_precedes_source_publication"
+    } == {child["id"]}
 
 
 def test_human_review_status_requires_operand_backlinks():
