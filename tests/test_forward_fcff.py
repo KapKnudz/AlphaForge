@@ -279,6 +279,67 @@ def test_a13_a15_bridge_shares_claims_and_negative_equity():
     assert not negative["per_share"]["available"]
 
 
+def test_noncommon_rights_must_exactly_partition_bridge_claims():
+    req, f = request()
+    items = [
+        claim(req, f, "option-a", "noncommon_claims", 12),
+        claim(req, f, "option-b", "noncommon_claims", 8),
+    ]
+    complete_bridge(req, f, items)
+    missing = evaluate(req)
+    assert missing["operating_value"]["available"]
+    assert missing["common_equity"]["reason_codes"] == ["ownership_claim_unvalued"]
+
+    req["ownership"]["rights"][2].update(
+        status="valued", claim_event_ids=["option-a", "option-b"]
+    )
+    valid = evaluate(req)
+    assert valid["common_equity"]["available"]
+    req["ownership"]["rights"][3].update(status="valued", claim_event_ids=["option-a"])
+    duplicate = evaluate(req)
+    assert duplicate["operating_value"]["available"]
+    assert duplicate["common_equity"]["reason_codes"] == ["ownership_claim_duplicated"]
+
+
+def test_consumed_unresolved_operands_are_stage_scoped():
+    cases = (
+        ("schedule", (False, False, False, False)),
+        ("rate", (True, False, False, False)),
+        ("terminal", (True, False, False, False)),
+        ("bridge", (True, True, False, False)),
+        ("shares", (True, True, True, False)),
+    )
+    for location, expected in cases:
+        req, f = request()
+        item = claim(req, f, "debt", "nonlease_debt", 10)
+        complete_bridge(req, f, [item])
+        operands = {
+            "schedule": req["operating_schedule"]["periods"][0][
+                "cash_operating_profit_before_da"
+            ],
+            "rate": req["discount"]["rate"],
+            "terminal": req["terminal"]["growth"],
+            "bridge": item["value"],
+            "shares": req["ownership"]["ordinary_shares"],
+        }
+        operands[location]["provenance"]["uncertainty"] = "unresolved"
+        result = evaluate(req)
+        assert tuple(
+            result[key]["available"]
+            for key in (
+                "operating_cash_flows",
+                "operating_value",
+                "common_equity",
+                "per_share",
+            )
+        ) == expected
+        first_unavailable = expected.index(False)
+        key = ("operating_cash_flows", "operating_value", "common_equity", "per_share")[
+            first_unavailable
+        ]
+        assert result[key]["reason_codes"] == ["required_operand_unresolved"]
+
+
 def test_a11_share_units():
     req, f = request(profits=(0.15, 0.15, 0.15), tau=0, rho=0, horizon=1, growth=0, rate=0.1)
     complete_bridge(req, f, shares=300000)
@@ -610,6 +671,77 @@ def test_a10_fact_source_cutoff_and_real_review():
         }
     ]
     assert evaluate(req)["operating_cash_flows"]["reason_codes"] == ["invalid_review_date_or_kind"]
+
+
+def test_prepublication_review_is_retained_but_cannot_qualify_output():
+    req, _ = request()
+    operand = req["discount"]["rate"]
+    provenance = operand["provenance"]
+    provenance.update(
+        {
+            "class": "reported_fact",
+            "source_refs": [{"source_id": "source", "anchor": "p1"}],
+            "uncertainty": "source_observed",
+            "accounting_date": "2025-12-31",
+        }
+    )
+    catalog = {
+        "sources": [
+            {
+                "id": "source",
+                "url": "https://example.test/source",
+                "sha256": "a" * 64,
+                "publication_date": "2026-01-01",
+                "observation_date": "2025-12-31",
+                "ingested_at": "2026-01-02T00:00:00Z",
+                "anchors": {"p1": "Synthetic retained fact"},
+                "limitations": [],
+            }
+        ]
+    }
+    req["evidence_context"] = {"catalog": catalog, "catalog_hash": digest(catalog)}
+    used = set(evaluate(req)["equations"]["operand_ids"])
+
+    def link(tree):
+        if isinstance(tree, dict):
+            linked = tree.get("provenance")
+            if isinstance(linked, dict) and linked.get("id") in used:
+                linked["review_ids"] = ["review"]
+            for value in tree.values():
+                link(value)
+        elif isinstance(tree, list):
+            for value in tree:
+                link(value)
+
+    link(req)
+    req["reviews"] = [
+        {
+            "id": "review",
+            "reviewer": "Actual test human event",
+            "reviewer_kind": "human",
+            "reviewed_on": "2020-01-01",
+            "scope_operand_ids": sorted(used),
+            "basis_identity": "actual complete basis",
+            "conclusion": "conditional",
+            "limitations": [],
+        }
+    ]
+    early = evaluate(req)
+    assert early["operating_value"]["available"]
+    assert early["review_status"] == "unreviewed"
+    assert early["review_diagnostics"] == [
+        {
+            "code": "review_precedes_source_publication",
+            "operand_id": provenance["id"],
+            "review_id": "review",
+            "source_id": "source",
+        }
+    ]
+    req["reviews"][0]["reviewed_on"] = "2026-02-01"
+    eligible = evaluate(req)
+    assert eligible["operating_value"]["value"] == early["operating_value"]["value"]
+    assert eligible["review_status"] == "human_reviewed"
+    assert "review_diagnostics" not in eligible
 
 
 def test_human_review_status_requires_operand_backlinks():

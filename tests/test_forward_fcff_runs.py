@@ -10,6 +10,7 @@ from forward_fcff_fixtures import request
 
 from alphaforge.cli.forward_fcff import export
 from alphaforge.cli.main import main
+from alphaforge.core.valuation.forward_fcff import evaluate
 from alphaforge.core.valuation.forward_fcff_contract import canonical, freeze
 from alphaforge.db import forward_fcff_runs as runs
 from alphaforge.db.migrations import migrate
@@ -263,6 +264,41 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
     ]
     with pytest.raises(AcceptanceError, match="transition refusal reason mismatch"):
         check_transition_refusal(unrelated, case_id)
+
+
+def test_transition_pair_rejects_changed_terminal_premises():
+    from tools.check_forward_fcff_acceptance import AcceptanceError, check_transition_pair
+
+    corrected, _ = request(horizon=2)
+    transitional, _ = request(horizon=1)
+    for corrected_template, transitional_template in zip(
+        corrected["terminal"]["templates"],
+        transitional["terminal"]["templates"],
+        strict=True,
+    ):
+        corrected_template["regime_start"] = transitional_template["regime_start"]
+    corrected["terminal"]["exhausted_states"] = transitional["terminal"]["exhausted_states"]
+    corrected_result = evaluate(corrected)
+    transitional_result = evaluate(transitional)
+    check_transition_pair(
+        corrected,
+        transitional,
+        corrected_result,
+        transitional_result,
+        "synthetic-transition",
+    )
+
+    changed = json.loads(json.dumps(transitional))
+    changed["terminal"]["tax_kernels"][0]["weights"][0]["weight"]["value"] = 0.9
+    changed["terminal"]["tax_kernels"][0]["weights"][1]["weight"]["value"] = 0.1
+    with pytest.raises(AcceptanceError, match="transition kernel weights mismatch"):
+        check_transition_pair(
+            corrected,
+            changed,
+            corrected_result,
+            evaluate(changed),
+            "synthetic-transition",
+        )
 
 
 def test_portable_reference_acceptance_rejects_incomplete_matrix_under_optimization(tmp_path):

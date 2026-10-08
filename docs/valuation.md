@@ -335,16 +335,20 @@ issuer builders, acquisition, calibration, reverse extension or model calls.
 Each material numerical operand is `{value, provenance}`; null is unknown, not
 zero. Provenance retains source facts separately from signed analyst adjustments
 and forecast assumptions, their rationale/mechanism/effective periods,
-uncertainty, actual reviews and limitations. Every material limitation names at
-least one of the four outputs; unresolved targets withhold that output plus its
-dependents, while fully specified conditional-premise targets must be explicitly
-listed in `conditional_outputs`. Source references must resolve to retained
-catalog bodies and owned anchors.
-Catalog sources retain publication,
-observation (or explicit unknown) and UTC ingestion separately. `prepared_on` is
-actual preparation date; `evidence_cutoff` controls fact publication. A cutoff
-later than valuation requires `retrospective_research`. Empty reviews remain
-unreviewed; numerical consistency is never accounting approval.
+uncertainty, actual reviews and limitations. A consumed operand marked
+`unresolved` withholds its dependent output even when it carries a finite
+placeholder; selected analyst estimates and hypothetical sensitivities remain
+conditional. Every material limitation names at least one of the four outputs;
+unresolved targets withhold that output plus its dependents, while fully specified
+conditional-premise targets must be explicitly listed in `conditional_outputs`.
+Source references must resolve to retained catalog bodies and owned anchors.
+Catalog sources retain publication, observation (or explicit unknown) and UTC
+ingestion separately. `prepared_on` is actual preparation date;
+`evidence_cutoff` controls fact publication. A cutoff later than valuation
+requires `retrospective_research`. A review predating a cited fact's publication
+is retained as a chronology diagnostic but cannot qualify the output as human
+reviewed. Empty reviews remain unreviewed; numerical consistency is never
+accounting approval.
 
 The envelope supplies company/scenario identity, object/perimeter/acquisition
 boundaries, accounting/earnings/capitalized-debt-like lease basis, denomination,
@@ -373,10 +377,13 @@ writeoff and explicitly allocated lot movements. Multiple jurisdictions/entities
 require earnings/D&A allocation that sums to the operating perimeter. Lots
 identify `boundary_existing` period-zero valuation-date balances versus
 `forecast_created` positive-period amounts, eligible dates, prerequisites and
-each annual cash allocation. No tax expense shortcut, legal
-setoff, negative-profit refund rule or deadline-to-payment inference. Writeoff
-has no second cash charge; deferred cash must be explicitly located, not deducted
-again as book DTL. Annual eligibility/order assumptions remain conditional.
+each annual cash allocation. Allocation chronology is evaluated across all
+ledgers in a row, using actual cash dates or the supplied date-less ordering
+premise; ledger identifiers are only deterministic tie-breakers. No tax expense
+shortcut, legal setoff, negative-profit refund rule or deadline-to-payment
+inference. Writeoff has no second cash charge; deferred cash must be explicitly
+located, not deducted again as book DTL. Annual eligibility/order assumptions
+remain conditional.
 
 ```text
 EBIT = C - D - N
@@ -397,7 +404,10 @@ premises, exhausted finite states and mature gross tax queues/kernels. Every
 material primitive/gross leg is checked, not merely net FCFF equality. Queue
 source years must be in the selected geometric accrual regime, with correct
 remaining lots; payment/refund recurrences verify separately. The caller chooses
-N; failed transitions refuse, never silently extend. Refusal certificates retain
+N; failed transitions refuse, never silently extend. Acceptance pairs preserve
+growth, kernels, perimeter, primitive definitions and absolute economic regime
+starts. Only the one-year horizon/tail coordinate and independently reconciled
+seed, queue and finite-state advancement may differ. Refusal certificates retain
 failures and a diagnostic full next-year row, without a terminal-PV scalar.
 
 ```text
@@ -423,8 +433,9 @@ Known opening tax claims cannot be declared absent; restricted cash/obligation
 pairs must be excluded together. Missing material cash/consideration/deferred/
 pension/legal/noncommon claims withhold **equity and per-share**, not operating
 value. A missing basic count alone withholds per-share, not equity. Externally
-valued rights are subtracted once with basic shares; exercise dilution and option
-pricing are unsupported. Negative equity is retained as nontradable, not floored.
+valued rights provide an exact, non-overlapping cover of noncommon bridge claims
+and are subtracted once with basic shares; exercise dilution and option pricing
+are unsupported. Negative equity is retained as nontradable, not floored.
 
 All results are conditional supplied-premise research. In particular, reproducing
 the corrected Evolution operating reference is **not a completed Evolution equity

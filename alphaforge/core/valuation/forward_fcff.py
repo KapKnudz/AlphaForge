@@ -176,6 +176,66 @@ def _lots(schedule, o):
     return lots
 
 
+def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
+    allocations = []
+    for ledger in ledgers:
+        for allocation in sequence(ledger["allocations"]):
+            closed(allocation, "id kind lot_id amount cash_date eligibility_order")
+            kind = allocation["kind"]
+            _require(kind in {"payment", "refund", "writeoff"}, "tax_allocation_invalid")
+            _require(allocation["lot_id"] in lots, "tax_allocation_invalid")
+            lot = lots[allocation["lot_id"]]["record"]
+            _require(
+                lot["ledger_id"] == ledger["id"] and lot["source_period"] <= index,
+                "tax_lot_period_mismatch",
+            )
+            cash_date = None
+            if kind != "writeoff" and allocation["cash_date"] is not None:
+                cash_date = iso_date(allocation["cash_date"])
+                _require(start <= cash_date <= end, "tax_cash_date_outside_period")
+            elif kind != "writeoff":
+                text(allocation["eligibility_order"])
+            amount = _amount(o, allocation, "amount", True)
+            effective_date = cash_date or (start if kind == "payment" else end)
+            allocations.append(
+                (effective_date, kind != "payment", allocation["id"], allocation, amount)
+            )
+    unique([entry[2] for entry in allocations])
+    paid = {identity: lot["paid"] for identity, lot in lots.items()}
+    last_cash = {identity: lot.get("last_cash_date") for identity, lot in lots.items()}
+    for _, _, _, allocation, amount in sorted(allocations):
+        lot = lots[allocation["lot_id"]]["record"]
+        if allocation["kind"] != "writeoff":
+            if lot["eligible_date"] is not None:
+                eligible = iso_date(lot["eligible_date"])
+                cash = allocation["cash_date"]
+                _require(
+                    (iso_date(cash) if cash is not None else end) >= eligible,
+                    "refund_eligibility_unestablished",
+                )
+            for prerequisite in lot["prerequisites"]:
+                prerequisite_lot = lots[prerequisite]
+                _require(
+                    paid[prerequisite] >= prerequisite_lot["amount"],
+                    "refund_eligibility_unestablished",
+                )
+                prerequisite_date = last_cash[prerequisite]
+                if allocation["cash_date"] is not None and prerequisite_date is not None:
+                    _require(
+                        iso_date(allocation["cash_date"]) >= iso_date(prerequisite_date),
+                        "refund_eligibility_unestablished",
+                    )
+                elif prerequisite_date is None:
+                    text(allocation["eligibility_order"])
+        if allocation["kind"] == "payment":
+            paid[allocation["lot_id"]] += amount
+            if allocation["cash_date"] is not None:
+                previous = last_cash[allocation["lot_id"]]
+                last_cash[allocation["lot_id"]] = max(
+                    allocation["cash_date"], previous or allocation["cash_date"]
+                )
+
+
 def _tax(o, row, ebit, da, lots, prior, index, start, end):
     payments = refunds = boundary_pay = boundary_ref = 0.0
     legs = {}
@@ -186,6 +246,7 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         _require(row["tax_not_applicable"] is None, "tax_applicability_conflict")
     ids = []
     allocated_ebit = allocated_da = 0.0
+    _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end)
     for ledger in ledgers:
         closed(
             ledger,
@@ -351,23 +412,6 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                             end >= iso_date(lot["eligible_date"]),
                             "refund_eligibility_unestablished",
                         )
-                for prerequisite in lot["prerequisites"]:
-                    prerequisite_lot = lots[prerequisite]
-                    _require(
-                        prerequisite_lot["paid"] >= prerequisite_lot["amount"],
-                        "refund_eligibility_unestablished",
-                    )
-                    if (
-                        a["cash_date"] is not None
-                        and prerequisite_lot.get("last_cash_date") is not None
-                    ):
-                        _require(
-                            iso_date(a["cash_date"])
-                            >= iso_date(prerequisite_lot["last_cash_date"]),
-                            "refund_eligibility_unestablished",
-                        )
-                    else:
-                        text(a["eligibility_order"])
             v["remaining"] = max(0.0, v["remaining"] - amount)
             if kind == "payment":
                 v["paid"] += amount
@@ -1247,6 +1291,7 @@ def _rights(req, own, bridge):
         and i["location"] == "bridge"
         and i["direction"] == "obligation"
     }
+    covered = []
     for right in rights:
         closed(right, "id status claim_event_ids basis")
         text(right["basis"])
@@ -1259,8 +1304,11 @@ def _rights(req, own, bridge):
                 bool(right["claim_event_ids"]) and set(right["claim_event_ids"]) <= claims,
                 "ownership_claim_unvalued",
             )
+            covered.extend(right["claim_event_ids"])
         else:
             _require(not right["claim_event_ids"], "ownership_rights_status_conflict")
+    _require(len(covered) == len(set(covered)), "ownership_claim_duplicated")
+    _require(set(covered) == claims, "ownership_claim_unvalued")
 
 
 def _refusal(error, optional=False):
@@ -1271,7 +1319,9 @@ def _refusal(error, optional=False):
         "bridge_inventory_incomplete",
         "ownership_census_missing",
         "ownership_claim_unvalued",
+        "ownership_claim_duplicated",
         "ownership_material_input_unresolved",
+        "required_operand_unresolved",
         "terminal_mature_queue_missing",
         "operating_cash_flow_material_input_unresolved",
         "operating_value_material_input_unresolved",
@@ -1517,10 +1567,17 @@ def _finish(result, o):
         identity
         for identity in o.used
         if any(
-            review_id in o.reviews and o.reviews[review_id]["reviewer_kind"] == "human"
+            review_id in o.reviews
+            and o.reviews[review_id]["reviewer_kind"] == "human"
+            and not any(
+                operand_id == identity and linked_review == review_id
+                for operand_id, linked_review, _ in o.ineligible_review_links
+            )
             for review_id in o.ids[identity]["provenance"]["review_ids"]
         )
     }
     if o.used and o.used <= human:
         result["review_status"] = "human_reviewed"
+    if o.review_diagnostics:
+        result["review_diagnostics"] = o.review_diagnostics
     return result

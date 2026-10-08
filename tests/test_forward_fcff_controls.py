@@ -209,6 +209,112 @@ def test_a4_capitalized_lease_70_no_principal_interest_shield():
     assert not evaluate(req)["operating_cash_flows"]["available"]
 
 
+def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
+    req, f = request()
+    req.pop("terminal")
+    for lot in req["operating_schedule"]["tax_lots"]:
+        lot["ledger_id"] = "b" if lot["leg"] == "payable" else "a"
+        if lot["leg"] == "refund":
+            lot["prerequisites"] = [f"payable-{lot['source_period']}"]
+
+    def suffix_operands(tree, suffix):
+        if isinstance(tree, dict):
+            if set(tree) == {"value", "provenance"}:
+                tree["provenance"]["id"] += suffix
+            else:
+                for value in tree.values():
+                    suffix_operands(value, suffix)
+        elif isinstance(tree, list):
+            for value in tree:
+                suffix_operands(value, suffix)
+
+    for row in req["operating_schedule"]["periods"]:
+        original = row["tax_ledgers"][0]
+        payment = copy.deepcopy(original)
+        refund = copy.deepcopy(original)
+        payment["id"] = "b"
+        refund["id"] = "a"
+        suffix_operands(payment, "-b")
+        suffix_operands(refund, "-a")
+        for key in (
+            "receivable_open",
+            "receivable_close",
+            "entitlement",
+            "refund",
+            "writeoff",
+        ):
+            payment[key]["value"] = 0
+        for key in (
+            "taxable_basis",
+            "payable_open",
+            "payable_close",
+            "arising",
+            "payment",
+        ):
+            refund[key]["value"] = 0
+        for ledger, allocated in (
+            (payment, row["cash_operating_profit_before_da"]["value"]),
+            (refund, 0),
+        ):
+            ledger["allocated_ebit"] = f.operand(allocated)
+            ledger["allocated_book_da"] = f.operand(0)
+            ledger["allocation_basis"] = "Explicit synthetic ledger allocation"
+        payment["allocations"] = [
+            allocation
+            for allocation in payment["allocations"]
+            if allocation["kind"] == "payment"
+        ]
+        refund["allocations"] = [
+            allocation
+            for allocation in refund["allocations"]
+            if allocation["kind"] == "refund"
+        ]
+        year = row["start"][:4]
+        for allocation in payment["allocations"]:
+            allocation["cash_date"] = f"{year}-07-01"
+        for allocation in refund["allocations"]:
+            allocation["cash_date"] = f"{year}-08-01"
+        row["tax_ledgers"] = [refund, payment]
+
+    first = evaluate(req)
+    assert first["operating_cash_flows"]["available"], first["operating_cash_flows"]
+    renamed = copy.deepcopy(req)
+    for lot in renamed["operating_schedule"]["tax_lots"]:
+        if lot["ledger_id"] == "a":
+            lot["ledger_id"] = "z"
+    for row in renamed["operating_schedule"]["periods"]:
+        for ledger in row["tax_ledgers"]:
+            if ledger["id"] == "a":
+                ledger["id"] = "z"
+    second = evaluate(renamed)
+    assert second["operating_cash_flows"]["available"]
+    cash_fields = (
+        "gross_tax_payment",
+        "gross_tax_refund",
+        "boundary_tax_payment",
+        "boundary_tax_refund",
+        "fcff_operations",
+    )
+    assert [
+        tuple(row[field] for field in cash_fields)
+        for row in second["operating_cash_flows"]["value"]
+    ] == [
+        tuple(row[field] for field in cash_fields)
+        for row in first["operating_cash_flows"]["value"]
+    ]
+
+    late = copy.deepcopy(renamed)
+    for row in late["operating_schedule"]["periods"]:
+        year = row["start"][:4]
+        for ledger in row["tax_ledgers"]:
+            if ledger["id"] == "b":
+                for allocation in ledger["allocations"]:
+                    allocation["cash_date"] = f"{year}-09-01"
+    assert evaluate(late)["operating_cash_flows"]["reason_codes"] == [
+        "refund_eligibility_unestablished"
+    ]
+
+
 def test_a5_wc_signed_releases_and_deficit_funding_premise():
     req, f = request()
     no_tax(req)

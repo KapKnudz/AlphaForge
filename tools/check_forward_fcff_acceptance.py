@@ -183,6 +183,237 @@ def check_output(actual, expected, absolute, relative, case_id):
     return checks + 4
 
 
+def _operand_premise(operand):
+    premise = json.loads(canonical(operand))
+    premise["provenance"].pop("id", None)
+    return premise
+
+
+def _queue_state(request, horizon, ledger_id, leg):
+    lot_leg = "payable" if leg == "payment" else "refund"
+    lots = {
+        lot["id"]: lot
+        for lot in request["operating_schedule"]["tax_lots"]
+        if lot["origin"] == "forecast_created"
+        and lot["ledger_id"] == ledger_id
+        and lot["leg"] == lot_leg
+        and lot["source_period"] <= horizon
+    }
+    remaining = {identity: float(lot["amount"]["value"]) for identity, lot in lots.items()}
+    for row in request["operating_schedule"]["periods"][:horizon]:
+        for ledger in row["tax_ledgers"]:
+            for movement in ledger.get("lot_movements", []):
+                if movement["lot_id"] in remaining:
+                    remaining[movement["lot_id"]] += float(movement["amount"]["value"])
+            for allocation in ledger["allocations"]:
+                if allocation["lot_id"] in remaining:
+                    remaining[allocation["lot_id"]] -= float(allocation["amount"]["value"])
+    return {
+        identity: (lots[identity]["source_period"], amount)
+        for identity, amount in remaining.items()
+        if not math.isclose(amount, 0.0, abs_tol=1e-8, rel_tol=1e-8)
+    }
+
+
+def _check_terminal_coordinates(request, result, case_id):
+    terminal = request["terminal"]
+    horizon = terminal["horizon"]
+    require(terminal["tail_start"] == horizon + 1, "transition tail coordinate mismatch", case_id)
+    rows = result["operating_cash_flows"]["value"]
+    require(horizon < len(rows), "transition seed row missing", case_id)
+    seed_row = rows[horizon]
+    for template in terminal["templates"]:
+        path = template["path"]
+        require(path in seed_row["legs"], "transition seed path missing", (case_id, path))
+        require(
+            math.isclose(
+                float(template["seed"]["value"]),
+                float(seed_row["legs"][path]),
+                abs_tol=1e-8,
+                rel_tol=1e-8,
+            ),
+            "transition seed advancement mismatch",
+            (case_id, path),
+        )
+    for kernel in terminal["tax_kernels"]:
+        expected = _queue_state(request, horizon, kernel["ledger_id"], kernel["leg"])
+        actual = {}
+        for queue in kernel["queues"]:
+            identity = queue["lot_id"]
+            require(identity not in actual, "transition queue duplicated", (case_id, identity))
+            actual[identity] = (
+                queue["source_period"],
+                float(queue["remaining_at_tail"]["value"]),
+            )
+        require(set(actual) == set(expected), "transition queue inventory mismatch", case_id)
+        for identity, (source_period, amount) in expected.items():
+            require(
+                actual[identity][0] == source_period,
+                "transition queue period mismatch",
+                identity,
+            )
+            require(
+                math.isclose(actual[identity][1], amount, abs_tol=1e-8, rel_tol=1e-8),
+                "transition queue advancement mismatch",
+                identity,
+            )
+
+
+def check_transition_pair(
+    corrected_request, transitional_request, corrected, transitional, case_id
+):
+    corrected_nonterminal = dict(corrected_request)
+    transitional_nonterminal = dict(transitional_request)
+    corrected_terminal = corrected_nonterminal.pop("terminal")
+    transitional_terminal = transitional_nonterminal.pop("terminal")
+    require(
+        corrected_nonterminal == transitional_nonterminal,
+        "transition pair changed nonterminal inputs",
+        case_id,
+    )
+    require(
+        corrected_terminal["horizon"] == transitional_terminal["horizon"] + 1,
+        "transition pair horizon mismatch",
+        case_id,
+    )
+    invariant_fields = {
+        "kind",
+        "continuing_perimeter",
+        "renewal_basis",
+        "survival_basis",
+        "price_volume_basis",
+        "growth_funding_basis",
+    }
+    require(
+        {field: corrected_terminal[field] for field in invariant_fields}
+        == {field: transitional_terminal[field] for field in invariant_fields},
+        "transition terminal premise mismatch",
+        case_id,
+    )
+    require(
+        _operand_premise(corrected_terminal["growth"])
+        == _operand_premise(transitional_terminal["growth"]),
+        "transition growth premise mismatch",
+        case_id,
+    )
+    _check_terminal_coordinates(corrected_request, corrected, case_id)
+    _check_terminal_coordinates(transitional_request, transitional, case_id)
+    corrected_templates = {
+        template["id"]: template for template in corrected_terminal["templates"]
+    }
+    transitional_templates = {
+        template["id"]: template for template in transitional_terminal["templates"]
+    }
+    require(
+        set(corrected_templates) == set(transitional_templates),
+        "transition template inventory mismatch",
+        case_id,
+    )
+    for identity, corrected_template in corrected_templates.items():
+        transitional_template = transitional_templates[identity]
+        for field in ("path", "regime_start", "derivation"):
+            require(
+                corrected_template[field] == transitional_template[field],
+                "transition template premise mismatch",
+                (case_id, identity, field),
+            )
+        require(
+            _operand_premise(corrected_template["multiplier"])
+            == _operand_premise(transitional_template["multiplier"]),
+            "transition multiplier premise mismatch",
+            (case_id, identity),
+        )
+        corrected_provenance = dict(corrected_template["seed"]["provenance"])
+        transitional_provenance = dict(transitional_template["seed"]["provenance"])
+        corrected_provenance.pop("id", None)
+        transitional_provenance.pop("id", None)
+        require(
+            corrected_provenance == transitional_provenance,
+            "transition seed provenance mismatch",
+            (case_id, identity),
+        )
+    corrected_kernels = {kernel["id"]: kernel for kernel in corrected_terminal["tax_kernels"]}
+    transitional_kernels = {
+        kernel["id"]: kernel for kernel in transitional_terminal["tax_kernels"]
+    }
+    require(
+        set(corrected_kernels) == set(transitional_kernels),
+        "transition kernel inventory mismatch",
+        case_id,
+    )
+    for identity, corrected_kernel in corrected_kernels.items():
+        transitional_kernel = transitional_kernels[identity]
+        for field in ("ledger_id", "leg", "max_lag", "rationale"):
+            require(
+                corrected_kernel[field] == transitional_kernel[field],
+                "transition kernel premise mismatch",
+                (case_id, identity, field),
+            )
+        require(
+            _operand_premise(corrected_kernel["recovery_fraction"])
+            == _operand_premise(transitional_kernel["recovery_fraction"]),
+            "transition recovery premise mismatch",
+            (case_id, identity),
+        )
+        corrected_weights = {
+            weight["offset_years"]: _operand_premise(weight["weight"])
+            for weight in corrected_kernel["weights"]
+        }
+        transitional_weights = {
+            weight["offset_years"]: _operand_premise(weight["weight"])
+            for weight in transitional_kernel["weights"]
+        }
+        require(
+            corrected_weights == transitional_weights,
+            "transition kernel weights mismatch",
+            (case_id, identity),
+        )
+        corrected_queue_premises = {
+            corrected_terminal["horizon"] - queue["source_period"]: {
+                key: value
+                for key, value in queue["remaining_at_tail"]["provenance"].items()
+                if key != "id"
+            }
+            for queue in corrected_kernel["queues"]
+        }
+        transitional_queue_premises = {
+            transitional_terminal["horizon"] - queue["source_period"]: {
+                key: value
+                for key, value in queue["remaining_at_tail"]["provenance"].items()
+                if key != "id"
+            }
+            for queue in transitional_kernel["queues"]
+        }
+        require(
+            corrected_queue_premises == transitional_queue_premises,
+            "transition queue provenance mismatch",
+            (case_id, identity),
+        )
+    corrected_states = {state["id"]: state for state in corrected_terminal["exhausted_states"]}
+    transitional_states = {
+        state["id"]: state for state in transitional_terminal["exhausted_states"]
+    }
+    all_states = set(corrected_states) | set(transitional_states)
+    for identity in all_states:
+        state = corrected_states.get(identity) or transitional_states[identity]
+        for terminal, states in (
+            (corrected_terminal, corrected_states),
+            (transitional_terminal, transitional_states),
+        ):
+            should_exist = state["exhausted_by"] <= terminal["horizon"]
+            require(
+                (identity in states) == should_exist,
+                "transition exhausted-state advancement mismatch",
+                (case_id, identity),
+            )
+            if should_exist:
+                require(
+                    states[identity] == state,
+                    "transition exhausted-state premise mismatch",
+                    identity,
+                )
+
+
 def check_transition_refusal(result, case_id):
     dimensions = REQUIRED_CASES[case_id]
     failure = dimensions["transition_failure"]
@@ -309,18 +540,6 @@ def main():
             transitional_frozen = freeze((base / case["transitional_input_file"]).read_text())
             corrected_request = frozen.unpack()
             transitional_request = transitional_frozen.unpack()
-            corrected_terminal = corrected_request.pop("terminal")
-            transitional_terminal = transitional_request.pop("terminal")
-            require(
-                corrected_request == transitional_request,
-                "transition pair changed nonterminal inputs",
-                case["id"],
-            )
-            require(
-                corrected_terminal["horizon"] == transitional_terminal["horizon"] + 1,
-                "transition pair horizon mismatch",
-                case["id"],
-            )
             failed = evaluate(transitional_frozen)
             require(
                 failed.get("scenario_id") == case["id"],
@@ -328,6 +547,13 @@ def main():
                 case["id"],
             )
             check_transition_refusal(failed, case["id"])
+            check_transition_pair(
+                corrected_request,
+                transitional_request,
+                pure,
+                failed,
+                case["id"],
+            )
             require(
                 canonical(failed["operating_cash_flows"])
                 == canonical(pure["operating_cash_flows"]),

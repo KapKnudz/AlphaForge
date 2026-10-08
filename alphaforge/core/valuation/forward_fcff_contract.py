@@ -226,6 +226,8 @@ class Operands:
         self.reviews = {}
         self.used = set()
         self.events = {}
+        self.review_diagnostics = []
+        self.ineligible_review_links = set()
         self.cutoff = iso_date(request["evidence_cutoff"])
         self.prepared = iso_date(request["prepared_on"])
         for limitation in sequence(request["limitations"]):
@@ -346,6 +348,8 @@ class Operands:
             "unresolved",
         }:
             raise ContractError("invalid_uncertainty", identity)
+        if p["uncertainty"] == "unresolved":
+            raise ContractError("required_operand_unresolved", path or identity)
         sequence(p["limitations"])
         for rid in sequence(p["review_ids"]):
             if rid not in self.reviews or identity not in self.reviews[rid]["scope_operand_ids"]:
@@ -377,6 +381,20 @@ class Operands:
                 observed = p["accounting_date"] or p["period_end"]
                 if observed is not None and iso_date(observed) > iso_date(s["publication_date"]):
                     raise ContractError("future_amount_not_observed_fact", identity)
+                for rid in p["review_ids"]:
+                    review = self.reviews[rid]
+                    if iso_date(review["reviewed_on"]) < iso_date(s["publication_date"]):
+                        link = (identity, rid, s["id"])
+                        if link not in self.ineligible_review_links:
+                            self.ineligible_review_links.add(link)
+                            self.review_diagnostics.append(
+                                {
+                                    "code": "review_precedes_source_publication",
+                                    "operand_id": identity,
+                                    "review_id": rid,
+                                    "source_id": s["id"],
+                                }
+                            )
         if p["class"] == "reported_fact":
             if (
                 not p["source_refs"]
