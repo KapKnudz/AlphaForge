@@ -48,6 +48,10 @@ SETTLEMENT_BRIDGE_DIRECTIONS = {
     "legal_other": "obligation",
     "nonoperating_assets": "asset",
 }
+LEGACY_TAX_EVENT_ORDERS = {
+    "Explicit annual eligibility/order assumption",
+    "Explicit synthetic gross cash order",
+}
 
 
 def _anniversary(d):
@@ -185,11 +189,22 @@ def _lots(schedule, o):
     return lots
 
 
+def _structured_tax_event_rank(value, path):
+    try:
+        closed(value, "rank basis")
+        rank = integer(value["rank"], minimum=1)
+        text(value["basis"])
+    except (ContractError, KeyError, TypeError):
+        raise ContractError("tax_event_order_invalid", path) from None
+    return rank
+
+
 def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
     allocations = []
     for ledger in ledgers:
         for allocation in sequence(ledger["allocations"]):
             closed(allocation, "id kind lot_id amount cash_date eligibility_order")
+            identity = text(allocation["id"])
             kind = allocation["kind"]
             _require(kind in {"payment", "refund", "writeoff"}, "tax_allocation_invalid")
             _require(allocation["lot_id"] in lots, "tax_allocation_invalid")
@@ -202,24 +217,60 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
             if kind != "writeoff" and allocation["cash_date"] is not None:
                 cash_date = iso_date(allocation["cash_date"])
                 _require(start <= cash_date <= end, "tax_cash_date_outside_period")
-            elif kind != "writeoff":
-                text(allocation["eligibility_order"])
             amount = _amount(o, allocation, "amount", True)
-            effective_date = cash_date or (start if kind == "payment" else end)
             allocations.append(
-                (effective_date, kind != "payment", allocation["id"], allocation, amount)
+                {
+                    "id": identity,
+                    "kind": kind,
+                    "cash_date": cash_date,
+                    "order": allocation["eligibility_order"],
+                    "allocation": allocation,
+                    "amount": amount,
+                }
             )
-    unique([entry[2] for entry in allocations])
+    unique([entry["id"] for entry in allocations])
+    structured = any(isinstance(entry["order"], dict) for entry in allocations)
+    if structured:
+        _require(
+            all(isinstance(entry["order"], dict) for entry in allocations),
+            "tax_event_order_invalid",
+        )
+        for entry in allocations:
+            entry["rank"] = _structured_tax_event_rank(entry["order"], entry["id"])
+        ranks = [entry["rank"] for entry in allocations]
+        _require(len(ranks) == len(set(ranks)), "tax_event_order_invalid")
+        ordered = sorted(allocations, key=lambda entry: entry["rank"])
+        known_dates = [entry["cash_date"] for entry in ordered if entry["cash_date"] is not None]
+        _require(known_dates == sorted(known_dates), "tax_event_order_invalid")
+    else:
+        _require(
+            all(
+                isinstance(entry["order"], str)
+                and entry["order"] in LEGACY_TAX_EVENT_ORDERS
+                for entry in allocations
+            ),
+            "tax_event_order_invalid",
+        )
+        ordered = sorted(
+            allocations,
+            key=lambda entry: (
+                entry["cash_date"]
+                or (start if entry["kind"] == "payment" else end),
+                entry["kind"] != "payment",
+                entry["id"],
+            ),
+        )
     paid = {identity: lot["paid"] for identity, lot in lots.items()}
     last_cash = {identity: lot.get("last_cash_date") for identity, lot in lots.items()}
-    for _, _, _, allocation, amount in sorted(allocations):
+    for entry in ordered:
+        allocation = entry["allocation"]
+        amount = entry["amount"]
         lot = lots[allocation["lot_id"]]["record"]
         if allocation["kind"] != "writeoff":
             if lot["eligible_date"] is not None:
                 eligible = iso_date(lot["eligible_date"])
-                cash = allocation["cash_date"]
                 _require(
-                    (iso_date(cash) if cash is not None else end) >= eligible,
+                    (entry["cash_date"] or end) >= eligible,
                     "refund_eligibility_unestablished",
                 )
             for prerequisite in lot["prerequisites"]:
@@ -229,20 +280,19 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
                     "refund_eligibility_unestablished",
                 )
                 prerequisite_date = last_cash[prerequisite]
-                if allocation["cash_date"] is not None and prerequisite_date is not None:
+                if entry["cash_date"] is not None and prerequisite_date is not None:
                     _require(
-                        iso_date(allocation["cash_date"]) >= iso_date(prerequisite_date),
+                        entry["cash_date"] >= iso_date(prerequisite_date),
                         "refund_eligibility_unestablished",
                     )
-                elif prerequisite_date is None:
-                    text(allocation["eligibility_order"])
         if allocation["kind"] == "payment":
             paid[allocation["lot_id"]] += amount
-            if allocation["cash_date"] is not None:
+            if entry["cash_date"] is not None:
                 previous = last_cash[allocation["lot_id"]]
                 last_cash[allocation["lot_id"]] = max(
                     allocation["cash_date"], previous or allocation["cash_date"]
                 )
+    return {entry["id"]: position for position, entry in enumerate(ordered)}
 
 
 def _tax(o, row, ebit, da, lots, prior, index, start, end):
@@ -255,7 +305,7 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         _require(row["tax_not_applicable"] is None, "tax_applicability_conflict")
     ids = []
     allocated_ebit = allocated_da = 0.0
-    _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end)
+    allocation_order = _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end)
     for ledger in ledgers:
         closed(
             ledger,
@@ -369,11 +419,8 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         totals = {"payment": 0.0, "refund": 0.0, "writeoff": 0.0}
         operating = {"payment": 0.0, "refund": 0.0}
         boundary = {"payment": 0.0, "refund": 0.0}
-        allocations = sequence(ledger["allocations"])
-        # Deterministic within-year execution: payable cash first; explicit order
-        # premise remains necessary where no exact eligibility cash date is known.
         allocations = sorted(
-            allocations, key=lambda a: (a.get("kind") != "payment", a.get("id", ""))
+            sequence(ledger["allocations"]), key=lambda a: allocation_order[a["id"]]
         )
         unique([a["id"] for a in allocations])
         for a in allocations:
@@ -417,7 +464,6 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                             "refund_eligibility_unestablished",
                         )
                 else:
-                    text(a["eligibility_order"])
                     if lot["eligible_date"] is not None:
                         _require(
                             end >= iso_date(lot["eligible_date"]),
@@ -1356,7 +1402,6 @@ def _refusal(error, optional=False):
         "bridge_inventory_incomplete",
         "ownership_census_missing",
         "ownership_claim_unvalued",
-        "ownership_claim_duplicated",
         "ownership_material_input_unresolved",
         "required_operand_unresolved",
         "terminal_mature_queue_missing",

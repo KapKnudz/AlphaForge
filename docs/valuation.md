@@ -387,12 +387,19 @@ require earnings/D&A allocation that sums to the operating perimeter. Lots
 identify `boundary_existing` period-zero valuation-date balances versus
 `forecast_created` positive-period amounts, eligible dates, prerequisites and
 each annual cash allocation. Allocation chronology is evaluated across all
-ledgers in a row, using actual cash dates or the supplied date-less ordering
-premise; ledger identifiers are only deterministic tie-breakers. No tax expense
-shortcut, legal setoff, negative-profit refund rule or deadline-to-payment
-inference. Writeoff has no second cash charge; deferred cash must be explicitly
-located, not deducted again as book DTL. Annual eligibility/order assumptions
-remain conditional.
+ledgers in a row. Structured ordering is `{rank: positive unique integer, basis:
+nonempty text}` on every event in that annual row; ranks execute prerequisites
+across ledgers, and known cash dates may not contradict their order. Same-day
+actual cash uses the supplied rank, while date-less ranks do not invent dates.
+The exact legacy strings `Explicit annual eligibility/order assumption` and
+`Explicit synthetic gross cash order` retain the historical start/end effective-
+date convention with payments-first same-day ties for compatible retained inputs. Other free
+text and mixtures of legacy and structured ordering are invalid; migrating a
+legacy request changes its request/rules identity and must preserve the same
+audited economic order. No tax expense shortcut, legal setoff, negative-profit
+refund rule or deadline-to-payment inference. Writeoff has no second cash charge;
+deferred cash must be explicitly located, not deducted again as book DTL. Annual
+eligibility/order assumptions remain conditional.
 
 ```text
 EBIT = C - D - N
@@ -413,7 +420,11 @@ premises, exhausted finite states and mature gross tax queues/kernels. Every
 material primitive/gross leg is checked, not merely net FCFF equality. Each
 kernel queue exactly inventories every nonzero forecast-created lot for its
 ledger and leg at start N+1, including multiple lots of the same age; opening
-boundary lots remain separate. Queue source years must be in the selected
+boundary lots remain separate. Acquisitions, terminal exhausted states and
+ownership rights are canonicalized by ID so permutations retain one request
+identity. Duplicate acquisition and right IDs invalidate the request; duplicate
+exhausted-state IDs remain terminal-scoped and withhold operating value without
+withholding an otherwise valid schedule. Queue source years must be in the selected
 geometric accrual regime, with correct remaining amounts after movements and
 allocations; payment/refund recurrences verify separately. Exhausted-state IDs
 are unique. The caller chooses

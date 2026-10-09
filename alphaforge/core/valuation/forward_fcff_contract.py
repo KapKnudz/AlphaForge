@@ -157,6 +157,7 @@ def freeze(value: dict | str) -> FrozenRequest:
         "sources",
         "reviews",
         "limitations",
+        "acquisitions",
         "investment_items",
         "disposals",
         "settlements",
@@ -171,11 +172,13 @@ def freeze(value: dict | str) -> FrozenRequest:
         "templates",
         "tax_kernels",
         "queues",
+        "exhausted_states",
         "financing_diagnostics",
         "boundary_cash",
         "transfer_events",
         "noncash_items",
         "lot_movements",
+        "rights",
         "payable_other",
         "receivable_other",
         "other",
@@ -193,7 +196,9 @@ def freeze(value: dict | str) -> FrozenRequest:
                 and result
                 and all(isinstance(v, dict) and "id" in v for v in result)
             ):
-                unique([text(v["id"]) for v in result], key)
+                identities = [text(v["id"]) for v in result]
+                if key != "exhausted_states":
+                    unique(identities, key)
                 result.sort(key=lambda v: v["id"])
             elif key == "weights" and result and all(isinstance(v, dict) for v in result):
                 field = "offset_years" if "offset_years" in result[0] else "period_index"

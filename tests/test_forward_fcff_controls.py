@@ -159,7 +159,10 @@ def test_a4_capitalized_lease_70_no_principal_interest_shield():
                 "lot_id": "current-tax18",
                 "amount": f.operand(18),
                 "cash_date": None,
-                "eligibility_order": "Explicit annual-order assumption",
+                "eligibility_order": {
+                    "rank": 1,
+                    "basis": "Explicit synthetic single cash event order",
+                },
             }
         ],
     }
@@ -298,6 +301,72 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
         tuple(row[field] for field in cash_fields) for row in first["operating_cash_flows"]["value"]
     ]
 
+    structured = copy.deepcopy(renamed)
+    for row in structured["operating_schedule"]["periods"]:
+        allocations = [
+            allocation
+            for ledger in row["tax_ledgers"]
+            for allocation in ledger["allocations"]
+        ]
+        for rank, allocation in enumerate(
+            sorted(
+                allocations,
+                key=lambda allocation: (
+                    allocation["kind"] != "payment",
+                    allocation["lot_id"],
+                ),
+            ),
+            1,
+        ):
+            allocation["cash_date"] = None
+            allocation["eligibility_order"] = {
+                "rank": rank,
+                "basis": "Explicit synthetic cross-ledger sequence",
+            }
+    structured_result = evaluate(structured)
+    assert structured_result["operating_cash_flows"]["available"]
+    permuted = copy.deepcopy(structured)
+    for row in permuted["operating_schedule"]["periods"]:
+        row["tax_ledgers"].reverse()
+        for ledger in row["tax_ledgers"]:
+            ledger["allocations"].reverse()
+    assert canonical(evaluate(permuted)) == canonical(structured_result)
+
+    refund_first = copy.deepcopy(structured)
+    second_row = refund_first["operating_schedule"]["periods"][1]
+    second_allocations = [
+        allocation
+        for ledger in second_row["tax_ledgers"]
+        for allocation in ledger["allocations"]
+    ]
+    next(
+        allocation
+        for allocation in second_allocations
+        if allocation["kind"] == "refund"
+    )["eligibility_order"]["rank"] = 1
+    next(
+        allocation
+        for allocation in second_allocations
+        if allocation["lot_id"] == "payable-1"
+    )["eligibility_order"]["rank"] = 3
+    assert evaluate(refund_first)["operating_cash_flows"]["reason_codes"] == [
+        "refund_eligibility_unestablished"
+    ]
+
+    tied = copy.deepcopy(structured)
+    second_row = tied["operating_schedule"]["periods"][1]
+    second_allocations = [
+        allocation
+        for ledger in second_row["tax_ledgers"]
+        for allocation in ledger["allocations"]
+    ]
+    second_allocations[1]["eligibility_order"]["rank"] = second_allocations[0][
+        "eligibility_order"
+    ]["rank"]
+    assert evaluate(tied)["operating_cash_flows"]["reason_codes"] == [
+        "tax_event_order_invalid"
+    ]
+
     late = copy.deepcopy(renamed)
     for row in late["operating_schedule"]["periods"]:
         year = row["start"][:4]
@@ -373,7 +442,10 @@ def boundary_request():
                         "lot_id": "opening-" + leg,
                         "amount": f.operand(amount),
                         "cash_date": None,
-                        "eligibility_order": "Explicit hypothetical within-year ordering",
+                        "eligibility_order": {
+                            "rank": len(allocations) + 1,
+                            "basis": "Explicit synthetic within-year sequence",
+                        },
                     }
                 )
         ll = {

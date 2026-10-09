@@ -117,7 +117,10 @@ def test_a1_a2_a4_basic_arithmetic_gross_net_leases():
                 "lot_id": leg,
                 "amount": f.operand(amt),
                 "cash_date": None,
-                "eligibility_order": "Explicit assumed ordering",
+                "eligibility_order": {
+                    "rank": 1 if kind == "payment" else 2,
+                    "basis": "Explicit synthetic payment then refund order",
+                },
             }
         )
     row["investment_items"] = [
@@ -289,6 +292,7 @@ def test_noncommon_rights_must_exactly_partition_bridge_claims():
     missing = evaluate(req)
     assert missing["operating_value"]["available"]
     assert missing["common_equity"]["reason_codes"] == ["ownership_claim_unvalued"]
+    assert missing["common_equity"]["status"] == "insufficient_evidence"
 
     req["ownership"]["rights"][2].update(status="valued", claim_event_ids=["option-a", "option-b"])
     valid = evaluate(req)
@@ -297,6 +301,7 @@ def test_noncommon_rights_must_exactly_partition_bridge_claims():
     duplicate = evaluate(req)
     assert duplicate["operating_value"]["available"]
     assert duplicate["common_equity"]["reason_codes"] == ["ownership_claim_duplicated"]
+    assert duplicate["common_equity"]["status"] == "invalid_input"
 
 
 def test_consumed_unresolved_operands_are_stage_scoped():
@@ -384,12 +389,53 @@ def test_exhausted_state_ids_are_unique_without_collapsing_distinct_states():
             "rationale": "Synthetic distinct zero state",
         },
     ]
-    assert evaluate(req)["operating_value"]["available"]
+    permuted = copy.deepcopy(req)
+    permuted["terminal"]["exhausted_states"].reverse()
+    assert freeze(req).body == freeze(permuted).body
+    assert canonical(evaluate(req)) == canonical(evaluate(permuted))
     req["terminal"]["exhausted_states"][1]["id"] = "plant-closing"
     duplicate = evaluate(req)
     assert duplicate["operating_cash_flows"]["available"]
     assert duplicate["operating_value"]["reason_codes"] == ["duplicate_id"]
     assert duplicate["operating_value"]["missing_inputs"] == ["terminal.exhausted_states"]
+
+
+def test_acquisitions_and_rights_have_stable_unique_canonical_identities():
+    req, f = request()
+    complete_bridge(req, f)
+    req["object"]["acquisitions"] = [
+        {
+            "id": "earlier",
+            "description": "Synthetic earlier acquisition",
+            "included": True,
+            "control_date": "2025-01-01",
+        },
+        {
+            "id": "later",
+            "description": "Synthetic later acquisition",
+            "included": True,
+            "control_date": "2026-01-01",
+        },
+    ]
+    permuted = copy.deepcopy(req)
+    permuted["object"]["acquisitions"].reverse()
+    permuted["ownership"]["rights"].reverse()
+    assert freeze(req).body == freeze(permuted).body
+    assert canonical(evaluate(req)) == canonical(evaluate(permuted))
+
+    duplicate_acquisition = copy.deepcopy(req)
+    duplicate_acquisition["object"]["acquisitions"][1]["id"] = "earlier"
+    acquisition_result = evaluate(duplicate_acquisition)
+    assert acquisition_result["operating_cash_flows"]["reason_codes"] == ["duplicate_id"]
+    assert acquisition_result["operating_cash_flows"]["status"] == "invalid_input"
+
+    duplicate_right = copy.deepcopy(req)
+    duplicate_right["ownership"]["rights"][1]["id"] = duplicate_right["ownership"]["rights"][0][
+        "id"
+    ]
+    right_result = evaluate(duplicate_right)
+    assert right_result["operating_cash_flows"]["reason_codes"] == ["duplicate_id"]
+    assert right_result["operating_cash_flows"]["status"] == "invalid_input"
 
 
 def test_acquisition_control_dates_gate_existing_operations_perimeter():
@@ -967,6 +1013,17 @@ def test_a3_eligibility_cash_before_known_date():
     lot["eligible_date"] = "2030-01-01"
     result = evaluate(req)
     assert result["operating_cash_flows"]["reason_codes"] == ["refund_eligibility_unestablished"]
+
+
+def test_arbitrary_dateless_tax_order_text_is_not_interpreted():
+    req, _ = request()
+    assert evaluate(req)["operating_cash_flows"]["available"]
+    allocation = req["operating_schedule"]["periods"][1]["tax_ledgers"][0]["allocations"][-1]
+    allocation["eligibility_order"] = "Refund BEFORE its prerequisite payment"
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["reason_codes"] == ["tax_event_order_invalid"]
+    assert result["operating_cash_flows"]["status"] == "invalid_input"
+    assert not result["operating_value"]["available"]
 
 
 def test_zero_gross_legs_and_no_tax_division():
