@@ -237,11 +237,17 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
     )
 
     case_id = "tail_inflation_1pct_after_year10-return-1"
+    diagnostic = {
+        "code": "terminal_regime_not_stationary",
+        "path": "tax/tax/payment",
+        "regime_start": 16,
+        "requested_tail_start": 15,
+    }
     output = {
         "operating_cash_flows": {"available": True},
         "operating_value": {
             "available": False,
-            "reason_codes": ["tail_primitive_nonstationary"],
+            "reason_codes": ["terminal_regime_not_stationary"],
         },
         "terminal": {
             "horizon": 14,
@@ -249,12 +255,13 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
             "certificate": {
                 "failures": [
                     {
-                        "code": "tail_primitive_nonstationary",
-                        "path": "tax/tax/arising",
+                        "code": diagnostic["code"],
+                        "path": diagnostic["path"],
                     }
                 ]
             },
         },
+        "terminal_regime_diagnostics": [diagnostic],
     }
     check_transition_refusal(output, case_id)
     unrelated = json.loads(json.dumps(output))
@@ -262,6 +269,7 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
     unrelated["terminal"]["certificate"]["failures"] = [
         {"code": "terminal_growth_invalid", "path": ""}
     ]
+    unrelated.pop("terminal_regime_diagnostics")
     with pytest.raises(AcceptanceError, match="transition refusal reason mismatch"):
         check_transition_refusal(unrelated, case_id)
 

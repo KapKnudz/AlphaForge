@@ -54,6 +54,17 @@ LEGACY_TAX_EVENT_ORDERS = {
 }
 
 
+class _TerminalRegimeError(ContractError):
+    def __init__(self, path, requested_tail_start, regime_start):
+        super().__init__("terminal_regime_not_stationary", path)
+        self.diagnostic = {
+            "code": self.code,
+            "path": path,
+            "regime_start": regime_start,
+            "requested_tail_start": requested_tail_start,
+        }
+
+
 def _anniversary(d):
     try:
         return d.replace(year=d.year + 1)
@@ -926,8 +937,11 @@ def _tail(req, o, rows, lots, rate):
         seed = _amount(o, template, "seed")
         multiplier = _amount(o, template, "multiplier")
         _require(multiplier == h, "terminal_multiplier_mismatch", path)
+        if template["regime_start"] is None:
+            raise ContractError("terminal_regime_missing", path)
         regime = integer(template["regime_start"], minimum=1)
-        _require(regime <= n + 1, "terminal_regime_missing", path)
+        if regime > n + 1:
+            raise _TerminalRegimeError(path, n + 1, regime)
         reconcile(seed, tail["legs"][path], "terminal_seed_mismatch", path)
         # Regime start is a supplied premise checked against all retained rows.
         for idx in range(regime - 1, len(rows)):
@@ -1413,6 +1427,7 @@ def _refusal(error, optional=False):
         "currency_mismatch",
         "tail_tax_queue_nonstationary",
         "tail_primitive_nonstationary",
+        "terminal_regime_not_stationary",
         "terminal_discrete_state_unsupported",
         "terminal_finite_state_unexhausted",
     }:
@@ -1548,6 +1563,8 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             else ContractError("invalid_optional_module", str(error))
         )
         result["operating_value"] = _refusal(e, True)
+        if isinstance(e, _TerminalRegimeError):
+            result["terminal_regime_diagnostics"] = [e.diagnostic]
         if tail_attempted and isinstance(req.get("terminal"), dict):
             candidate = req["terminal"].get("horizon")
             candidate_numerator = None

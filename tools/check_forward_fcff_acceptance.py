@@ -39,10 +39,12 @@ REQUIRED_CASES = {
         "transition": group in TRANSITION_GROUPS,
         "transition_failure": (
             {
-                "code": "tail_primitive_nonstationary",
+                "code": "terminal_regime_not_stationary",
                 "path": (
-                    "tax/tax/refund" if group == "late2_refund_two_year_lag" else "tax/tax/arising"
+                    "tax/tax/refund" if group == "late2_refund_two_year_lag" else "tax/tax/payment"
                 ),
+                "regime_start": 17 if group == "late2_refund_two_year_lag" else 16,
+                "requested_tail_start": 16 if group == "late2_refund_two_year_lag" else 15,
             }
             if group in TRANSITION_GROUPS
             else None
@@ -439,8 +441,14 @@ def check_transition_refusal(result, case_id):
         case_id,
     )
     require(
-        result["terminal"]["certificate"]["failures"] == [failure],
+        result["terminal"]["certificate"]["failures"]
+        == [{"code": failure["code"], "path": failure["path"]}],
         "transition refusal certificate mismatch",
+        case_id,
+    )
+    require(
+        result.get("terminal_regime_diagnostics") == [failure],
+        "transition regime diagnostic mismatch",
         case_id,
     )
     require(

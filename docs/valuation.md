@@ -428,10 +428,14 @@ withholding an otherwise valid schedule. Queue source years must be in the selec
 geometric accrual regime, with correct remaining amounts after movements and
 allocations; payment/refund recurrences verify separately. Exhausted-state IDs
 are unique. The caller chooses
-N; failed transitions refuse, never silently extend. Acceptance pairs preserve
-growth, kernels, perimeter, primitive definitions and absolute economic regime
-starts. Only the one-year horizon/tail coordinate and independently reconciled
-seed, losslessly compared queue multiset and finite-state advancement may differ.
+N; failed transitions refuse, never silently extend. A supplied regime beginning
+after the requested tail is `terminal_regime_not_stationary`, with the primitive
+path, requested tail start and known regime start retained in
+`terminal_regime_diagnostics`; a null regime start remains
+`terminal_regime_missing`. Acceptance pairs preserve growth, kernels, perimeter,
+primitive definitions and absolute economic regime starts. Only the one-year
+horizon/tail coordinate and independently reconciled seed, losslessly compared
+queue multiset and finite-state advancement may differ.
 Queue display IDs and order do not change premise identity. Refusal certificates retain
 failures and a diagnostic full next-year row, without a terminal-PV scalar.
 

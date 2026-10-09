@@ -67,6 +67,52 @@ def test_a7_gross_cancellation_does_not_certify_tail():
     assert not result["operating_value"]["available"]
 
 
+def test_known_future_terminal_regime_is_distinct_from_missing_regime():
+    req, f = request()
+    assert evaluate(req)["operating_value"]["available"]
+    payment = next(
+        template for template in req["terminal"]["templates"] if template["path"] == "tax/tax/payment"
+    )
+    payment["regime_start"] = 4
+    refused = evaluate(req)
+    assert refused["operating_cash_flows"]["available"]
+    assert refused["operating_value"]["status"] == "unsupported"
+    assert refused["operating_value"]["reason_codes"] == ["terminal_regime_not_stationary"]
+    assert refused["operating_value"]["missing_inputs"] == ["tax/tax/payment"]
+    diagnostic = {
+        "code": "terminal_regime_not_stationary",
+        "path": "tax/tax/payment",
+        "regime_start": 4,
+        "requested_tail_start": 3,
+    }
+    assert refused["terminal_regime_diagnostics"] == [diagnostic]
+    assert refused["terminal"]["certificate"]["failures"] == [
+        {"code": diagnostic["code"], "path": diagnostic["path"]}
+    ]
+
+    missing = copy.deepcopy(req)
+    next(
+        template
+        for template in missing["terminal"]["templates"]
+        if template["path"] == "tax/tax/payment"
+    )["regime_start"] = None
+    missing_result = evaluate(missing)
+    assert missing_result["operating_cash_flows"]["available"]
+    assert missing_result["operating_value"]["status"] == "insufficient_evidence"
+    assert missing_result["operating_value"]["reason_codes"] == ["terminal_regime_missing"]
+    assert missing_result["operating_value"]["missing_inputs"] == ["tax/tax/payment"]
+    assert "terminal_regime_diagnostics" not in missing_result
+
+    regimes = {
+        template["path"]: template["regime_start"] for template in req["terminal"]["templates"]
+    }
+    set_tail(req, f, 3, 0.1, regimes)
+    corrected = evaluate(req)
+    assert corrected["operating_cash_flows"] == refused["operating_cash_flows"]
+    assert corrected["operating_value"]["available"]
+    assert corrected["terminal"]["horizon"] == 3
+
+
 def test_a1_a2_a4_basic_arithmetic_gross_net_leases():
     req, f = request()
     req.pop("terminal")
