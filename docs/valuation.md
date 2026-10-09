@@ -351,6 +351,9 @@ diagnostic but cannot qualify the output as human reviewed. Unknown publication
 timing likewise prevents review qualification and emits an explicit diagnostic;
 it does not suppress otherwise supported conditional arithmetic. Empty reviews
 remain unreviewed; numerical consistency is never accounting approval.
+Accumulated chronology diagnostics also survive schedule-stage refusals. Retaining
+that audit trail does not relax fact-cutoff eligibility, output withholding or
+review qualification, and does not invent diagnostics before resolver creation.
 
 The envelope supplies company/scenario identity, object/perimeter/acquisition
 boundaries, accounting/earnings/capitalized-debt-like lease basis, denomination,

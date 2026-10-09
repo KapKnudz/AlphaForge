@@ -391,7 +391,9 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 "tax_allocation_leg_mismatch",
             )
             amount = _amount(o, a, "amount", True)
-            bridge_category = "opening_current_tax" if lot["origin"] == "boundary_existing" else None
+            bridge_category = (
+                "opening_current_tax" if lot["origin"] == "boundary_existing" else None
+            )
             bridge_direction = (
                 "obligation"
                 if bridge_category and kind == "payment"
@@ -1392,6 +1394,7 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
         "terminal": None,
         "boundary_tax_pv": None,
     }
+    o = None
     try:
         frozen = freeze(request.body if isinstance(request, FrozenRequest) else request)
         req = frozen.unpack()
@@ -1434,7 +1437,7 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
         )
         for key in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
             result[key] = _refusal(e)
-        return result
+        return _with_audit_diagnostics(result, o)
     tail_attempted = False
     try:
         _require_no_material_limitation(
@@ -1613,6 +1616,10 @@ def _finish(result, o):
     }
     if o.used and o.used <= human:
         result["review_status"] = "human_reviewed"
-    if o.review_diagnostics:
+    return _with_audit_diagnostics(result, o)
+
+
+def _with_audit_diagnostics(result, o):
+    if o is not None and o.review_diagnostics:
         result["review_diagnostics"] = o.review_diagnostics
     return result
