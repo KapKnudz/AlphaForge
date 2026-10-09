@@ -41,9 +41,7 @@ REQUIRED_CASES = {
             {
                 "code": "tail_primitive_nonstationary",
                 "path": (
-                    "tax/tax/refund"
-                    if group == "late2_refund_two_year_lag"
-                    else "tax/tax/arising"
+                    "tax/tax/refund" if group == "late2_refund_two_year_lag" else "tax/tax/arising"
                 ),
             }
             if group in TRANSITION_GROUPS
@@ -326,9 +324,7 @@ def check_transition_pair(
     )
     _check_terminal_coordinates(corrected_request, corrected, case_id)
     _check_terminal_coordinates(transitional_request, transitional, case_id)
-    corrected_templates = {
-        template["id"]: template for template in corrected_terminal["templates"]
-    }
+    corrected_templates = {template["id"]: template for template in corrected_terminal["templates"]}
     transitional_templates = {
         template["id"]: template for template in transitional_terminal["templates"]
     }
@@ -361,9 +357,7 @@ def check_transition_pair(
             (case_id, identity),
         )
     corrected_kernels = {kernel["id"]: kernel for kernel in corrected_terminal["tax_kernels"]}
-    transitional_kernels = {
-        kernel["id"]: kernel for kernel in transitional_terminal["tax_kernels"]
-    }
+    transitional_kernels = {kernel["id"]: kernel for kernel in transitional_terminal["tax_kernels"]}
     require(
         set(corrected_kernels) == set(transitional_kernels),
         "transition kernel inventory mismatch",
@@ -430,8 +424,7 @@ def check_transition_refusal(result, case_id):
     failure = dimensions["transition_failure"]
     require(failure is not None, "unexpected transition case", case_id)
     require(
-        result["operating_cash_flows"]["available"]
-        and not result["operating_value"]["available"],
+        result["operating_cash_flows"]["available"] and not result["operating_value"]["available"],
         "transition did not preserve cash and refuse value",
         case_id,
     )
@@ -531,7 +524,8 @@ def main():
         input_path = base / case["input_file"]
         expected = json.loads((base / case["expected_file"]).read_text())
         require(
-            set(expected) == {
+            set(expected)
+            == {
                 "basis",
                 "rows",
                 "horizon",

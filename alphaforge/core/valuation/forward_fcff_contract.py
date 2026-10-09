@@ -238,10 +238,9 @@ class Operands:
             conditional = sequence(limitation["conditional_outputs"])
             unique(targets, limitation["id"])
             unique(conditional, limitation["id"])
-            if (
-                any(not isinstance(target, str) or target not in OUTPUTS for target in targets)
-                or any(target not in targets for target in conditional)
-            ):
+            if any(
+                not isinstance(target, str) or target not in OUTPUTS for target in targets
+            ) or any(target not in targets for target in conditional):
                 raise ContractError("invalid_limitation_output", limitation["id"])
             if not isinstance(limitation["material"], bool):
                 raise ContractError("invalid_limitation")

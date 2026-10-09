@@ -268,6 +268,7 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
 
 def test_transition_pair_rejects_changed_terminal_premises_losslessly():
     from forward_fcff_fixtures import set_tail
+
     from tools.check_forward_fcff_acceptance import AcceptanceError, check_transition_pair
 
     corrected, corrected_inputs = request(horizon=2)
@@ -297,7 +298,9 @@ def test_transition_pair_rejects_changed_terminal_premises_losslessly():
                     if allocation["lot_id"] not in replacements:
                         allocations.append(allocation)
                         continue
-                    for suffix, lot_id in zip(("a", "b"), replacements[allocation["lot_id"]]):
+                    for suffix, lot_id in zip(
+                        ("a", "b"), replacements[allocation["lot_id"]], strict=True
+                    ):
                         part = json.loads(json.dumps(allocation))
                         part["id"] += f"-{suffix}"
                         part["lot_id"] = lot_id
@@ -346,9 +349,9 @@ def test_transition_pair_rejects_changed_terminal_premises_losslessly():
     )
 
     changed_member = json.loads(json.dumps(corrected))
-    changed_member["terminal"]["tax_kernels"][0]["queues"][0]["remaining_at_tail"][
-        "provenance"
-    ]["rationale"] = "Changed premise for one same-age lot"
+    changed_member["terminal"]["tax_kernels"][0]["queues"][0]["remaining_at_tail"]["provenance"][
+        "rationale"
+    ] = "Changed premise for one same-age lot"
     with pytest.raises(AcceptanceError, match="transition queue provenance mismatch"):
         check_transition_pair(
             changed_member,

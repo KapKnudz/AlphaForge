@@ -290,9 +290,7 @@ def test_noncommon_rights_must_exactly_partition_bridge_claims():
     assert missing["operating_value"]["available"]
     assert missing["common_equity"]["reason_codes"] == ["ownership_claim_unvalued"]
 
-    req["ownership"]["rights"][2].update(
-        status="valued", claim_event_ids=["option-a", "option-b"]
-    )
+    req["ownership"]["rights"][2].update(status="valued", claim_event_ids=["option-a", "option-b"])
     valid = evaluate(req)
     assert valid["common_equity"]["available"]
     req["ownership"]["rights"][3].update(status="valued", claim_event_ids=["option-a"])
@@ -314,9 +312,7 @@ def test_consumed_unresolved_operands_are_stage_scoped():
         item = claim(req, f, "debt", "nonlease_debt", 10)
         complete_bridge(req, f, [item])
         operands = {
-            "schedule": req["operating_schedule"]["periods"][0][
-                "cash_operating_profit_before_da"
-            ],
+            "schedule": req["operating_schedule"]["periods"][0]["cash_operating_profit_before_da"],
             "rate": req["discount"]["rate"],
             "terminal": req["terminal"]["growth"],
             "bridge": item["value"],
@@ -324,15 +320,18 @@ def test_consumed_unresolved_operands_are_stage_scoped():
         }
         operands[location]["provenance"]["uncertainty"] = "unresolved"
         result = evaluate(req)
-        assert tuple(
-            result[key]["available"]
-            for key in (
-                "operating_cash_flows",
-                "operating_value",
-                "common_equity",
-                "per_share",
+        assert (
+            tuple(
+                result[key]["available"]
+                for key in (
+                    "operating_cash_flows",
+                    "operating_value",
+                    "common_equity",
+                    "per_share",
+                )
             )
-        ) == expected
+            == expected
+        )
         first_unavailable = expected.index(False)
         key = ("operating_cash_flows", "operating_value", "common_equity", "per_share")[
             first_unavailable
@@ -415,9 +414,7 @@ def test_acquisition_control_dates_gate_existing_operations_perimeter():
 
     acquisition["control_date"] = None
     unknown = evaluate(req)
-    assert unknown["operating_cash_flows"]["reason_codes"] == [
-        "acquisition_control_date_missing"
-    ]
+    assert unknown["operating_cash_flows"]["reason_codes"] == ["acquisition_control_date_missing"]
     acquisition["included"] = False
     assert evaluate(req)["operating_cash_flows"]["available"]
 
@@ -471,9 +468,7 @@ def test_material_limitations_withhold_each_target_and_dependents():
             assert not result["operating_value"]["available"]
         elif target == "operating_value":
             assert result["operating_cash_flows"]["available"]
-            assert result[target]["reason_codes"] == [
-                "operating_value_material_input_unresolved"
-            ]
+            assert result[target]["reason_codes"] == ["operating_value_material_input_unresolved"]
             assert result["common_equity"]["reason_codes"] == ["operating_value_unavailable"]
         elif target == "common_equity":
             assert result["operating_value"]["available"]
@@ -496,9 +491,7 @@ def test_material_limitation_requires_a_target_but_nonmaterial_note_may_be_untar
             "material": True,
         }
     ]
-    assert evaluate(req)["operating_cash_flows"]["reason_codes"] == [
-        "invalid_limitation_output"
-    ]
+    assert evaluate(req)["operating_cash_flows"]["reason_codes"] == ["invalid_limitation_output"]
     req["limitations"][0].update(
         affected_outputs=["operating_value"],
         conditional_outputs=["operating_value"],
@@ -699,9 +692,7 @@ def test_leap_day_stays_in_full_annual_period_without_shifting_endpoints():
 
     shortened = copy.deepcopy(req)
     shortened["operating_schedule"]["periods"][0]["end"] = "2025-02-27"
-    assert evaluate(shortened)["operating_cash_flows"]["reason_codes"] == [
-        "unsupported_period"
-    ]
+    assert evaluate(shortened)["operating_cash_flows"]["reason_codes"] == ["unsupported_period"]
 
 
 def test_a10_fact_source_cutoff_and_real_review():

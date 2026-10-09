@@ -260,14 +260,10 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
             ledger["allocated_book_da"] = f.operand(0)
             ledger["allocation_basis"] = "Explicit synthetic ledger allocation"
         payment["allocations"] = [
-            allocation
-            for allocation in payment["allocations"]
-            if allocation["kind"] == "payment"
+            allocation for allocation in payment["allocations"] if allocation["kind"] == "payment"
         ]
         refund["allocations"] = [
-            allocation
-            for allocation in refund["allocations"]
-            if allocation["kind"] == "refund"
+            allocation for allocation in refund["allocations"] if allocation["kind"] == "refund"
         ]
         year = row["start"][:4]
         for allocation in payment["allocations"]:
@@ -299,8 +295,7 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
         tuple(row[field] for field in cash_fields)
         for row in second["operating_cash_flows"]["value"]
     ] == [
-        tuple(row[field] for field in cash_fields)
-        for row in first["operating_cash_flows"]["value"]
+        tuple(row[field] for field in cash_fields) for row in first["operating_cash_flows"]["value"]
     ]
 
     late = copy.deepcopy(renamed)
