@@ -390,6 +390,42 @@ def test_consumed_unresolved_operands_are_stage_scoped():
         assert result[key]["reason_codes"] == ["required_operand_unresolved"]
 
 
+def test_zero_mature_tax_sources_do_not_require_phantom_queue_lots():
+    profits = (100, 100, 0, 0, 0, 0, 0, 0)
+    explicit_zero, explicit_inputs = request(profits=profits, horizon=4, growth=0)
+    set_tail(
+        explicit_zero,
+        explicit_inputs,
+        4,
+        0,
+        {"tax/tax/arising": 3, "tax/tax/entitlement": 3},
+    )
+    explicit_result = evaluate(explicit_zero)
+    assert explicit_result["operating_value"]["available"]
+
+    no_phantom = copy.deepcopy(explicit_zero)
+    no_phantom["operating_schedule"]["tax_lots"] = [
+        lot
+        for lot in no_phantom["operating_schedule"]["tax_lots"]
+        if lot["amount"]["value"] != 0
+    ]
+    result = evaluate(no_phantom)
+    assert [row["fcff_operations"] for row in result["operating_cash_flows"]["value"]] == [
+        85,
+        80,
+        -5,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert result["terminal"]["next_year_fcff"] == 0
+    assert result["terminal"]["present_value"] == 0
+    assert result["operating_value"]["value"] == pytest.approx(123.49537037037037)
+    assert result["operating_value"] == explicit_result["operating_value"]
+
+
 def test_terminal_queue_covers_all_remaining_lots_beyond_witness_years():
     req, _ = request(
         profits=(100,) * 12,
@@ -1059,6 +1095,34 @@ def test_a3_eligibility_cash_before_known_date():
     lot["eligible_date"] = "2030-01-01"
     result = evaluate(req)
     assert result["operating_cash_flows"]["reason_codes"] == ["refund_eligibility_unestablished"]
+
+
+def test_structured_order_bounds_reject_only_definitely_ineligible_refund():
+    req, _ = request(lag=0)
+    row = req["operating_schedule"]["periods"][0]
+    allocations = row["tax_ledgers"][0]["allocations"]
+    refund = next(allocation for allocation in allocations if allocation["kind"] == "refund")
+    payment = next(allocation for allocation in allocations if allocation["kind"] == "payment")
+    refund["cash_date"] = None
+    refund["eligibility_order"] = {"rank": 1, "basis": "Refund before dated payment"}
+    payment["cash_date"] = row["start"]
+    payment["eligibility_order"] = {"rank": 2, "basis": "Dated payment after refund"}
+    refund_lot = next(
+        lot
+        for lot in req["operating_schedule"]["tax_lots"]
+        if lot["id"] == refund["lot_id"]
+    )
+    refund_lot["eligible_date"] = row["end"]
+
+    refused = evaluate(req)
+    for output_name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert refused[output_name]["reason_codes"] == ["refund_eligibility_unestablished"]
+        assert not refused[output_name]["available"]
+
+    payment["cash_date"] = row["end"]
+    valid = evaluate(req)
+    assert valid["operating_cash_flows"]["value"][0]["fcff_operations"] == 95
+    assert valid["operating_value"]["value"] == pytest.approx(756.25)
 
 
 def test_arbitrary_dateless_tax_order_text_is_not_interpreted():

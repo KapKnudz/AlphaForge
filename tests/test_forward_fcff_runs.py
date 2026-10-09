@@ -230,7 +230,7 @@ def test_a19_real_existing_rank_packet_and_calibration_bytes_survive_upgrade(tmp
     conn.close()
 
 
-def test_transition_acceptance_requires_catalogued_nonstationarity():
+def test_transition_acceptance_requires_complete_consistent_refusal():
     from tools.check_forward_fcff_acceptance import (
         AcceptanceError,
         check_transition_refusal,
@@ -243,14 +243,20 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
         "regime_start": 16,
         "requested_tail_start": 15,
     }
+    rows = [{"index": index, "fcff_operations": float(index)} for index in range(1, 16)]
     output = {
-        "operating_cash_flows": {"available": True},
+        "operating_cash_flows": {"available": True, "value": rows},
         "operating_value": {
             "available": False,
+            "value": None,
             "reason_codes": ["terminal_regime_not_stationary"],
         },
+        "common_equity": {"available": False, "value": None},
+        "per_share": {"available": False, "value": None},
         "terminal": {
             "horizon": 14,
+            "next_year_fcff": 15.0,
+            "value_at_horizon": None,
             "present_value": None,
             "certificate": {
                 "failures": [
@@ -264,6 +270,28 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
         "terminal_regime_diagnostics": [diagnostic],
     }
     check_transition_refusal(output, case_id)
+
+    mutations = (
+        ("operating_value", "value", 1),
+        ("common_equity", "available", True),
+        ("common_equity", "value", 1),
+        ("per_share", "available", True),
+        ("per_share", "value", 1),
+        ("terminal", "value_at_horizon", 1),
+        ("terminal", "present_value", 1),
+        ("terminal", "next_year_fcff", 123),
+    )
+    for section, field, value in mutations:
+        changed = json.loads(json.dumps(output))
+        changed[section][field] = value
+        with pytest.raises(AcceptanceError):
+            check_transition_refusal(changed, case_id)
+
+    incomplete = json.loads(json.dumps(output))
+    del incomplete["operating_cash_flows"]["value"]
+    with pytest.raises(KeyError):
+        check_transition_refusal(incomplete, case_id)
+
     unrelated = json.loads(json.dumps(output))
     unrelated["operating_value"]["reason_codes"] = ["terminal_growth_invalid"]
     unrelated["terminal"]["certificate"]["failures"] = [
@@ -272,6 +300,65 @@ def test_transition_acceptance_requires_catalogued_nonstationarity():
     unrelated.pop("terminal_regime_diagnostics")
     with pytest.raises(AcceptanceError, match="transition refusal reason mismatch"):
         check_transition_refusal(unrelated, case_id)
+
+
+def test_success_acceptance_requires_complete_operating_only_output():
+    from tools.check_forward_fcff_acceptance import (
+        REQUIRED_FINANCIAL_PATHS,
+        AcceptanceError,
+        check_output,
+    )
+
+    case_id = "flat_reference-return-1"
+    actual_rows = []
+    expected_rows = []
+    for index in range(1, 23):
+        row = {"index": index}
+        values = {}
+        for path in REQUIRED_FINANCIAL_PATHS:
+            values[path] = "0"
+            if "." in path:
+                parent, child = path.split(".", 1)
+                row.setdefault(parent, {})[child] = 0.0
+            else:
+                row[path] = 0.0
+        actual_rows.append(row)
+        expected_rows.append({"index": index, "values": values})
+    actual = {
+        "scenario_id": case_id,
+        "denomination": {"currency": "EUR"},
+        "operating_cash_flows": {"available": True, "value": actual_rows},
+        "operating_value": {"available": True, "value": 0.0},
+        "common_equity": {"available": False, "value": None},
+        "per_share": {"available": False, "value": None},
+        "explicit_pv": 0.0,
+        "terminal": {"horizon": 15, "next_year_fcff": 0.0, "present_value": 0.0},
+    }
+    expected = {
+        "rows": expected_rows,
+        "horizon": 15,
+        "terminal_numerator": "0",
+        "explicit_pv": "0",
+        "terminal_pv": "0",
+        "operating_value": "0",
+    }
+    check_output(actual, expected, 2e-8, 2e-12, case_id)
+
+    for section, field, value in (
+        ("common_equity", "available", True),
+        ("common_equity", "value", 1),
+        ("per_share", "available", True),
+        ("per_share", "value", 1),
+    ):
+        changed = json.loads(json.dumps(actual))
+        changed[section][field] = value
+        with pytest.raises(AcceptanceError):
+            check_output(changed, expected, 2e-8, 2e-12, case_id)
+
+    incomplete = json.loads(json.dumps(actual))
+    del incomplete["common_equity"]
+    with pytest.raises(KeyError):
+        check_output(incomplete, expected, 2e-8, 2e-12, case_id)
 
 
 def test_transition_pair_rejects_changed_terminal_premises_losslessly():

@@ -98,6 +98,21 @@ def require(condition, message, details=None):
         raise AcceptanceError(f"{message}{suffix}")
 
 
+def _require_output_mask(result, availability, case_id):
+    names = ("operating_cash_flows", "operating_value", "common_equity", "per_share")
+    require(
+        tuple(result[name]["available"] for name in names) == availability,
+        "output availability mask mismatch",
+        case_id,
+    )
+    for name, available in zip(names, availability, strict=True):
+        require(
+            (result[name]["value"] is not None) == available,
+            "output value mask mismatch",
+            (case_id, name),
+        )
+
+
 def verify_reference(manifest, root):
     pinned = json.loads(manifest.read_text())
     hashes = pinned["all_accepted_artifact_hashes"]
@@ -134,21 +149,7 @@ def check_output(actual, expected, absolute, relative, case_id):
 
     require(actual.get("scenario_id") == case_id, "scenario identity mismatch", case_id)
     require(actual["denomination"]["currency"] == "EUR", "reference currency mismatch", case_id)
-    require(
-        actual["operating_cash_flows"]["available"],
-        "operating cash flows unavailable",
-        actual["operating_cash_flows"],
-    )
-    require(
-        actual["operating_value"]["available"],
-        "operating value unavailable",
-        actual["operating_value"],
-    )
-    require(
-        not actual["common_equity"]["available"] and not actual["per_share"]["available"],
-        "reference must remain operating-only",
-        case_id,
-    )
+    _require_output_mask(actual, (True, True, False, False), case_id)
     rows = actual["operating_cash_flows"]["value"]
     require(len(rows) == len(expected["rows"]) == 22, "annual row coverage mismatch", case_id)
     checks = 0
@@ -425,11 +426,7 @@ def check_transition_refusal(result, case_id):
     dimensions = REQUIRED_CASES[case_id]
     failure = dimensions["transition_failure"]
     require(failure is not None, "unexpected transition case", case_id)
-    require(
-        result["operating_cash_flows"]["available"] and not result["operating_value"]["available"],
-        "transition did not preserve cash and refuse value",
-        case_id,
-    )
+    _require_output_mask(result, (True, False, False, False), case_id)
     require(
         result["operating_value"]["reason_codes"] == [failure["code"]],
         "transition refusal reason mismatch",
@@ -452,8 +449,20 @@ def check_transition_refusal(result, case_id):
         case_id,
     )
     require(
-        result["terminal"]["present_value"] is None,
+        result["terminal"]["value_at_horizon"] is None
+        and result["terminal"]["present_value"] is None,
         "transition emitted terminal value",
+        case_id,
+    )
+    rows = result["operating_cash_flows"]["value"]
+    horizon = result["terminal"]["horizon"]
+    require(
+        isinstance(horizon, int)
+        and not isinstance(horizon, bool)
+        and horizon < len(rows)
+        and rows[horizon]["index"] == horizon + 1
+        and result["terminal"]["next_year_fcff"] == rows[horizon]["fcff_operations"],
+        "transition diagnostic numerator mismatch",
         case_id,
     )
 

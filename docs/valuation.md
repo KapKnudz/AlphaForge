@@ -389,8 +389,11 @@ identify `boundary_existing` period-zero valuation-date balances versus
 each annual cash allocation. Allocation chronology is evaluated across all
 ledgers in a row. Structured ordering is `{rank: positive unique integer, basis:
 nonempty text}` on every event in that annual row; ranks execute prerequisites
-across ledgers, and known cash dates may not contradict their order. Same-day
-actual cash uses the supplied rank, while date-less ranks do not invent dates.
+across ledgers, and known cash dates may not contradict their order. Each
+structured rank has the feasible date interval bounded by adjacent known dates
+and the annual period; its eligibility date must intersect that interval.
+Same-day actual cash uses the supplied rank, while date-less ranks do not invent
+dates or resolve otherwise ambiguous timing.
 The exact legacy strings `Explicit annual eligibility/order assumption` and
 `Explicit synthetic gross cash order` retain the historical start/end effective-
 date convention with payments-first same-day ties for compatible retained inputs. Other free
@@ -419,8 +422,9 @@ supplied geometric primitive templates, stationary active-class renewal/balance
 premises, exhausted finite states and mature gross tax queues/kernels. Every
 material primitive/gross leg is checked, not merely net FCFF equality. Each
 kernel queue exactly inventories every nonzero forecast-created lot for its
-ledger and leg at start N+1, including multiple lots of the same age; opening
-boundary lots remain separate. Acquisitions, terminal exhausted states and
+ledger and leg at start N+1, including multiple lots of the same age; an exactly
+zero mature source obligation requires no phantom queue lot. Opening boundary
+lots remain separate. Acquisitions, terminal exhausted states and
 ownership rights are canonicalized by ID so permutations retain one request
 identity. Duplicate acquisition and right IDs invalidate the request; duplicate
 exhausted-state IDs remain terminal-scoped and withhold operating value without
@@ -437,7 +441,8 @@ primitive definitions and absolute economic regime starts. Only the one-year
 horizon/tail coordinate and independently reconciled seed, losslessly compared
 queue multiset and finite-state advancement may differ.
 Queue display IDs and order do not change premise identity. Refusal certificates retain
-failures and a diagnostic full next-year row, without a terminal-PV scalar.
+failures and a diagnostic full next-year row whose FCFF equals the terminal
+`next_year_fcff`; both terminal valuation scalars remain null.
 
 ```text
 explicit_PV = sum(F_t / (1+r)^t, t=1..N)

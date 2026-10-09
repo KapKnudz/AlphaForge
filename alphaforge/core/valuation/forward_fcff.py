@@ -253,6 +253,16 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
         ordered = sorted(allocations, key=lambda entry: entry["rank"])
         known_dates = [entry["cash_date"] for entry in ordered if entry["cash_date"] is not None]
         _require(known_dates == sorted(known_dates), "tax_event_order_invalid")
+        earliest = start
+        for entry in ordered:
+            if entry["cash_date"] is not None:
+                earliest = entry["cash_date"]
+            entry["earliest_date"] = earliest
+        latest = end
+        for entry in reversed(ordered):
+            if entry["cash_date"] is not None:
+                latest = entry["cash_date"]
+            entry["latest_date"] = latest
     else:
         _require(
             all(
@@ -280,8 +290,10 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
         if allocation["kind"] != "writeoff":
             if lot["eligible_date"] is not None:
                 eligible = iso_date(lot["eligible_date"])
+                earliest = entry.get("earliest_date", entry["cash_date"] or start)
+                latest = entry.get("latest_date", entry["cash_date"] or end)
                 _require(
-                    (entry["cash_date"] or end) >= eligible,
+                    max(earliest, eligible) <= latest,
                     "refund_eligibility_unestablished",
                 )
             for prerequisite in lot["prerequisites"]:
@@ -465,21 +477,6 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 or math.isclose(amount, v["remaining"], rel_tol=1e-8, abs_tol=1e-8),
                 "tax_lot_overallocated",
             )
-            if kind != "writeoff":
-                if a["cash_date"] is not None:
-                    cash_date = iso_date(a["cash_date"])
-                    _require(start <= cash_date <= end, "tax_cash_date_outside_period")
-                    if lot["eligible_date"] is not None:
-                        _require(
-                            cash_date >= iso_date(lot["eligible_date"]),
-                            "refund_eligibility_unestablished",
-                        )
-                else:
-                    if lot["eligible_date"] is not None:
-                        _require(
-                            end >= iso_date(lot["eligible_date"]),
-                            "refund_eligibility_unestablished",
-                        )
             v["remaining"] = max(0.0, v["remaining"] - amount)
             if kind == "payment":
                 v["paid"] += amount
@@ -1068,7 +1065,8 @@ def _tail(req, o, rows, lots, rate):
                     continue
                 source = tindex - offset
                 _require(source >= regime, "tail_tax_queue_nonstationary", cash_path)
-                if source <= n:
+                expected_source_cash = rows[source - 1]["legs"][accrual_path] * weight
+                if source <= n and expected_source_cash != 0:
                     source_lots = [
                         v
                         for v in lots.values()
@@ -1082,7 +1080,6 @@ def _tail(req, o, rows, lots, rate):
                         and all(v["record"]["id"] in queue_ids for v in source_lots),
                         "terminal_mature_queue_missing",
                     )
-                expected_source_cash = rows[source - 1]["legs"][accrual_path] * weight
                 allocated_source_cash = sum(
                     number(a["amount"]["value"])
                     for ll in req["operating_schedule"]["periods"][tindex - 1]["tax_ledgers"]
