@@ -363,10 +363,11 @@ unknown inclusion is insufficient perimeter evidence and future inclusion is
 outside existing consolidated operations. Excluded acquisitions do not acquire
 an inferred control date or alter aggregate schedules.
 Annual periods start the day after valuation and remain consecutive full rolling
-years whose inclusive ends repeat the valuation boundary's month/day, clamped
-for February. Thus a 2024-02-28 boundary produces 2024-02-29 through 2025-02-28,
-so the leap day remains in the full annual interval instead of shortening and
-shifting every later fiscal endpoint. Core imports no DB/provider/model layer.
+years whose inclusive ends repeat the original valuation boundary's month/day,
+clamped only for the target year. Thus a 2024-02-28 boundary produces
+2024-02-29 through 2025-02-28, while a 2024-02-29 boundary restores February 29
+at the 2028 endpoint after intervening nonleap clamps. The original anchor is
+never replaced by a clamped endpoint. Core imports no DB/provider/model layer.
 
 Rows supply cash operating profit C, compatible D&A D, other noncash charge N,
 identified positive cash purchases I and economic lease additions L, disposal

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+from calendar import monthrange
+from datetime import date, timedelta
 from decimal import Decimal as D
 
 import pytest
@@ -1187,6 +1189,85 @@ def test_leap_day_stays_in_full_annual_period_without_shifting_endpoints():
     shortened = copy.deepcopy(req)
     shortened["operating_schedule"]["periods"][0]["end"] = "2025-02-27"
     assert evaluate(shortened)["operating_cash_flows"]["reason_codes"] == ["unsupported_period"]
+
+
+@pytest.mark.parametrize(
+    ("valuation_date", "period_count", "restored_index", "restored_end"),
+    [
+        ("2024-02-29", 6, 4, "2028-02-29"),
+        ("1996-02-29", 6, 4, "2000-02-29"),
+        ("2096-02-29", 10, 8, "2104-02-29"),
+        ("2396-02-29", 6, 4, "2400-02-29"),
+    ],
+)
+def test_february_29_valuation_anchor_returns_in_later_leap_years(
+    valuation_date, period_count, restored_index, restored_end
+):
+    req, inputs = request(profits=(100,) * period_count, horizon=2, growth=0)
+    anchor = date.fromisoformat(valuation_date)
+    expected = []
+    start = anchor + timedelta(days=1)
+    for index in range(1, period_count + 1):
+        target_year = anchor.year + index
+        end = date(
+            target_year,
+            anchor.month,
+            min(anchor.day, monthrange(target_year, anchor.month)[1]),
+        )
+        expected.append((start.isoformat(), end.isoformat()))
+        start = end + timedelta(days=1)
+
+    req["valuation_date"] = valuation_date
+    req["evidence_cutoff"] = valuation_date
+    req["prepared_on"] = valuation_date
+    for row, (start_text, end_text) in zip(
+        req["operating_schedule"]["periods"], expected, strict=True
+    ):
+        row["start"] = start_text
+        row["end"] = end_text
+    for lot in req["operating_schedule"]["tax_lots"]:
+        lot["accounting_date"] = expected[lot["source_period"] - 1][1]
+    complete_bridge(req, inputs)
+
+    result = evaluate(req)
+    assert all(
+        result[name]["available"]
+        for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share")
+    )
+    assert expected[restored_index - 1][1] == restored_end
+    assert [
+        (row["start"], row["end"]) for row in result["operating_cash_flows"]["value"]
+    ] == expected
+
+    chained = copy.deepcopy(req)
+    chained_dates = []
+    chained_boundary = anchor
+    chained_start = anchor + timedelta(days=1)
+    for _ in range(period_count):
+        target_year = chained_boundary.year + 1
+        chained_end = date(
+            target_year,
+            chained_boundary.month,
+            min(
+                chained_boundary.day,
+                monthrange(target_year, chained_boundary.month)[1],
+            ),
+        )
+        chained_dates.append((chained_start.isoformat(), chained_end.isoformat()))
+        chained_boundary = chained_end
+        chained_start = chained_end + timedelta(days=1)
+    for row, (start_text, end_text) in zip(
+        chained["operating_schedule"]["periods"], chained_dates, strict=True
+    ):
+        row["start"] = start_text
+        row["end"] = end_text
+    for lot in chained["operating_schedule"]["tax_lots"]:
+        lot["accounting_date"] = chained_dates[lot["source_period"] - 1][1]
+
+    refused = evaluate(chained)
+    for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert refused[name]["reason_codes"] == ["unsupported_period"]
+        assert refused[name]["missing_inputs"] == [f"year-{restored_index}"]
 
 
 def test_a10_fact_source_cutoff_and_real_review():

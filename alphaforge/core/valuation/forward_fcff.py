@@ -65,11 +65,12 @@ class _TerminalRegimeError(ContractError):
         }
 
 
-def _anniversary(d):
+def _anniversary(d, years):
+    target_year = d.year + years
     try:
-        return d.replace(year=d.year + 1)
+        return d.replace(year=target_year)
     except ValueError:
-        return d.replace(year=d.year + 1, day=28)
+        return d.replace(year=target_year, day=28)
 
 
 def _require(condition, code, path=""):
@@ -737,8 +738,8 @@ def _schedule(req, o):
     asset_prior = {}
     tax_prior = {}
     wc = _amount(o, s, "initial_wc")
-    boundary = iso_date(req["valuation_date"])
-    start = boundary + timedelta(days=1)
+    valuation_boundary = iso_date(req["valuation_date"])
+    start = valuation_boundary + timedelta(days=1)
     result = []
     ids = []
     for index, row in enumerate(periods, 1):
@@ -749,7 +750,7 @@ def _schedule(req, o):
         )
         ids.append(text(row["id"]))
         _require(integer(row["index"], minimum=1) == index, "unsupported_period")
-        end = _anniversary(boundary)
+        end = _anniversary(valuation_boundary, index)
         _require(
             iso_date(row["start"]) == start and iso_date(row["end"]) == end,
             "unsupported_period",
@@ -858,7 +859,6 @@ def _schedule(req, o):
             }
         )
         wc = wc_close
-        boundary = end
         start = end + timedelta(days=1)
     unique(ids)
     ledger_ids = set(tax_prior)
