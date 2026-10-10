@@ -365,7 +365,8 @@ def test_nested_bridge_and_right_sets_have_canonical_identity():
         claim_event_ids=["preferred-a", "preferred-b"],
     )
     expected_request = freeze(req).body
-    expected_output = canonical(evaluate(req))
+    expected_result = evaluate(req)
+    expected_output = canonical(expected_result)
 
     inventory_reversed = copy.deepcopy(req)
     inventory_reversed["bridge"]["completeness"]["inventoried_categories"].reverse()
@@ -394,9 +395,17 @@ def test_nested_bridge_and_right_sets_have_canonical_identity():
     duplicate_inventory = copy.deepcopy(req)
     inventory = duplicate_inventory["bridge"]["completeness"]["inventoried_categories"]
     inventory.append(inventory[0])
+    frozen_inventory = freeze(duplicate_inventory).unpack()["bridge"]["completeness"][
+        "inventoried_categories"
+    ]
+    assert frozen_inventory.count(inventory[0]) == 2
     duplicate_inventory_result = evaluate(duplicate_inventory)
-    assert duplicate_inventory_result["operating_value"]["available"]
-    assert duplicate_inventory_result["common_equity"]["reason_codes"] == ["duplicate_id"]
+    for output_name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert duplicate_inventory_result[output_name]["available"]
+        assert (
+            duplicate_inventory_result[output_name]["value"]
+            == expected_result[output_name]["value"]
+        )
 
     duplicate_claim = copy.deepcopy(req)
     duplicate_preferred = next(
@@ -408,22 +417,37 @@ def test_nested_bridge_and_right_sets_have_canonical_identity():
     assert duplicate_claim_result["common_equity"]["reason_codes"] == ["ownership_claim_duplicated"]
 
 
-@pytest.mark.parametrize("location", ["inventory", "claims"])
-def test_malformed_nested_bridge_sets_refuse_at_owner(location):
+@pytest.mark.parametrize(
+    ("location", "member", "status", "reason"),
+    [
+        ("inventory", 7, "insufficient_evidence", "bridge_material_claim_unresolved"),
+        ("inventory", None, "insufficient_evidence", "bridge_material_claim_unresolved"),
+        ("inventory", {}, "invalid_input", "invalid_optional_module"),
+        ("inventory", [], "invalid_input", "invalid_optional_module"),
+        ("claims", 7, "insufficient_evidence", "ownership_claim_unvalued"),
+        ("claims", None, "insufficient_evidence", "ownership_claim_unvalued"),
+        ("claims", {}, "invalid_input", "invalid_optional_module"),
+        ("claims", [], "invalid_input", "invalid_optional_module"),
+    ],
+)
+def test_malformed_nested_bridge_sets_refuse_at_owner(location, member, status, reason):
     req, f = request()
     items = [claim(req, f, "preferred", "noncommon_claims", 2)]
     complete_bridge(req, f, items)
     preferred = next(right for right in req["ownership"]["rights"] if right["id"] == "preferred")
     preferred.update(status="valued", claim_event_ids=["preferred"])
     if location == "inventory":
-        req["bridge"]["completeness"]["inventoried_categories"].append({})
+        req["bridge"]["completeness"]["inventoried_categories"].append(member)
     else:
-        preferred["claim_event_ids"].append({})
+        preferred["claim_event_ids"].append(member)
 
     result = evaluate(req)
     assert result["operating_cash_flows"]["available"]
     assert result["operating_value"]["available"]
-    assert result["common_equity"]["reason_codes"] == ["nonempty_text_required"]
+    assert result["common_equity"]["status"] == status
+    assert result["common_equity"]["reason_codes"] == [reason]
+    assert not result["common_equity"]["available"]
+    assert not result["per_share"]["available"]
 
 
 def test_consumed_unresolved_operands_are_stage_scoped():
@@ -558,6 +582,80 @@ def test_terminal_queue_uses_accepted_horizon_settlement_state():
     assert evaluate(grouped)["operating_value"]["value"] == pytest.approx(
         result["operating_value"]["value"]
     )
+
+
+def test_terminal_queue_witness_uses_only_horizon_outstanding_same_age_lots():
+    req, inputs = request()
+    source_lot = next(
+        lot for lot in req["operating_schedule"]["tax_lots"] if lot["id"] == "payable-2"
+    )
+    source_lot["amount"] = inputs.operand(15)
+    outstanding_lot = copy.deepcopy(source_lot)
+    outstanding_lot["id"] = "payable-2-outstanding"
+    outstanding_lot["amount"] = inputs.operand(15)
+    req["operating_schedule"]["tax_lots"].append(outstanding_lot)
+    next(
+        allocation
+        for allocation in req["operating_schedule"]["periods"][2]["tax_ledgers"][0]["allocations"]
+        if allocation["lot_id"] == "payable-2"
+    )["lot_id"] = outstanding_lot["id"]
+    payment_kernel = next(
+        kernel for kernel in req["terminal"]["tax_kernels"] if kernel["leg"] == "payment"
+    )
+    source_queue = next(
+        queue for queue in payment_kernel["queues"] if queue["lot_id"] == "payable-2"
+    )
+    source_queue["id"] = outstanding_lot["id"]
+    source_queue["lot_id"] = outstanding_lot["id"]
+
+    result = evaluate(req)
+    assert result["operating_value"]["value"] == pytest.approx(740.9722222222222)
+
+    with_settled = copy.deepcopy(req)
+    next(
+        kernel for kernel in with_settled["terminal"]["tax_kernels"] if kernel["leg"] == "payment"
+    )["queues"].append(
+        {
+            "id": "payable-2-settled-queue",
+            "source_period": 2,
+            "lot_id": "payable-2",
+            "remaining_at_tail": inputs.operand(0),
+        }
+    )
+    settled_result = evaluate(with_settled)
+    assert settled_result["operating_cash_flows"]["available"]
+    assert settled_result["operating_value"]["reason_codes"] == ["terminal_mature_queue_missing"]
+    assert settled_result["operating_value"]["missing_inputs"] == [
+        "terminal.tax_kernels.tax.payment.queues"
+    ]
+
+    with_zero_sibling = copy.deepcopy(req)
+    zero_lot = copy.deepcopy(outstanding_lot)
+    zero_lot["id"] = "payable-2-zero"
+    zero_lot["amount"] = inputs.operand(0)
+    with_zero_sibling["operating_schedule"]["tax_lots"].append(zero_lot)
+    assert evaluate(with_zero_sibling)["operating_value"]["value"] == pytest.approx(
+        result["operating_value"]["value"]
+    )
+
+    next(
+        kernel
+        for kernel in with_zero_sibling["terminal"]["tax_kernels"]
+        if kernel["leg"] == "payment"
+    )["queues"].append(
+        {
+            "id": "payable-2-zero-queue",
+            "source_period": 2,
+            "lot_id": zero_lot["id"],
+            "remaining_at_tail": inputs.operand(0),
+        }
+    )
+    zero_result = evaluate(with_zero_sibling)
+    assert zero_result["operating_cash_flows"]["available"]
+    assert zero_result["operating_value"]["reason_codes"] == ["terminal_mature_queue_missing"]
+    assert zero_result["operating_value"]["missing_inputs"] == [
+        "terminal.tax_kernels.tax.payment.queues"
+    ]
 
 
 def test_terminal_queue_inventory_includes_tiny_distant_nonzero_lot():

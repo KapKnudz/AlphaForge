@@ -1101,17 +1101,14 @@ def _tail(req, o, rows, lots, rate):
                 _require(source >= regime, "tail_tax_queue_nonstationary", cash_path)
                 expected_source_cash = rows[source - 1]["legs"][accrual_path] * weight
                 if source <= n and expected_source_cash != 0:
-                    source_lots = [
-                        v
-                        for v in lots.values()
-                        if v["record"]["ledger_id"] == ledger
-                        and v["record"]["origin"] == "forecast_created"
-                        and v["record"]["leg"] == ("payable" if leg == "payment" else "refund")
-                        and v["record"]["source_period"] == source
+                    source_lot_ids = [
+                        identity
+                        for identity in expected_queue
+                        if lots[identity]["record"]["source_period"] == source
                     ]
                     _require(
-                        bool(source_lots)
-                        and all(v["record"]["id"] in queue_ids for v in source_lots),
+                        bool(source_lot_ids)
+                        and all(identity in queue_ids for identity in source_lot_ids),
                         "terminal_mature_queue_missing",
                     )
                 allocated_source_cash = sum(
@@ -1194,13 +1191,12 @@ def _bridge(req, o, operating_value, rows, rate):
     )
     text(c["basis_identity"])
     text(c["reviewed_by_or_unreviewed"])
-    inventoried_categories = [text(category) for category in sequence(c["inventoried_categories"])]
-    unique(inventoried_categories, "bridge.completeness.inventoried_categories")
+    sequence(c["inventoried_categories"])
     _require(
         c["scope_date"] == b["scope_date"]
         and c["perimeter_id"] == b["perimeter_id"]
         and c["no_unresolved_material_claims"] is True
-        and set(inventoried_categories) == set(BRIDGE_CATEGORIES),
+        and set(c["inventoried_categories"]) == set(BRIDGE_CATEGORIES),
         "bridge_material_claim_unresolved",
     )
     _require(
@@ -1427,18 +1423,18 @@ def _rights(req, own, bridge):
     for right in rights:
         closed(right, "id status claim_event_ids basis")
         text(right["basis"])
-        claim_event_ids = [text(identity) for identity in sequence(right["claim_event_ids"])]
+        sequence(right["claim_event_ids"])
         _require(
             right["status"] in {"valued", "not_applicable_supported"}, "ownership_census_missing"
         )
         if right["status"] == "valued":
             _require(
-                bool(claim_event_ids) and set(claim_event_ids) <= claims,
+                bool(right["claim_event_ids"]) and set(right["claim_event_ids"]) <= claims,
                 "ownership_claim_unvalued",
             )
-            covered.extend(claim_event_ids)
+            covered.extend(right["claim_event_ids"])
         else:
-            _require(not claim_event_ids, "ownership_rights_status_conflict")
+            _require(not right["claim_event_ids"], "ownership_rights_status_conflict")
     _require(len(covered) == len(set(covered)), "ownership_claim_duplicated")
     _require(set(covered) == claims, "ownership_claim_unvalued")
 

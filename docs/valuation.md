@@ -433,7 +433,8 @@ boundary lots remain separate. Acquisitions and optional terminal, bridge and
 ownership arrays are canonically ordered so valid permutations retain one
 request identity. The bridge category inventory and each right's claim IDs are
 canonical semantic sets; duplicates and malformed members remain present for
-owner-stage refusal. Duplicate acquisition IDs invalidate the required request;
+the established owner-stage contract behavior. Duplicate acquisition IDs
+invalidate the required request;
 malformed or duplicate terminal identities withhold operating value, while
 malformed or duplicate bridge or rights identities withhold equity and per-share
 without withholding valid upstream outputs. Queue source years must be in the selected geometric accrual regime and
