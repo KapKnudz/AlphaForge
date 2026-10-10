@@ -195,13 +195,14 @@ def freeze(value: dict | str) -> FrozenRequest:
         "rights",
     }
 
-    def order(tree, key=""):
+    def order(tree, path=()):
+        key = path[-1] if path else ""
         if key == "packet":
             return tree  # The existing packet contract owns its array ordering/hash.
         if isinstance(tree, dict):
-            return {k: order(v, k) for k, v in tree.items()}
+            return {k: order(v, (*path, k)) for k, v in tree.items()}
         if isinstance(tree, list):
-            result = [order(v) for v in tree]
+            result = [order(v, (*path, "[]")) for v in tree]
             if (
                 key in id_arrays
                 and result
@@ -229,6 +230,11 @@ def freeze(value: dict | str) -> FrozenRequest:
                             canonical(v),
                         )
                     )
+            elif path in {
+                ("bridge", "completeness", "inventoried_categories"),
+                ("ownership", "rights", "[]", "claim_event_ids"),
+            }:
+                result.sort(key=canonical)
             elif key == "supporting_operands" and result:
                 result.sort(key=lambda v: text(v["provenance"]["id"]))
             return result

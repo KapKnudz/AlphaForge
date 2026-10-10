@@ -40,6 +40,20 @@ def control(f, opening, addition, dep, closing, **extra):
     return a
 
 
+def cohort(f, asset_class, amount, period=1):
+    return {
+        "id": "finite-cohort",
+        "asset_class": asset_class,
+        "cost": f.operand(amount),
+        "residual": f.operand(0),
+        "life_years": f.operand(1),
+        "in_service_date": "2027-01-01",
+        "method": "supplied_weights",
+        "weights": [{"period_index": period, "depreciation": f.operand(amount)}],
+        "remaining_basis": "Explicit source-free finite cohort",
+    }
+
+
 def investment(f, identity, amount, idx, commissioned, kind="cash_purchase"):
     return {
         "id": identity,
@@ -92,6 +106,57 @@ def test_a2_nondefault_three_year_midpoint_vintage_and_optional_cohorts():
     assert canonical(evaluate(req)["operating_cash_flows"]) == original
     req["operating_schedule"]["cohorts"][0]["residual"]["value"] = 3
     assert not evaluate(req)["operating_cash_flows"]["available"]
+
+
+@pytest.mark.parametrize("amount", [10, 0.0000000001])
+def test_nonzero_cohort_depreciation_requires_matching_asset_control(amount):
+    req, f = request()
+    no_tax(req)
+    req["operating_schedule"]["cohorts"] = [cohort(f, "ghost", amount)]
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["reason_codes"] == ["cohort_class_da_mismatch"]
+    assert not any(
+        result[name]["available"]
+        for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share")
+    )
+
+
+@pytest.mark.parametrize("asset_class", ["", None, 7, {}, []])
+def test_cohort_asset_class_must_be_nonempty_text(asset_class):
+    req, f = request()
+    no_tax(req)
+    req["operating_schedule"]["cohorts"] = [cohort(f, asset_class, 10)]
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["reason_codes"] == ["nonempty_text_required"]
+
+
+def test_zero_cohort_is_exempt_and_aligned_cohort_reconciles():
+    zero, zero_inputs = request()
+    no_tax(zero)
+    zero["operating_schedule"]["cohorts"] = [cohort(zero_inputs, "ghost", 0)]
+    assert evaluate(zero)["operating_cash_flows"]["available"]
+
+    aligned, aligned_inputs = request()
+    no_tax(aligned)
+    aligned["operating_schedule"]["cohorts"] = [cohort(aligned_inputs, "ghost", 10)]
+    for index, row in enumerate(aligned["operating_schedule"]["periods"], 1):
+        ghost = control(
+            aligned_inputs,
+            10 if index == 1 else 0,
+            0,
+            10 if index == 1 else 0,
+            0,
+        )
+        ghost["id"] = "ghost"
+        row["asset_controls"].append(ghost)
+    aligned["operating_schedule"]["periods"][0]["book_da"] = aligned_inputs.operand(10)
+
+    result = evaluate(aligned)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_cash_flows"]["value"][0]["ebit"] == 90
+    assert result["operating_cash_flows"]["value"][0]["fcff_operations"] == 100
 
 
 def test_a2_cash_advance_spent_once_commissioned_next_year():

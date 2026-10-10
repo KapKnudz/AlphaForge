@@ -674,6 +674,7 @@ def _cohorts(schedule, o, rows):
             "id asset_class cost residual life_years in_service_date method weights remaining_basis",
         )
         text(c["remaining_basis"])
+        asset_class = text(c["asset_class"])
         cost = _amount(o, c, "cost", True)
         residual = _amount(o, c, "residual", True)
         _require(cost >= residual, "cohort_residual_exceeds_cost")
@@ -696,7 +697,7 @@ def _cohorts(schedule, o, rows):
                 dep == 0 or commissioned <= iso_date(rows[index - 1]["end"]),
                 "depreciation_before_commissioning",
             )
-            class_dep[(c["asset_class"], index)] = class_dep.get((c["asset_class"], index), 0) + dep
+            class_dep[(asset_class, index)] = class_dep.get((asset_class, index), 0) + dep
             _require(
                 total <= cost - residual
                 or math.isclose(total, cost - residual, abs_tol=1e-8, rel_tol=1e-8),
@@ -709,11 +710,18 @@ def _cohorts(schedule, o, rows):
         )
         reconcile(total, cost - residual, "cohort_finite_life_not_exhausted")
     if cohorts:
+        controlled = set()
         for row in rows:
             for path, dep in row["legs"].items():
                 if path.startswith("asset/") and path.endswith("/depreciation"):
-                    c = path.split("/")[1]
-                    reconcile(dep, class_dep.get((c, row["index"]), 0), "cohort_class_da_mismatch")
+                    asset_class = path[len("asset/") : -len("/depreciation")]
+                    key = (asset_class, row["index"])
+                    controlled.add(key)
+                    reconcile(dep, class_dep.get(key, 0), "cohort_class_da_mismatch")
+        _require(
+            all(depreciation == 0 or key in controlled for key, depreciation in class_dep.items()),
+            "cohort_class_da_mismatch",
+        )
 
 
 def _schedule(req, o):
@@ -1186,11 +1194,13 @@ def _bridge(req, o, operating_value, rows, rate):
     )
     text(c["basis_identity"])
     text(c["reviewed_by_or_unreviewed"])
+    inventoried_categories = [text(category) for category in sequence(c["inventoried_categories"])]
+    unique(inventoried_categories, "bridge.completeness.inventoried_categories")
     _require(
         c["scope_date"] == b["scope_date"]
         and c["perimeter_id"] == b["perimeter_id"]
         and c["no_unresolved_material_claims"] is True
-        and set(c["inventoried_categories"]) == set(BRIDGE_CATEGORIES),
+        and set(inventoried_categories) == set(BRIDGE_CATEGORIES),
         "bridge_material_claim_unresolved",
     )
     _require(
@@ -1417,18 +1427,18 @@ def _rights(req, own, bridge):
     for right in rights:
         closed(right, "id status claim_event_ids basis")
         text(right["basis"])
-        sequence(right["claim_event_ids"])
+        claim_event_ids = [text(identity) for identity in sequence(right["claim_event_ids"])]
         _require(
             right["status"] in {"valued", "not_applicable_supported"}, "ownership_census_missing"
         )
         if right["status"] == "valued":
             _require(
-                bool(right["claim_event_ids"]) and set(right["claim_event_ids"]) <= claims,
+                bool(claim_event_ids) and set(claim_event_ids) <= claims,
                 "ownership_claim_unvalued",
             )
-            covered.extend(right["claim_event_ids"])
+            covered.extend(claim_event_ids)
         else:
-            _require(not right["claim_event_ids"], "ownership_rights_status_conflict")
+            _require(not claim_event_ids, "ownership_rights_status_conflict")
     _require(len(covered) == len(set(covered)), "ownership_claim_duplicated")
     _require(set(covered) == claims, "ownership_claim_unvalued")
 

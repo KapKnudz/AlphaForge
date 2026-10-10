@@ -376,7 +376,9 @@ links reconcile category, direction, period and amount. Aggregate class
 rollforwards reconcile commissioning, advances, transfers,
 D&A/impairment/disposal/other and closing active/construction balances. Transfers
 require dated transfer events. Optional cohorts validate supplied finite weights,
-residual and life; no default life or builder. Noncash items distinguish asset
+residual and life; every nonzero class-period depreciation entry requires its
+matching asset-control depreciation leg. Zero entries create no coverage
+obligation. There is no default life or builder. Noncash items distinguish asset
 impairments from other charges; recurring stock compensation has no automatic
 free-cash addback. Financing principal/interest are diagnostics, not FCFF.
 
@@ -429,7 +431,9 @@ contractual balance or apply a tolerance to a genuinely positive balance. An
 exactly zero mature source obligation requires no phantom queue lot. Opening
 boundary lots remain separate. Acquisitions and optional terminal, bridge and
 ownership arrays are canonically ordered so valid permutations retain one
-request identity. Duplicate acquisition IDs invalidate the required request;
+request identity. The bridge category inventory and each right's claim IDs are
+canonical semantic sets; duplicates and malformed members remain present for
+owner-stage refusal. Duplicate acquisition IDs invalidate the required request;
 malformed or duplicate terminal identities withhold operating value, while
 malformed or duplicate bridge or rights identities withhold equity and per-share
 without withholding valid upstream outputs. Queue source years must be in the selected geometric accrual regime and

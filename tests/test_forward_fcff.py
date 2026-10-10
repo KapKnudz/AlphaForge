@@ -352,6 +352,80 @@ def test_noncommon_rights_must_exactly_partition_bridge_claims():
     assert duplicate["common_equity"]["status"] == "invalid_input"
 
 
+def test_nested_bridge_and_right_sets_have_canonical_identity():
+    req, f = request()
+    items = [
+        claim(req, f, "preferred-a", "noncommon_claims", 2),
+        claim(req, f, "preferred-b", "noncommon_claims", 3),
+    ]
+    complete_bridge(req, f, items)
+    preferred = next(right for right in req["ownership"]["rights"] if right["id"] == "preferred")
+    preferred.update(
+        status="valued",
+        claim_event_ids=["preferred-a", "preferred-b"],
+    )
+    expected_request = freeze(req).body
+    expected_output = canonical(evaluate(req))
+
+    inventory_reversed = copy.deepcopy(req)
+    inventory_reversed["bridge"]["completeness"]["inventoried_categories"].reverse()
+    claims_reversed = copy.deepcopy(req)
+    next(right for right in claims_reversed["ownership"]["rights"] if right["id"] == "preferred")[
+        "claim_event_ids"
+    ].reverse()
+    both_reversed = copy.deepcopy(inventory_reversed)
+    next(right for right in both_reversed["ownership"]["rights"] if right["id"] == "preferred")[
+        "claim_event_ids"
+    ].reverse()
+    outer_reversed = copy.deepcopy(req)
+    for key in ("categories", "items"):
+        outer_reversed["bridge"][key].reverse()
+    outer_reversed["ownership"]["rights"].reverse()
+
+    for variant in (
+        inventory_reversed,
+        claims_reversed,
+        both_reversed,
+        outer_reversed,
+    ):
+        assert freeze(variant).body == expected_request
+        assert canonical(evaluate(variant)) == expected_output
+
+    duplicate_inventory = copy.deepcopy(req)
+    inventory = duplicate_inventory["bridge"]["completeness"]["inventoried_categories"]
+    inventory.append(inventory[0])
+    duplicate_inventory_result = evaluate(duplicate_inventory)
+    assert duplicate_inventory_result["operating_value"]["available"]
+    assert duplicate_inventory_result["common_equity"]["reason_codes"] == ["duplicate_id"]
+
+    duplicate_claim = copy.deepcopy(req)
+    duplicate_preferred = next(
+        right for right in duplicate_claim["ownership"]["rights"] if right["id"] == "preferred"
+    )
+    duplicate_preferred["claim_event_ids"].append("preferred-a")
+    duplicate_claim_result = evaluate(duplicate_claim)
+    assert duplicate_claim_result["operating_value"]["available"]
+    assert duplicate_claim_result["common_equity"]["reason_codes"] == ["ownership_claim_duplicated"]
+
+
+@pytest.mark.parametrize("location", ["inventory", "claims"])
+def test_malformed_nested_bridge_sets_refuse_at_owner(location):
+    req, f = request()
+    items = [claim(req, f, "preferred", "noncommon_claims", 2)]
+    complete_bridge(req, f, items)
+    preferred = next(right for right in req["ownership"]["rights"] if right["id"] == "preferred")
+    preferred.update(status="valued", claim_event_ids=["preferred"])
+    if location == "inventory":
+        req["bridge"]["completeness"]["inventoried_categories"].append({})
+    else:
+        preferred["claim_event_ids"].append({})
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["reason_codes"] == ["nonempty_text_required"]
+
+
 def test_consumed_unresolved_operands_are_stage_scoped():
     cases = (
         ("schedule", (False, False, False, False)),
