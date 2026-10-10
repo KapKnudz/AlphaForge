@@ -208,7 +208,11 @@ def _queue_state(request, horizon, ledger_id, leg):
                     remaining[movement["lot_id"]] += float(movement["amount"]["value"])
             for allocation in ledger["allocations"]:
                 if allocation["lot_id"] in remaining:
-                    remaining[allocation["lot_id"]] -= float(allocation["amount"]["value"])
+                    identity = allocation["lot_id"]
+                    remaining[identity] = max(
+                        0.0,
+                        remaining[identity] - float(allocation["amount"]["value"]),
+                    )
     return {
         identity: (lots[identity]["source_period"], amount)
         for identity, amount in remaining.items()

@@ -190,7 +190,13 @@ def _lots(schedule, o):
                 == o.request["valuation_date"],
                 "boundary_fact_date_mismatch",
             )
-        lots[identity] = {"record": lot, "amount": amount, "remaining": amount, "paid": 0.0}
+        lots[identity] = {
+            "record": lot,
+            "amount": amount,
+            "remaining": amount,
+            "remaining_by_period": {},
+            "paid": 0.0,
+        }
     for lot in lots.values():
         for prerequisite in lot["record"]["prerequisites"]:
             _require(
@@ -775,6 +781,8 @@ def _schedule(req, o):
             o, row, da, asset_impairment, start, end, asset_prior
         )
         p, r, bp, br, tax_legs = _tax(o, row, ebit, da, lots, tax_prior, index, start, end)
+        for lot in lots.values():
+            lot["remaining_by_period"][index] = lot["remaining"]
         x = 0.0
         for settlement in sequence(row["settlements"]):
             closed(settlement, "id kind amount rationale bridge_category period_index")
@@ -914,7 +922,7 @@ def _tail(req, o, rows, lots, rate):
     for kernel in kernels:
         queues = sequence(kernel["queues"])
         unique([text(queue["id"]) for queue in queues], "terminal.tax_kernels.queues")
-        unique([text(queue["lot_id"]) for queue in queues], "terminal.tax_kernels.queues")
+        unique([text(queue["lot_id"]) for queue in queues])
         weights = sequence(kernel["weights"])
         unique(
             [integer(weight["offset_years"]) for weight in weights],
@@ -1020,19 +1028,7 @@ def _tail(req, o, rows, lots, rate):
                 and record["source_period"] <= n
             ):
                 continue
-            remaining = candidate["amount"]
-            for rr in req["operating_schedule"]["periods"][:n]:
-                for ll in rr["tax_ledgers"]:
-                    remaining -= sum(
-                        number(a["amount"]["value"])
-                        for a in ll["allocations"]
-                        if a["lot_id"] == record["id"]
-                    )
-                    remaining += sum(
-                        number(movement["amount"]["value"])
-                        for movement in ll.get("lot_movements", [])
-                        if movement["lot_id"] == record["id"]
-                    )
+            remaining = candidate["remaining_by_period"][n]
             source = record["source_period"]
             remaining_by_source[source] = remaining_by_source.get(source, 0.0) + remaining
             if remaining != 0:
@@ -1408,7 +1404,7 @@ def _rights(req, own, bridge):
     )
     text(own["rights_basis"])
     rights = sequence(own["rights"])
-    unique([r["id"] for r in rights])
+    unique([text(right["id"]) for right in rights], "ownership.rights")
     _require({r["id"] for r in rights} == set(RIGHTS), "ownership_census_missing")
     claims = {
         i["id"]

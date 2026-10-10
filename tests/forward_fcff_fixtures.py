@@ -267,14 +267,15 @@ def set_tail(req, f, n, g, regimes=None, lag=1):
                 or lot["origin"] != "forecast_created"
             ):
                 continue
-            spent = sum(
-                a["amount"]["value"]
-                for r in rows[:n]
-                for ll in r["tax_ledgers"]
-                for a in ll["allocations"]
-                if a["lot_id"] == lot["id"]
-            )
-            remain = lot["amount"]["value"] - spent
+            remain = lot["amount"]["value"]
+            for row in rows[:n]:
+                for ledger in row["tax_ledgers"]:
+                    for movement in ledger.get("lot_movements", []):
+                        if movement["lot_id"] == lot["id"]:
+                            remain += movement["amount"]["value"]
+                    for allocation in ledger["allocations"]:
+                        if allocation["lot_id"] == lot["id"]:
+                            remain = max(0.0, remain - allocation["amount"]["value"])
             if remain != 0:
                 queues.append(
                     {

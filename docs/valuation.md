@@ -422,15 +422,17 @@ supplied geometric primitive templates, stationary active-class renewal/balance
 premises, exhausted finite states and mature gross tax queues/kernels. Every
 material primitive/gross leg is checked, not merely net FCFF equality. Each
 kernel queue exactly inventories every nonzero forecast-created lot for its
-ledger and leg at start N+1, including multiple lots of the same age; identity
-completeness is exact and does not use the monetary reconciliation tolerance. An
+ledger and leg at start N+1, including multiple lots of the same age. Membership
+uses the horizon-specific lot state accepted after ordered movements and
+saturating allocations; it does not reinterpret a settled floating residue as a
+contractual balance or apply a tolerance to a genuinely positive balance. An
 exactly zero mature source obligation requires no phantom queue lot. Opening
 boundary lots remain separate. Acquisitions and optional terminal, bridge and
-ownership arrays are canonicalized by ID so valid permutations retain one
+ownership arrays are canonically ordered so valid permutations retain one
 request identity. Duplicate acquisition IDs invalidate the required request;
-duplicate terminal IDs withhold operating value, while duplicate bridge or
-rights IDs withhold equity and per-share without withholding valid upstream
-outputs. Queue source years must be in the selected geometric accrual regime and
+malformed or duplicate terminal identities withhold operating value, while
+malformed or duplicate bridge or rights identities withhold equity and per-share
+without withholding valid upstream outputs. Queue source years must be in the selected geometric accrual regime and
 must retain a future positive-weight kernel maturity, with correct remaining
 amounts after movements and allocations; payment/refund recurrences verify
 separately. Exhausted-state IDs are unique. The caller chooses

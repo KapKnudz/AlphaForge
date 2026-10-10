@@ -207,16 +207,28 @@ def freeze(value: dict | str) -> FrozenRequest:
                 and result
                 and all(isinstance(v, dict) and "id" in v for v in result)
             ):
-                identities = [text(v["id"]) for v in result]
-                if key not in stage_owned_id_arrays:
+                if key in stage_owned_id_arrays:
+                    result.sort(
+                        key=lambda v: (
+                            (0, v["id"]) if isinstance(v["id"], str) else (1, canonical(v["id"])),
+                            canonical(v),
+                        )
+                    )
+                else:
+                    identities = [text(v["id"]) for v in result]
                     unique(identities, key)
-                result.sort(key=lambda v: v["id"])
+                    result.sort(key=lambda v: v["id"])
             elif key == "weights" and result and all(isinstance(v, dict) for v in result):
                 field = "offset_years" if "offset_years" in result[0] else "period_index"
                 if all(field in v for v in result):
-                    for value in result:
-                        integer(value[field])
-                    result.sort(key=lambda v: v[field])
+                    result.sort(
+                        key=lambda v: (
+                            (0, v[field])
+                            if isinstance(v[field], int) and not isinstance(v[field], bool)
+                            else (1, canonical(v[field])),
+                            canonical(v),
+                        )
+                    )
             elif key == "supporting_operands" and result:
                 result.sort(key=lambda v: text(v["provenance"]["id"]))
             return result

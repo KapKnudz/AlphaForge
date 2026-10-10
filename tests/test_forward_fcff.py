@@ -430,6 +430,62 @@ def test_zero_mature_tax_sources_do_not_require_phantom_queue_lots():
     assert result["operating_value"] == explicit_result["operating_value"]
 
 
+def test_terminal_queue_uses_accepted_horizon_settlement_state():
+    from tools.check_forward_fcff_acceptance import _queue_state
+
+    req, inputs = request(
+        profits=(1, 0, 0, 0),
+        tau=0.3,
+        rho=0,
+        lag=1,
+        horizon=2,
+        growth=0,
+    )
+    first_ledger = req["operating_schedule"]["periods"][0]["tax_ledgers"][0]
+    first_allocation = first_ledger["allocations"][0]
+    first_allocation["amount"] = inputs.operand(0.1)
+    second_allocation = copy.deepcopy(first_allocation)
+    second_allocation["id"] += "-second"
+    second_allocation["amount"] = inputs.operand(0.2)
+    first_ledger["allocations"].append(second_allocation)
+    first_ledger["payment"]["value"] = 0.3
+    first_ledger["payable_close"]["value"] = 0
+
+    second_ledger = req["operating_schedule"]["periods"][1]["tax_ledgers"][0]
+    second_ledger["allocations"] = []
+    second_ledger["payable_open"]["value"] = 0
+    second_ledger["payment"]["value"] = 0
+    second_ledger["payable_close"]["value"] = 0
+    set_tail(
+        req,
+        inputs,
+        2,
+        0,
+        {"tax/tax/arising": 2, "tax/tax/entitlement": 2},
+        1,
+    )
+
+    payment_kernel = next(
+        kernel for kernel in req["terminal"]["tax_kernels"] if kernel["leg"] == "payment"
+    )
+    assert "payable-1" not in {queue["lot_id"] for queue in payment_kernel["queues"]}
+    assert "payable-1" not in _queue_state(req, 2, "tax", "payment")
+    result = evaluate(req)
+    assert result["operating_value"]["value"] == pytest.approx(0.7 / 1.2)
+
+    grouped = copy.deepcopy(req)
+    grouped_allocation = grouped["operating_schedule"]["periods"][0]["tax_ledgers"][0][
+        "allocations"
+    ][0]
+    grouped_allocation["amount"]["value"] = 0.3
+    grouped["operating_schedule"]["periods"][0]["tax_ledgers"][0]["allocations"] = [
+        grouped_allocation
+    ]
+    assert evaluate(grouped)["operating_value"]["value"] == pytest.approx(
+        result["operating_value"]["value"]
+    )
+
+
 def test_terminal_queue_inventory_includes_tiny_distant_nonzero_lot():
     req, inputs = request(
         profits=(100,) * 12,
@@ -590,6 +646,55 @@ def test_duplicate_terminal_identities_only_refuse_value(part):
     assert result["operating_cash_flows"]["available"]
     assert result["operating_value"]["reason_codes"] == ["duplicate_id"]
     assert result["operating_value"]["status"] == "invalid_input"
+
+
+@pytest.mark.parametrize("leg", ["payment", "refund"])
+def test_duplicate_terminal_lot_references_keep_empty_diagnostic_path(leg):
+    req, _ = request()
+    kernel = next(kernel for kernel in req["terminal"]["tax_kernels"] if kernel["leg"] == leg)
+    duplicate = copy.deepcopy(kernel["queues"][0])
+    duplicate["id"] += "-duplicate"
+    kernel["queues"].append(duplicate)
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["reason_codes"] == ["duplicate_id"]
+    assert result["operating_value"]["missing_inputs"] == []
+
+
+@pytest.mark.parametrize("identity", ["", 7, None, {}])
+@pytest.mark.parametrize("owner", ["terminal", "bridge", "ownership"])
+def test_malformed_optional_identities_only_refuse_owner(owner, identity):
+    req, inputs = request()
+    complete_bridge(
+        req,
+        inputs,
+        [claim(req, inputs, "cash", "excess_distributable_cash", 10, "asset")],
+    )
+    if owner == "terminal":
+        req["terminal"]["templates"][0]["id"] = identity
+    elif owner == "bridge":
+        req["bridge"]["items"][0]["id"] = identity
+    else:
+        req["ownership"]["rights"][0]["id"] = identity
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    if owner == "terminal":
+        assert result["operating_value"]["reason_codes"] == ["nonempty_text_required"]
+    else:
+        assert result["operating_value"]["available"]
+        assert result["common_equity"]["reason_codes"] == ["nonempty_text_required"]
+
+
+@pytest.mark.parametrize("offset", ["", 0.5, None, True])
+def test_malformed_terminal_weight_offsets_only_refuse_value(offset):
+    req, _ = request()
+    req["terminal"]["tax_kernels"][0]["weights"][0]["offset_years"] = offset
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["reason_codes"] == ["invalid_integer"]
 
 
 @pytest.mark.parametrize("part", ["items", "categories"])
