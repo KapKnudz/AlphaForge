@@ -266,8 +266,7 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
     else:
         _require(
             all(
-                isinstance(entry["order"], str)
-                and entry["order"] in LEGACY_TAX_EVENT_ORDERS
+                isinstance(entry["order"], str) and entry["order"] in LEGACY_TAX_EVENT_ORDERS
                 for entry in allocations
             ),
             "tax_event_order_invalid",
@@ -275,8 +274,7 @@ def _validate_tax_allocation_chronology(o, ledgers, lots, index, start, end):
         ordered = sorted(
             allocations,
             key=lambda entry: (
-                entry["cash_date"]
-                or (start if entry["kind"] == "payment" else end),
+                entry["cash_date"] or (start if entry["kind"] == "payment" else end),
                 entry["kind"] != "payment",
                 entry["id"],
             ),
@@ -905,6 +903,26 @@ def _tail(req, o, rows, lots, rate):
         t,
         "kind horizon growth tail_start continuing_perimeter renewal_basis survival_basis price_volume_basis growth_funding_basis templates tax_kernels exhausted_states",
     )
+    templates = sequence(t["templates"])
+    unique([text(template["id"]) for template in templates], "terminal.templates")
+    paths = [text(template["path"]) for template in templates]
+    unique(paths, "terminal.templates")
+    kernels = sequence(t["tax_kernels"])
+    unique([text(kernel["id"]) for kernel in kernels], "terminal.tax_kernels")
+    kernel_ids = [(text(kernel["ledger_id"]), text(kernel["leg"])) for kernel in kernels]
+    unique(kernel_ids, "terminal.tax_kernels")
+    for kernel in kernels:
+        queues = sequence(kernel["queues"])
+        unique([text(queue["id"]) for queue in queues], "terminal.tax_kernels.queues")
+        unique([text(queue["lot_id"]) for queue in queues], "terminal.tax_kernels.queues")
+        weights = sequence(kernel["weights"])
+        unique(
+            [integer(weight["offset_years"]) for weight in weights],
+            "terminal.tax_kernels.weights",
+        )
+    exhausted = sequence(t["exhausted_states"])
+    unique([text(state["id"]) for state in exhausted], "terminal.exhausted_states")
+    o.add(t)
     _require(t["kind"] == "gordon", "terminal_basis_unsupported")
     n = integer(t["horizon"], minimum=1)
     _require(
@@ -920,15 +938,12 @@ def _tail(req, o, rows, lots, rate):
     h = 1 + g
     _require(g > -1 and g < rate, "terminal_growth_invalid")
     tail, witness = rows[n], rows[n + 1]
-    templates = sequence(t["templates"])
     expected_paths = set(tail["legs"])
-    paths = []
     regimes = {}
     residuals = {}
     for template in templates:
         closed(template, "id path seed multiplier regime_start derivation")
         path = text(template["path"])
-        paths.append(path)
         text(template["derivation"])
         _require(path in expected_paths, "terminal_template_unknown", path)
         seed = _amount(o, template, "seed")
@@ -948,13 +963,10 @@ def _tail(req, o, rows, lots, rate):
             )
         residuals[path] = witness["legs"][path] - h * tail["legs"][path]
         regimes[path] = regime
-    unique(paths)
     _require(set(paths) == expected_paths, "terminal_primitive_templates_missing")
     # Old finite states must be genuinely zero before the geometric continuation.
-    exhausted = sequence(t["exhausted_states"])
     for state in exhausted:
         closed(state, "id path exhausted_by rationale")
-    unique([state["id"] for state in exhausted], "terminal.exhausted_states")
     for state in exhausted:
         text(state["rationale"])
         by = integer(state["exhausted_by"], minimum=1)
@@ -967,8 +979,6 @@ def _tail(req, o, rows, lots, rate):
             ("/construction_close", "/payable_other", "/receivable_other")
         ):
             _require(v == 0, "terminal_discrete_state_unsupported", path)
-    kernels = sequence(t["tax_kernels"])
-    kernel_ids = []
     longest = 0
     queue_receipts = []
     ledger_ids = sorted({path.split("/")[1] for path in expected_paths if path.startswith("tax/")})
@@ -979,7 +989,6 @@ def _tail(req, o, rows, lots, rate):
         _require(
             ledger in ledger_ids and leg in {"payment", "refund"}, "terminal_tax_kernel_unsupported"
         )
-        kernel_ids.append((ledger, leg))
         fraction = _amount(o, kernel, "recovery_fraction", True)
         _require(fraction <= 1, "terminal_recovery_fraction_invalid")
         max_lag = integer(kernel["max_lag"])
@@ -993,7 +1002,6 @@ def _tail(req, o, rows, lots, rate):
             offsets.append(offset)
             weight = _amount(o, w, "weight", True)
             weight_sum += weight
-        unique(offsets)
         _require(bool(offsets) and max(offsets) == max_lag, "terminal_kernel_lag_mismatch")
         reconcile(weight_sum, fraction, "terminal_kernel_fraction_mismatch")
         accrual_path = f"tax/{ledger}/" + ("arising" if leg == "payment" else "entitlement")
@@ -1002,6 +1010,7 @@ def _tail(req, o, rows, lots, rate):
         queue = sequence(kernel["queues"])
         queue_ids = []
         expected_queue = {}
+        remaining_by_source = {}
         for candidate in lots.values():
             record = candidate["record"]
             if not (
@@ -1024,8 +1033,30 @@ def _tail(req, o, rows, lots, rate):
                         for movement in ll.get("lot_movements", [])
                         if movement["lot_id"] == record["id"]
                     )
-            if not math.isclose(remaining, 0.0, abs_tol=1e-8, rel_tol=1e-8):
+            source = record["source_period"]
+            remaining_by_source[source] = remaining_by_source.get(source, 0.0) + remaining
+            if remaining != 0:
                 expected_queue[record["id"]] = remaining
+        for source in range(1, n + 1):
+            future_weight = sum(
+                number(weight["weight"]["value"])
+                for weight in weights
+                if source + weight["offset_years"] > n
+            )
+            expected_remaining = rows[source - 1]["legs"][accrual_path] * future_weight
+            actual_remaining = remaining_by_source.get(source, 0.0)
+            if actual_remaining != 0 or expected_remaining != 0:
+                _require(
+                    source >= regime and future_weight != 0,
+                    "tail_tax_queue_nonstationary",
+                    cash_path,
+                )
+                reconcile(
+                    actual_remaining,
+                    expected_remaining,
+                    "terminal_tax_lot_kernel_mismatch",
+                    cash_path,
+                )
         for q in queue:
             closed(q, "id source_period lot_id remaining_at_tail")
             lot = lots.get(q["lot_id"])
@@ -1050,7 +1081,6 @@ def _tail(req, o, rows, lots, rate):
             queue_receipts.append(
                 {"lot_id": record["id"], "source_period": source, "remaining_at_tail": remaining}
             )
-        unique(queue_ids)
         _require(
             set(queue_ids) == set(expected_queue),
             "terminal_mature_queue_missing",
@@ -1102,7 +1132,6 @@ def _tail(req, o, rows, lots, rate):
                 "terminal_gross_tax_recurrence_mismatch",
                 cash_path,
             )
-    unique(kernel_ids)
     _require(
         set(kernel_ids)
         == {(ledger, leg) for ledger in ledger_ids for leg in ("payment", "refund")},
@@ -1141,6 +1170,13 @@ def _bridge(req, o, operating_value, rows, rate):
         "currency amount_units perimeter_id scope_date categories items completeness",
         "boundary_cash",
     )
+    categories = sequence(b["categories"])
+    unique([text(category["id"]) for category in categories], "bridge.categories")
+    items = sequence(b["items"])
+    unique([text(item["id"]) for item in items], "bridge.items")
+    boundary_cash = sequence(b.get("boundary_cash", []))
+    unique([text(cash["id"]) for cash in boundary_cash], "bridge.boundary_cash")
+    o.add(b)
     _require(b["currency"] == req["denomination"]["currency"], "currency_mismatch")
     _require(
         b["amount_units"] == "millions"
@@ -1161,8 +1197,6 @@ def _bridge(req, o, operating_value, rows, rate):
         and set(c["inventoried_categories"]) == set(BRIDGE_CATEGORIES),
         "bridge_material_claim_unresolved",
     )
-    categories = sequence(b["categories"])
-    unique([cat["id"] for cat in categories])
     _require(
         {cat["id"] for cat in categories} == set(BRIDGE_CATEGORIES), "bridge_inventory_incomplete"
     )
@@ -1174,10 +1208,9 @@ def _bridge(req, o, operating_value, rows, rate):
     cash_by_lot = {}
     boundary_records = {}
     boundary_pv = 0.0
-    for cash in sequence(b.get("boundary_cash", [])):
+    for cash in boundary_cash:
         closed(cash, "id lot_id period_index direction amount claim_rate rationale")
         identity = text(cash["id"])
-        _require(identity not in boundary_records, "double_counted_event", identity)
         text(cash["rationale"])
         _require(cash["direction"] in {"asset", "obligation"}, "boundary_direction_unsupported")
         idx = integer(cash["period_index"], minimum=1)
@@ -1215,7 +1248,6 @@ def _bridge(req, o, operating_value, rows, rate):
         boundary_pv += (
             amount / (1 + claim_rate) ** idx * (1 if cash["direction"] == "asset" else -1)
         )
-    items = sequence(b["items"])
     by_category = {}
     linked_boundary = set()
     total = 0.0
@@ -1503,7 +1535,6 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             "operating_value_material_input_unresolved",
         )
         o.add(req.get("discount"))
-        o.add(req.get("terminal"))
         r = _discount(req, o)
         # Before terminal validation, an explicit-period diagnostic remains useful.
         horizon = len(rows)
@@ -1593,7 +1624,6 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             "common_equity",
             "bridge_material_claim_unresolved",
         )
-        o.add(req.get("bridge"))
         equity, boundary_pv = _bridge(req, o, value, rows, r)
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(

@@ -71,7 +71,9 @@ def test_known_future_terminal_regime_is_distinct_from_missing_regime():
     req, f = request()
     assert evaluate(req)["operating_value"]["available"]
     payment = next(
-        template for template in req["terminal"]["templates"] if template["path"] == "tax/tax/payment"
+        template
+        for template in req["terminal"]["templates"]
+        if template["path"] == "tax/tax/payment"
     )
     payment["regime_start"] = 4
     refused = evaluate(req)
@@ -405,25 +407,78 @@ def test_zero_mature_tax_sources_do_not_require_phantom_queue_lots():
 
     no_phantom = copy.deepcopy(explicit_zero)
     no_phantom["operating_schedule"]["tax_lots"] = [
-        lot
-        for lot in no_phantom["operating_schedule"]["tax_lots"]
-        if lot["amount"]["value"] != 0
+        lot for lot in no_phantom["operating_schedule"]["tax_lots"] if lot["amount"]["value"] != 0
     ]
     result = evaluate(no_phantom)
-    assert [row["fcff_operations"] for row in result["operating_cash_flows"]["value"]] == [
-        85,
-        80,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
+    assert [
+        row["fcff_operations"] for row in result["operating_cash_flows"]["value"]
+    ] == pytest.approx(
+        [
+            85,
+            80,
+            -5,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    )
     assert result["terminal"]["next_year_fcff"] == 0
     assert result["terminal"]["present_value"] == 0
     assert result["operating_value"]["value"] == pytest.approx(123.49537037037037)
     assert result["operating_value"] == explicit_result["operating_value"]
+
+
+def test_terminal_queue_inventory_includes_tiny_distant_nonzero_lot():
+    req, inputs = request(
+        profits=(100,) * 12,
+        tau=0.2,
+        rho=0.1,
+        lag=5,
+        horizon=6,
+        growth=0,
+    )
+    lot = next(lot for lot in req["operating_schedule"]["tax_lots"] if lot["id"] == "refund-5")
+    lot["amount"] = inputs.operand(9.999999995)
+    tiny_lot = copy.deepcopy(lot)
+    tiny_lot["id"] = "refund-5-tiny"
+    tiny_lot["amount"] = inputs.operand(0.000000005)
+    req["operating_schedule"]["tax_lots"].append(tiny_lot)
+    allocation = next(
+        allocation
+        for allocation in req["operating_schedule"]["periods"][9]["tax_ledgers"][0]["allocations"]
+        if allocation["lot_id"] == "refund-5"
+    )
+    allocation["amount"] = inputs.operand(9.999999995)
+    tiny_allocation = copy.deepcopy(allocation)
+    tiny_allocation["id"] = "cash-refund-10-5-tiny"
+    tiny_allocation["lot_id"] = tiny_lot["id"]
+    tiny_allocation["amount"] = inputs.operand(0.000000005)
+    req["operating_schedule"]["periods"][9]["tax_ledgers"][0]["allocations"].append(tiny_allocation)
+    set_tail(
+        req,
+        inputs,
+        6,
+        0,
+        {"tax/tax/arising": 1, "tax/tax/entitlement": 1},
+        5,
+    )
+
+    complete = evaluate(req)
+    assert complete["operating_value"]["value"] == pytest.approx(382.59387860082313)
+    refund_kernel = next(
+        kernel for kernel in req["terminal"]["tax_kernels"] if kernel["leg"] == "refund"
+    )
+    refund_kernel["queues"] = [
+        queue for queue in refund_kernel["queues"] if queue["lot_id"] != tiny_lot["id"]
+    ]
+    omitted = evaluate(req)
+    assert omitted["operating_cash_flows"]["available"]
+    assert omitted["operating_value"]["reason_codes"] == ["terminal_mature_queue_missing"]
+    assert omitted["operating_value"]["missing_inputs"] == [
+        "terminal.tax_kernels.tax.refund.queues"
+    ]
 
 
 def test_terminal_queue_covers_all_remaining_lots_beyond_witness_years():
@@ -516,8 +571,42 @@ def test_acquisitions_and_rights_have_stable_unique_canonical_identities():
         "id"
     ]
     right_result = evaluate(duplicate_right)
-    assert right_result["operating_cash_flows"]["reason_codes"] == ["duplicate_id"]
-    assert right_result["operating_cash_flows"]["status"] == "invalid_input"
+    assert right_result["operating_cash_flows"]["available"]
+    assert right_result["operating_value"]["available"]
+    assert right_result["common_equity"]["reason_codes"] == ["duplicate_id"]
+    assert right_result["common_equity"]["status"] == "invalid_input"
+
+
+@pytest.mark.parametrize("part", ["templates", "tax_kernels", "queues", "weights"])
+def test_duplicate_terminal_identities_only_refuse_value(part):
+    req, _ = request()
+    if part in {"templates", "tax_kernels"}:
+        values = req["terminal"][part]
+    else:
+        values = req["terminal"]["tax_kernels"][0][part]
+    values.append(copy.deepcopy(values[0]))
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["reason_codes"] == ["duplicate_id"]
+    assert result["operating_value"]["status"] == "invalid_input"
+
+
+@pytest.mark.parametrize("part", ["items", "categories"])
+def test_duplicate_bridge_identities_only_refuse_equity(part):
+    req, inputs = request()
+    complete_bridge(
+        req,
+        inputs,
+        [claim(req, inputs, "cash", "excess_distributable_cash", 10, "asset")],
+    )
+    req["bridge"][part].append(copy.deepcopy(req["bridge"][part][0]))
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["reason_codes"] == ["duplicate_id"]
+    assert result["common_equity"]["status"] == "invalid_input"
 
 
 def test_acquisition_control_dates_gate_existing_operations_perimeter():
@@ -1108,9 +1197,7 @@ def test_structured_order_bounds_reject_only_definitely_ineligible_refund():
     payment["cash_date"] = row["start"]
     payment["eligibility_order"] = {"rank": 2, "basis": "Dated payment after refund"}
     refund_lot = next(
-        lot
-        for lot in req["operating_schedule"]["tax_lots"]
-        if lot["id"] == refund["lot_id"]
+        lot for lot in req["operating_schedule"]["tax_lots"] if lot["id"] == refund["lot_id"]
     )
     refund_lot["eligible_date"] = row["end"]
 

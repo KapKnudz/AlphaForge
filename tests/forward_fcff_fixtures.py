@@ -275,7 +275,7 @@ def set_tail(req, f, n, g, regimes=None, lag=1):
                 if a["lot_id"] == lot["id"]
             )
             remain = lot["amount"]["value"] - spent
-            if remain > 1e-8:
+            if remain != 0:
                 queues.append(
                     {
                         "id": lot["id"],

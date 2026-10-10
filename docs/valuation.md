@@ -422,16 +422,18 @@ supplied geometric primitive templates, stationary active-class renewal/balance
 premises, exhausted finite states and mature gross tax queues/kernels. Every
 material primitive/gross leg is checked, not merely net FCFF equality. Each
 kernel queue exactly inventories every nonzero forecast-created lot for its
-ledger and leg at start N+1, including multiple lots of the same age; an exactly
-zero mature source obligation requires no phantom queue lot. Opening boundary
-lots remain separate. Acquisitions, terminal exhausted states and
-ownership rights are canonicalized by ID so permutations retain one request
-identity. Duplicate acquisition and right IDs invalidate the request; duplicate
-exhausted-state IDs remain terminal-scoped and withhold operating value without
-withholding an otherwise valid schedule. Queue source years must be in the selected
-geometric accrual regime, with correct remaining amounts after movements and
-allocations; payment/refund recurrences verify separately. Exhausted-state IDs
-are unique. The caller chooses
+ledger and leg at start N+1, including multiple lots of the same age; identity
+completeness is exact and does not use the monetary reconciliation tolerance. An
+exactly zero mature source obligation requires no phantom queue lot. Opening
+boundary lots remain separate. Acquisitions and optional terminal, bridge and
+ownership arrays are canonicalized by ID so valid permutations retain one
+request identity. Duplicate acquisition IDs invalidate the required request;
+duplicate terminal IDs withhold operating value, while duplicate bridge or
+rights IDs withhold equity and per-share without withholding valid upstream
+outputs. Queue source years must be in the selected geometric accrual regime and
+must retain a future positive-weight kernel maturity, with correct remaining
+amounts after movements and allocations; payment/refund recurrences verify
+separately. Exhausted-state IDs are unique. The caller chooses
 N; failed transitions refuse, never silently extend. A supplied regime beginning
 after the requested tail is `terminal_regime_not_stationary`, with the primitive
 path, requested tail start and known regime start retained in

@@ -212,7 +212,7 @@ def _queue_state(request, horizon, ledger_id, leg):
     return {
         identity: (lots[identity]["source_period"], amount)
         for identity, amount in remaining.items()
-        if not math.isclose(amount, 0.0, abs_tol=1e-8, rel_tol=1e-8)
+        if amount != 0
     }
 
 

@@ -184,6 +184,17 @@ def freeze(value: dict | str) -> FrozenRequest:
         "other",
     }
 
+    stage_owned_id_arrays = {
+        "items",
+        "categories",
+        "templates",
+        "tax_kernels",
+        "queues",
+        "exhausted_states",
+        "boundary_cash",
+        "rights",
+    }
+
     def order(tree, key=""):
         if key == "packet":
             return tree  # The existing packet contract owns its array ordering/hash.
@@ -197,14 +208,14 @@ def freeze(value: dict | str) -> FrozenRequest:
                 and all(isinstance(v, dict) and "id" in v for v in result)
             ):
                 identities = [text(v["id"]) for v in result]
-                if key != "exhausted_states":
+                if key not in stage_owned_id_arrays:
                     unique(identities, key)
                 result.sort(key=lambda v: v["id"])
             elif key == "weights" and result and all(isinstance(v, dict) for v in result):
                 field = "offset_years" if "offset_years" in result[0] else "period_index"
                 if all(field in v for v in result):
-                    indices = [integer(v[field]) for v in result]
-                    unique(indices, key)
+                    for value in result:
+                        integer(value[field])
                     result.sort(key=lambda v: v[field])
             elif key == "supporting_operands" and result:
                 result.sort(key=lambda v: text(v["provenance"]["id"]))

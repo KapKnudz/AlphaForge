@@ -304,9 +304,7 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
     structured = copy.deepcopy(renamed)
     for row in structured["operating_schedule"]["periods"]:
         allocations = [
-            allocation
-            for ledger in row["tax_ledgers"]
-            for allocation in ledger["allocations"]
+            allocation for ledger in row["tax_ledgers"] for allocation in ledger["allocations"]
         ]
         for rank, allocation in enumerate(
             sorted(
@@ -335,20 +333,14 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
     refund_first = copy.deepcopy(structured)
     second_row = refund_first["operating_schedule"]["periods"][1]
     second_allocations = [
-        allocation
-        for ledger in second_row["tax_ledgers"]
-        for allocation in ledger["allocations"]
+        allocation for ledger in second_row["tax_ledgers"] for allocation in ledger["allocations"]
     ]
-    next(
-        allocation
-        for allocation in second_allocations
-        if allocation["kind"] == "refund"
-    )["eligibility_order"]["rank"] = 1
-    next(
-        allocation
-        for allocation in second_allocations
-        if allocation["lot_id"] == "payable-1"
-    )["eligibility_order"]["rank"] = 3
+    next(allocation for allocation in second_allocations if allocation["kind"] == "refund")[
+        "eligibility_order"
+    ]["rank"] = 1
+    next(allocation for allocation in second_allocations if allocation["lot_id"] == "payable-1")[
+        "eligibility_order"
+    ]["rank"] = 3
     assert evaluate(refund_first)["operating_cash_flows"]["reason_codes"] == [
         "refund_eligibility_unestablished"
     ]
@@ -356,16 +348,12 @@ def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
     tied = copy.deepcopy(structured)
     second_row = tied["operating_schedule"]["periods"][1]
     second_allocations = [
-        allocation
-        for ledger in second_row["tax_ledgers"]
-        for allocation in ledger["allocations"]
+        allocation for ledger in second_row["tax_ledgers"] for allocation in ledger["allocations"]
     ]
-    second_allocations[1]["eligibility_order"]["rank"] = second_allocations[0][
-        "eligibility_order"
-    ]["rank"]
-    assert evaluate(tied)["operating_cash_flows"]["reason_codes"] == [
-        "tax_event_order_invalid"
+    second_allocations[1]["eligibility_order"]["rank"] = second_allocations[0]["eligibility_order"][
+        "rank"
     ]
+    assert evaluate(tied)["operating_cash_flows"]["reason_codes"] == ["tax_event_order_invalid"]
 
     late = copy.deepcopy(renamed)
     for row in late["operating_schedule"]["periods"]:
