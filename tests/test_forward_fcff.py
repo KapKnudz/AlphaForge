@@ -20,6 +20,34 @@ def val(result, key):
     return result[key]["value"]
 
 
+def mark_synthetic_reported_fact(req, operand, accounting_date="2025-12-31"):
+    catalog = {
+        "sources": [
+            {
+                "id": "synthetic-source",
+                "url": "https://example.test/source",
+                "sha256": "a" * 64,
+                "publication_date": "2026-01-01",
+                "observation_date": accounting_date,
+                "ingested_at": "2026-01-02T00:00:00Z",
+                "anchors": {"p1": "Synthetic reported premise"},
+                "limitations": [],
+            }
+        ]
+    }
+    req["evidence_context"] = {"catalog": catalog, "catalog_hash": digest(catalog)}
+    operand["provenance"].update(
+        {
+            "class": "reported_fact",
+            "uncertainty": "source_observed",
+            "accounting_date": accounting_date,
+            "period_start": None,
+            "period_end": None,
+            "source_refs": [{"source_id": "synthetic-source", "anchor": "p1"}],
+        }
+    )
+
+
 @pytest.mark.parametrize("currency", ["SEK", "EUR"])
 def test_a6_exact_numerator_and_currency(currency):
     req, _ = request(currency)
@@ -660,6 +688,35 @@ def test_terminal_queue_witness_uses_only_horizon_outstanding_same_age_lots():
     ]
 
 
+@pytest.mark.parametrize(
+    "ledger_id",
+    ["group/tax", "tax/group", "group/tax/child", "/tax", "tax/", "group//tax"],
+)
+def test_terminal_uses_full_structured_tax_ledger_identity(ledger_id):
+    req, inputs = request()
+    complete_bridge(req, inputs)
+    baseline = evaluate(req)
+    for lot in req["operating_schedule"]["tax_lots"]:
+        lot["ledger_id"] = ledger_id
+    for row in req["operating_schedule"]["periods"]:
+        row["tax_ledgers"][0]["id"] = ledger_id
+    old_prefix = "tax/tax/"
+    for template in req["terminal"]["templates"]:
+        if template["path"].startswith(old_prefix):
+            path = f"tax/{ledger_id}/{template['path'][len(old_prefix) :]}"
+            template["id"] = path
+            template["path"] = path
+    for kernel in req["terminal"]["tax_kernels"]:
+        kernel["ledger_id"] = ledger_id
+
+    result = evaluate(req)
+    assert all(
+        result[name]["available"]
+        for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share")
+    )
+    assert result["operating_value"]["value"] == baseline["operating_value"]["value"]
+
+
 def test_terminal_queue_inventory_includes_tiny_distant_nonzero_lot():
     req, inputs = request(
         profits=(100,) * 12,
@@ -1270,9 +1327,52 @@ def test_february_29_valuation_anchor_returns_in_later_leap_years(
         assert refused[name]["missing_inputs"] == [f"year-{restored_index}"]
 
 
+@pytest.mark.parametrize(
+    ("role", "reason_path", "expected_mask"),
+    [
+        ("cash_profit", "cash_operating_profit_before_da", (False, False, False, False)),
+        ("forecast_lot", "amount", (False, False, False, False)),
+        ("terminal_growth", "growth", (True, False, False, False)),
+    ],
+)
+def test_reported_facts_cannot_supply_forward_monetary_roles(role, reason_path, expected_mask):
+    req, inputs = request()
+    complete_bridge(req, inputs)
+    assert evaluate(req)["per_share"]["available"]
+    if role == "cash_profit":
+        operand = req["operating_schedule"]["periods"][0]["cash_operating_profit_before_da"]
+    elif role == "forecast_lot":
+        operand = next(
+            lot["amount"]
+            for lot in req["operating_schedule"]["tax_lots"]
+            if lot["origin"] == "forecast_created"
+        )
+    else:
+        operand = req["terminal"]["growth"]
+    mark_synthetic_reported_fact(req, operand)
+
+    result = evaluate(req)
+    names = ("operating_cash_flows", "operating_value", "common_equity", "per_share")
+    assert tuple(result[name]["available"] for name in names) == expected_mask
+    owner = "operating_value" if role == "terminal_growth" else "operating_cash_flows"
+    assert result[owner]["reason_codes"] == ["reported_fact_in_forward_role"]
+    assert result[owner]["missing_inputs"] == [reason_path]
+
+
+def test_explicit_future_reported_observation_keeps_earlier_diagnostic():
+    req, inputs = request()
+    complete_bridge(req, inputs)
+    operand = req["operating_schedule"]["periods"][0]["cash_operating_profit_before_da"]
+    mark_synthetic_reported_fact(req, operand, "2027-06-30")
+
+    result = evaluate(req)
+    assert result["operating_cash_flows"]["reason_codes"] == ["future_amount_not_observed_fact"]
+    assert result["operating_cash_flows"]["missing_inputs"] == [operand["provenance"]["id"]]
+
+
 def test_a10_fact_source_cutoff_and_real_review():
     req, _ = request()
-    operand = req["operating_schedule"]["periods"][0]["cash_operating_profit_before_da"]
+    operand = req["operating_schedule"]["initial_wc"]
     p = operand["provenance"]
     p.update(
         {

@@ -349,8 +349,11 @@ requires `retrospective_research`. A review predating any known publication in
 the operand's direct or derived source lineage is retained as a chronology
 diagnostic but cannot qualify the output as human reviewed. Unknown publication
 timing likewise prevents review qualification and emits an explicit diagnostic;
-it does not suppress otherwise supported conditional arithmetic. Empty reviews
-remain unreviewed; numerical consistency is never accounting approval.
+it does not suppress otherwise supported conditional arithmetic. A direct
+reported fact may support historical or valuation-date state, but cannot stand
+in for annual forecast cash profit, a forecast-created tax-lot amount or terminal
+growth; those roles require forecast or analyst provenance. Empty reviews remain
+unreviewed; numerical consistency is never accounting approval.
 Accumulated chronology diagnostics also survive schedule-stage refusals. Retaining
 that audit trail does not relax fact-cutoff eligibility, output withholding or
 review qualification, and does not invent diagnostics before resolver creation.
@@ -385,8 +388,11 @@ free-cash addback. Financing principal/interest are diagnostics, not FCFF.
 
 Gross operating-unlevered tax ledgers supply taxable-basis reconciliation,
 current arising, refund entitlement, payable/receivable states, payment/refund,
-writeoff and explicitly allocated lot movements. Multiple jurisdictions/entities
-require earnings/D&A allocation that sums to the operating perimeter. Lots
+writeoff and explicitly allocated lot movements. The optional
+`allocated_ebit`/`allocated_book_da`/`allocation_basis` group and the optional
+`net_rate`/`net_expense` group must each be wholly absent or complete. Multiple
+jurisdictions/entities require earnings/D&A allocation that sums to the operating
+perimeter. Lots
 identify `boundary_existing` period-zero valuation-date balances versus
 `forecast_created` positive-period amounts, eligible dates, prerequisites and
 each annual cash allocation. Allocation chronology is evaluated across all
@@ -438,7 +444,9 @@ the established owner-stage contract behavior. Duplicate acquisition IDs
 invalidate the required request;
 malformed or duplicate terminal identities withhold operating value, while
 malformed or duplicate bridge or rights identities withhold equity and per-share
-without withholding valid upstream outputs. Queue source years must be in the selected geometric accrual regime and
+without withholding valid upstream outputs. Terminal tax kernels match the full structured ledger IDs from the validated
+schedule; readable primitive paths are never parsed back into identities. Queue
+source years must be in the selected geometric accrual regime and
 must retain a future positive-weight kernel maturity, with correct remaining
 amounts after movements and allocations; payment/refund recurrences verify
 separately. Exhausted-state IDs are unique. The caller chooses

@@ -92,6 +92,16 @@ def _amount(o, row, key, nonnegative=False):
     return o.operand(row[key], key, nonnegative)
 
 
+def _forward_amount(o, row, key, nonnegative=False):
+    value = _amount(o, row, key, nonnegative)
+    _require(
+        row[key]["provenance"]["class"] != "reported_fact",
+        "reported_fact_in_forward_role",
+        key,
+    )
+    return value
+
+
 def _movements(o, values):
     result = 0.0
     for v in sequence(values):
@@ -180,7 +190,11 @@ def _lots(schedule, o):
             iso_date(lot["eligible_date"])
         text(lot["eligibility_basis"])
         sequence(lot["prerequisites"])
-        amount = _amount(o, lot, "amount", True)
+        amount = (
+            _forward_amount(o, lot, "amount", True)
+            if lot["origin"] == "forecast_created"
+            else _amount(o, lot, "amount", True)
+        )
         if (
             lot["origin"] == "boundary_existing"
             and lot["amount"]["provenance"]["class"] == "reported_fact"
@@ -344,6 +358,20 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         ids.append(identity)
         _require(ledger["scope"] == "operating_unlevered", "financing_tax_effect_unsupported")
         text(ledger["deferred_basis"])
+        allocation_group = {"allocated_ebit", "allocated_book_da", "allocation_basis"}
+        allocation_present = allocation_group & ledger.keys()
+        _require(
+            not allocation_present or allocation_present == allocation_group,
+            "tax_allocation_group_incomplete",
+            identity,
+        )
+        net_group = {"net_rate", "net_expense"}
+        net_present = net_group & ledger.keys()
+        _require(
+            not net_present or net_present == net_group,
+            "net_tax_group_incomplete",
+            identity,
+        )
         if len(ledgers) > 1 or "allocated_ebit" in ledger:
             text(ledger.get("allocation_basis"))
             ledger_ebit = _amount(o, ledger, "allocated_ebit")
@@ -365,10 +393,9 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
         )
         if b < 0 or loss > 0:
             text(ledger["loss_basis"])
-        if "net_rate" in ledger:
+        if net_present:
             rate = _amount(o, ledger, "net_rate", True)
             _require(rate <= 1, "net_tax_rate_out_of_range")
-            _require("net_expense" in ledger, "net_tax_expense_missing")
             reconcile(_amount(o, ledger, "net_expense"), b * rate, "net_tax_expense_mismatch")
         values = {
             k: _amount(o, ledger, k, True)
@@ -756,7 +783,7 @@ def _schedule(req, o):
             "unsupported_period",
             row["id"],
         )
-        c = _amount(o, row, "cash_operating_profit_before_da")
+        c = _forward_amount(o, row, "cash_operating_profit_before_da")
         da = _amount(o, row, "book_da", True)
         n = _amount(o, row, "other_noncash_operating_charge", True)
         text(row["noncash_basis"])
@@ -950,7 +977,7 @@ def _tail(req, o, rows, lots, rate):
     )
     for k in ("renewal_basis", "survival_basis", "price_volume_basis", "growth_funding_basis"):
         text(t[k])
-    g = _amount(o, t, "growth")
+    g = _forward_amount(o, t, "growth")
     h = 1 + g
     _require(g > -1 and g < rate, "terminal_growth_invalid")
     tail, witness = rows[n], rows[n + 1]
@@ -997,7 +1024,13 @@ def _tail(req, o, rows, lots, rate):
             _require(v == 0, "terminal_discrete_state_unsupported", path)
     longest = 0
     queue_receipts = []
-    ledger_ids = sorted({path.split("/")[1] for path in expected_paths if path.startswith("tax/")})
+    ledger_ids = sorted(
+        {
+            ledger["id"]
+            for row in req["operating_schedule"]["periods"]
+            for ledger in row["tax_ledgers"]
+        }
+    )
     for kernel in kernels:
         closed(kernel, "id ledger_id leg recovery_fraction max_lag weights queues rationale")
         text(kernel["rationale"])

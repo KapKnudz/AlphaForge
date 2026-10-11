@@ -277,6 +277,70 @@ def test_a4_capitalized_lease_70_no_principal_interest_shield():
     assert not evaluate(req)["operating_cash_flows"]["available"]
 
 
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        (("allocated_ebit",), "tax_allocation_group_incomplete"),
+        (("allocated_book_da",), "tax_allocation_group_incomplete"),
+        (("allocation_basis",), "tax_allocation_group_incomplete"),
+        (("allocated_ebit", "allocated_book_da"), "tax_allocation_group_incomplete"),
+        (("allocated_ebit", "allocation_basis"), "tax_allocation_group_incomplete"),
+        (("allocated_book_da", "allocation_basis"), "tax_allocation_group_incomplete"),
+        (("net_rate",), "net_tax_group_incomplete"),
+        (("net_expense",), "net_tax_group_incomplete"),
+    ],
+)
+def test_partial_optional_tax_groups_refuse_required_schedule(fields, reason):
+    req, f = request()
+    ledger = req["operating_schedule"]["periods"][0]["tax_ledgers"][0]
+    values = {
+        "allocated_ebit": f.operand(100),
+        "allocated_book_da": f.operand(0),
+        "allocation_basis": "Explicit complete tax allocation basis",
+        "net_rate": f.operand(0.2),
+        "net_expense": f.operand(20),
+    }
+    for field in fields:
+        ledger[field] = values[field]
+
+    result = evaluate(req)
+    for output_name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert result[output_name]["reason_codes"] == [reason]
+        assert result[output_name]["missing_inputs"] == ["tax"]
+
+
+def test_complete_or_absent_optional_tax_groups_preserve_existing_arithmetic():
+    absent, _ = request()
+    absent_result = evaluate(absent)
+    assert absent_result["operating_value"]["available"]
+
+    complete, f = request()
+    ledger = complete["operating_schedule"]["periods"][0]["tax_ledgers"][0]
+    ledger.update(
+        allocated_ebit=f.operand(100),
+        allocated_book_da=f.operand(0),
+        allocation_basis="Explicit complete tax allocation basis",
+        net_rate=f.operand(0.2),
+        net_expense=f.operand(20),
+    )
+    complete_result = evaluate(complete)
+    assert complete_result["operating_value"]["value"] == absent_result["operating_value"]["value"]
+
+    allocation_mismatch = copy.deepcopy(complete)
+    allocation_mismatch["operating_schedule"]["periods"][0]["tax_ledgers"][0]["allocated_book_da"][
+        "value"
+    ] = 5
+    allocation_result = evaluate(allocation_mismatch)
+    assert allocation_result["operating_cash_flows"]["reason_codes"] == [
+        "tax_basis_reconciliation_mismatch"
+    ]
+
+    net_mismatch = copy.deepcopy(complete)
+    net_mismatch["operating_schedule"]["periods"][0]["tax_ledgers"][0]["net_expense"]["value"] = 99
+    net_result = evaluate(net_mismatch)
+    assert net_result["operating_cash_flows"]["reason_codes"] == ["net_tax_expense_mismatch"]
+
+
 def test_cross_ledger_prerequisites_follow_cash_chronology_not_ids():
     req, f = request()
     req.pop("terminal")
