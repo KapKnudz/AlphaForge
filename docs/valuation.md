@@ -386,10 +386,14 @@ cohorts validate supplied finite weights, residual and life. For a cohort
 commissioned in forecast period `j`, its last exactly nonzero depreciation weight
 may be no later than `j + ceil(life_years)`, retaining the supplied partial-period
 allowance. Zero weights remain validated records but do not alter lifetime.
-Pre-forecast cohorts retain valuation-boundary remaining-life semantics and the
-same positive-weight span allowance. Every nonzero class-period depreciation
-entry requires its matching asset-control depreciation leg; zero entries create
-no coverage obligation. There is no default life or builder. Noncash items
+Forecast cohort initial costs are aggregated by full asset-class identity and
+commissioning period and may not exceed that period's validated commissioned
+additions, including dated construction transfers. Cohorts may cover only part of
+an aggregate class; they are not a compulsory vintage inventory. Pre-forecast
+cohorts retain valuation-boundary remaining-life semantics and are not charged to
+future additions. Every nonzero class-period depreciation entry requires its
+matching asset-control depreciation leg; zero entries create no coverage
+obligation. There is no default life or builder. Noncash items
 distinguish asset impairments from other charges; recurring stock compensation
 has no automatic free-cash addback. Financing principal/interest are diagnostics,
 not FCFF.

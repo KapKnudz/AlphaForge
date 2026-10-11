@@ -501,24 +501,60 @@ def test_portable_reference_acceptance_rejects_incomplete_matrix_under_optimizat
     }
     (tmp_path / "freeze.json").write_text(canonical(frozen))
     tool = Path(__file__).resolve().parents[1] / "tools/check_forward_fcff_acceptance.py"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-O",
-            "-B",
-            str(tool),
-            "--cases",
-            str(tmp_path / "cases.json"),
-            "--out",
-            str(tmp_path / "acceptance"),
-            "--reference-freeze",
-            str(tmp_path / "freeze.json"),
-            "--reference-root",
-            str(reference),
-        ],
-        text=True,
-        capture_output=True,
-    )
+    command = [
+        sys.executable,
+        "-O",
+        "-B",
+        str(tool),
+        "--cases",
+        str(tmp_path / "cases.json"),
+        "--out",
+        str(tmp_path / "acceptance"),
+        "--reference-freeze",
+        str(tmp_path / "freeze.json"),
+        "--reference-root",
+        str(reference),
+    ]
+    completed = subprocess.run(command, text=True, capture_output=True)
     assert completed.returncode != 0
     assert "acceptance case matrix incomplete" in completed.stderr
-    assert not (tmp_path / "acceptance" / "acceptance-receipt.json").exists()
+    output = tmp_path / "acceptance"
+    assert output.is_dir()
+    assert not (output / "acceptance-receipt.json").exists()
+    assert not (output / "research.db").exists()
+
+    repeated = subprocess.run(command, text=True, capture_output=True)
+    assert repeated.returncode != 0
+    assert "acceptance_output_directory_exists" in repeated.stderr
+    assert not (output / "research.db").exists()
+
+    marker = output / "preserved-marker"
+    marker.write_text("historical attempt\n")
+    conflicting = subprocess.run(command, text=True, capture_output=True)
+    assert conflicting.returncode != 0
+    assert "acceptance_output_directory_exists" in conflicting.stderr
+    assert marker.read_text() == "historical attempt\n"
+
+
+def test_acceptance_receipt_publication_is_atomic_and_nonclobbering(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from tools import check_forward_fcff_acceptance as acceptance
+
+    receipt = tmp_path / "acceptance-receipt.json"
+    acceptance._publish_receipt(receipt, "first receipt\n")
+    with pytest.raises(acceptance.AcceptanceError, match="acceptance_receipt_conflict"):
+        acceptance._publish_receipt(receipt, "replacement\n")
+    assert receipt.read_text() == "first receipt\n"
+
+    late_receipt = tmp_path / "late-receipt.json"
+    real_link = acceptance.os.link
+
+    def publish_conflict(source, destination):
+        Path(destination).write_text("late receipt\n")
+        real_link(source, destination)
+
+    monkeypatch.setattr(acceptance.os, "link", publish_conflict)
+    with pytest.raises(acceptance.AcceptanceError, match="acceptance_receipt_conflict"):
+        acceptance._publish_receipt(late_receipt, "new receipt\n")
+    assert late_receipt.read_text() == "late receipt\n"

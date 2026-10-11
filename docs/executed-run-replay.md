@@ -244,9 +244,13 @@ the public arithmetic oracle or issuer admission. Portable procedure:
      --reference-root PRIVATE/corrected-reference
    ```
 
-   It exercises the pure evaluator **and actual CLI/export/retained replay**, checks
-   annual legs plus numerator/horizon/PVs, refuses the transitional requests in
-   both paths and verifies exact replay for successful and refused runs. It
+   `PRIVATE/acceptance` must not already exist, including as an empty directory;
+   each failed or successful attempt permanently owns its output path. The
+   completed receipt is published atomically without replacing a conflicting
+   receipt. The consumer exercises the pure evaluator **and actual
+   CLI/export/retained replay**, checks annual legs plus numerator/horizon/PVs,
+   refuses the transitional requests in both paths and verifies exact replay for
+   successful and refused runs. It
    writes a private receipt with identities, tolerances, comparisons, original
    freeze checks and explicitly unavailable equity/share outputs. Retain this
    receipt with the private authentic translations. After code/rule changes use

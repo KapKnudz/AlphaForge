@@ -606,6 +606,7 @@ def _assets(o, row, da, impairment, start, end, previous):
     ids = []
     total_da = total_impairment = net_book = 0.0
     legs = {}
+    commissioned = {}
     for a in controls:
         closed(
             a,
@@ -672,6 +673,7 @@ def _assets(o, row, da, impairment, start, end, previous):
             + other
         )
         reconcile(values["closing"], expected, "asset_rollforward_mismatch", identity)
+        commissioned[identity] = values["commissioned_additions"]
         total_da += values["depreciation"]
         total_impairment += values["impairment"]
         net_book += (
@@ -688,14 +690,15 @@ def _assets(o, row, da, impairment, start, end, previous):
     _require(set(ids) == set(previous), "asset_class_continuity_missing")
     reconcile(total_da, da, "aggregate_da_mismatch")
     reconcile(total_impairment, impairment, "aggregate_impairment_mismatch")
-    return cash, lease, disposal_cash, net_book, legs
+    return cash, lease, disposal_cash, net_book, legs, commissioned
 
 
-def _cohorts(schedule, o, rows):
+def _cohorts(schedule, o, rows, commissioned_by_period):
     """Optional supplied finite weights are validated, never ignored or generated."""
     cohorts = sequence(schedule.get("cohorts", []))
     unique([c["id"] for c in cohorts])
     class_dep = {}
+    forecast_cost = {}
     for c in cohorts:
         closed(
             c,
@@ -736,20 +739,23 @@ def _cohorts(schedule, o, rows):
             )
         unique(seen)
         _require(bool(seen), "cohort_weights_exceed_supplied_life")
+        commissioning_period = next(
+            (
+                row["index"]
+                for row in rows
+                if iso_date(row["start"]) <= commissioned <= iso_date(row["end"])
+            ),
+            None,
+        )
         if positive:
-            commissioning_period = next(
-                (
-                    row["index"]
-                    for row in rows
-                    if iso_date(row["start"]) <= commissioned <= iso_date(row["end"])
-                ),
-                None,
-            )
             if commissioning_period is None:
                 within_life = max(positive) - min(positive) + 1 <= math.ceil(life) + 1
             else:
                 within_life = max(positive) <= commissioning_period + math.ceil(life)
             _require(within_life, "cohort_weights_exceed_supplied_life")
+        if commissioning_period is not None:
+            key = (asset_class, commissioning_period)
+            forecast_cost[key] = forecast_cost.get(key, 0) + cost
         reconcile(total, cost - residual, "cohort_finite_life_not_exhausted")
     if cohorts:
         controlled = set()
@@ -764,6 +770,12 @@ def _cohorts(schedule, o, rows):
             all(depreciation == 0 or key in controlled for key, depreciation in class_dep.items()),
             "cohort_class_da_mismatch",
         )
+        for (asset_class, period_index), cost in forecast_cost.items():
+            additions = commissioned_by_period[period_index - 1].get(asset_class, 0)
+            covered = cost <= additions or (
+                additions != 0 and math.isclose(cost, additions, abs_tol=1e-8, rel_tol=1e-8)
+            )
+            _require(covered, "cohort_commissioned_cost_uncovered", asset_class)
 
 
 def _schedule(req, o):
@@ -782,6 +794,7 @@ def _schedule(req, o):
     valuation_boundary = iso_date(req["valuation_date"])
     start = valuation_boundary + timedelta(days=1)
     result = []
+    commissioned_by_period = []
     ids = []
     for index, row in enumerate(periods, 1):
         closed(
@@ -827,9 +840,10 @@ def _schedule(req, o):
         wc_close = _amount(o, row, "wc_close")
         reconcile(wc_open, wc, "wc_continuity_mismatch")
         delta = wc_close - wc_open
-        i, lease, v, book_net, asset_legs = _assets(
+        i, lease, v, book_net, asset_legs, commissioned = _assets(
             o, row, da, asset_impairment, start, end, asset_prior
         )
+        commissioned_by_period.append(commissioned)
         p, r, bp, br, tax_legs = _tax(o, row, ebit, da, lots, tax_prior, index, start, end)
         for lot in lots.values():
             lot["remaining_by_period"][index] = lot["remaining"]
@@ -909,7 +923,7 @@ def _schedule(req, o):
             and lot["record"]["source_period"] <= len(periods),
             "tax_lot_unconsumed_source",
         )
-    _cohorts(s, o, result)
+    _cohorts(s, o, result, commissioned_by_period)
     return result, lots
 
 

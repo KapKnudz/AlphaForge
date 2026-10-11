@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -96,6 +97,23 @@ def require(condition, message, details=None):
     if not condition:
         suffix = "" if details is None else f": {details}"
         raise AcceptanceError(f"{message}{suffix}")
+
+
+def _publish_receipt(path, contents):
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("x") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise AcceptanceError("acceptance_receipt_conflict") from error
+    except FileExistsError as error:
+        raise AcceptanceError("acceptance_receipt_conflict") from error
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _require_output_mask(result, availability, case_id):
@@ -529,11 +547,14 @@ def main():
     p.add_argument("--reference-freeze", type=Path, required=True)
     p.add_argument("--reference-root", type=Path, required=True)
     args = p.parse_args()
+    try:
+        args.out.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise AcceptanceError("acceptance_output_directory_exists") from error
     before = verify_reference(args.reference_freeze, args.reference_root)
     manifest = json.loads(args.cases.read_text())
     base = args.cases.parent
     absolute, relative = validate_manifest(manifest)
-    args.out.mkdir(parents=True, exist_ok=True)
     dsn = f"sqlite:///{(args.out / 'research.db').resolve()}"
     receipt = {
         "tolerance": manifest["tolerance"],
@@ -659,7 +680,7 @@ def main():
         )
     receipt["reference_after"] = verify_reference(args.reference_freeze, args.reference_root)
     require(receipt["reference_after"] == before, "reference changed during acceptance")
-    (args.out / "acceptance-receipt.json").write_text(canonical(receipt) + "\n")
+    _publish_receipt(args.out / "acceptance-receipt.json", canonical(receipt) + "\n")
     print(canonical(receipt))
     return 0
 

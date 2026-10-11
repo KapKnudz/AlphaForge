@@ -184,7 +184,7 @@ def test_cohort_asset_class_must_be_nonempty_text(asset_class):
     assert result["operating_cash_flows"]["reason_codes"] == ["nonempty_text_required"]
 
 
-def test_zero_cohort_is_exempt_and_aligned_cohort_reconciles():
+def test_zero_cohort_is_exempt_and_unfunded_forecast_cohort_refuses():
     zero, zero_inputs = request()
     no_tax(zero)
     zero["operating_schedule"]["cohorts"] = [cohort(zero_inputs, "ghost", 0)]
@@ -206,9 +206,11 @@ def test_zero_cohort_is_exempt_and_aligned_cohort_reconciles():
     aligned["operating_schedule"]["periods"][0]["book_da"] = aligned_inputs.operand(10)
 
     result = evaluate(aligned)
-    assert result["operating_cash_flows"]["available"]
-    assert result["operating_cash_flows"]["value"][0]["ebit"] == 90
-    assert result["operating_cash_flows"]["value"][0]["fcff_operations"] == 100
+    for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert result[name]["status"] == "invalid_input"
+        assert result[name]["reason_codes"] == ["cohort_commissioned_cost_uncovered"]
+        assert result[name]["missing_inputs"] == ["ghost"]
+        assert result[name]["value"] is None
 
 
 @pytest.mark.parametrize(
@@ -252,9 +254,7 @@ def test_forecast_cohort_life_is_anchored_to_commissioning(weights):
 def test_supported_cohort_life_counterparts_keep_cash(
     weights, life, commissioned, investment_period
 ):
-    req, actual_investment_period = cohort_schedule(
-        weights, life=life, commissioned=commissioned
-    )
+    req, actual_investment_period = cohort_schedule(weights, life=life, commissioned=commissioned)
 
     result = evaluate(req)
 
@@ -266,6 +266,64 @@ def test_supported_cohort_life_counterparts_keep_cash(
     assert [
         row["fcff_operations"] for row in result["operating_cash_flows"]["value"]
     ] == expected_cash
+
+
+def test_forecast_cohort_costs_aggregate_before_addition_coverage():
+    req, _ = cohort_schedule(((1, 10),))
+    first = req["operating_schedule"]["cohorts"][0]
+    first["id"] = "first"
+    first["cost"]["value"] = 6
+    first["residual"]["value"] = 1
+    first["weights"][0]["depreciation"]["value"] = 5
+    second = copy.deepcopy(first)
+    second["id"] = "second"
+    for operand in (second["cost"], second["residual"], second["life_years"]):
+        operand["provenance"]["id"] += "-second"
+    second["weights"][0]["depreciation"]["provenance"]["id"] += "-second"
+    req["operating_schedule"]["cohorts"] = [first, second]
+
+    result = evaluate(req)
+
+    assert result["operating_cash_flows"]["status"] == "invalid_input"
+    assert result["operating_cash_flows"]["reason_codes"] == ["cohort_commissioned_cost_uncovered"]
+    assert result["operating_cash_flows"]["missing_inputs"] == ["plant"]
+
+
+def test_positive_residual_cohort_still_requires_commissioned_cost():
+    req, f = request()
+    no_tax(req)
+    item = cohort(f, "plant", 0)
+    item["cost"] = f.operand(10)
+    item["residual"] = f.operand(10)
+    req["operating_schedule"]["cohorts"] = [item]
+
+    result = evaluate(req)
+
+    assert result["operating_cash_flows"]["reason_codes"] == ["cohort_commissioned_cost_uncovered"]
+    assert result["operating_cash_flows"]["missing_inputs"] == ["plant"]
+
+
+def test_partial_cohort_cost_inventory_uses_full_asset_class_identity():
+    req, _ = cohort_schedule(((1, 10),))
+    rows = req["operating_schedule"]["periods"]
+    for row in rows:
+        asset = row["asset_controls"][0]
+        asset["id"] = "group/plant"
+    rows[0]["investment_items"][0]["asset_class"] = "group/plant"
+    rows[0]["investment_items"][0]["amount"]["value"] = 20
+    rows[0]["asset_controls"][0]["commissioned_additions"]["value"] = 20
+    rows[0]["asset_controls"][0]["closing"]["value"] = 10
+    for row in rows[1:]:
+        row["asset_controls"][0]["opening"]["value"] = 10
+        row["asset_controls"][0]["closing"]["value"] = 10
+    req["operating_schedule"]["cohorts"][0]["asset_class"] = "group/plant"
+
+    result = evaluate(req)
+
+    assert result["operating_cash_flows"]["available"], result["operating_cash_flows"]
+    first = result["operating_cash_flows"]["value"][0]
+    assert first["fcff_operations"] == 80
+    assert first["net_book_investment"] == 10
 
 
 def test_a2_cash_advance_spent_once_commissioned_next_year():
