@@ -714,12 +714,15 @@ def _cohorts(schedule, o, rows):
         weights = sequence(c["weights"])
         total = 0.0
         seen = []
+        positive = []
         for w in weights:
             closed(w, "period_index depreciation")
             index = integer(w["period_index"], minimum=1)
             seen.append(index)
             dep = _amount(o, w, "depreciation", True)
             total += dep
+            if dep != 0:
+                positive.append(index)
             _require(index <= len(rows), "cohort_continuation_missing")
             _require(
                 dep == 0 or commissioned <= iso_date(rows[index - 1]["end"]),
@@ -732,10 +735,21 @@ def _cohorts(schedule, o, rows):
                 "cohort_depreciation_exceeds_cost",
             )
         unique(seen)
-        _require(
-            bool(seen) and max(seen) - min(seen) + 1 <= math.ceil(life) + 1,
-            "cohort_weights_exceed_supplied_life",
-        )
+        _require(bool(seen), "cohort_weights_exceed_supplied_life")
+        if positive:
+            commissioning_period = next(
+                (
+                    row["index"]
+                    for row in rows
+                    if iso_date(row["start"]) <= commissioned <= iso_date(row["end"])
+                ),
+                None,
+            )
+            if commissioning_period is None:
+                within_life = max(positive) - min(positive) + 1 <= math.ceil(life) + 1
+            else:
+                within_life = max(positive) <= commissioning_period + math.ceil(life)
+            _require(within_life, "cohort_weights_exceed_supplied_life")
         reconcile(total, cost - residual, "cohort_finite_life_not_exhausted")
     if cohorts:
         controlled = set()

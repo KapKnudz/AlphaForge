@@ -379,12 +379,20 @@ Each settlement declares its bridge category and schedule period so count-once
 links reconcile category, direction, period and amount. Aggregate class
 rollforwards reconcile commissioning, advances, transfers,
 D&A/impairment/disposal/other and closing active/construction balances. Transfers
-require dated transfer events. Optional cohorts validate supplied finite weights,
-residual and life; every nonzero class-period depreciation entry requires its
-matching asset-control depreciation leg. Zero entries create no coverage
-obligation. There is no default life or builder. Noncash items distinguish asset
-impairments from other charges; recurring stock compensation has no automatic
-free-cash addback. Financing principal/interest are diagnostics, not FCFF.
+require dated transfer events. Net book investment remains the commissioned-book
+diagnostic: commissioned additions less D&A, impairment and disposal carrying
+reductions; construction-balance movement is not added to that measure. Optional
+cohorts validate supplied finite weights, residual and life. For a cohort
+commissioned in forecast period `j`, its last exactly nonzero depreciation weight
+may be no later than `j + ceil(life_years)`, retaining the supplied partial-period
+allowance. Zero weights remain validated records but do not alter lifetime.
+Pre-forecast cohorts retain valuation-boundary remaining-life semantics and the
+same positive-weight span allowance. Every nonzero class-period depreciation
+entry requires its matching asset-control depreciation leg; zero entries create
+no coverage obligation. There is no default life or builder. Noncash items
+distinguish asset impairments from other charges; recurring stock compensation
+has no automatic free-cash addback. Financing principal/interest are diagnostics,
+not FCFF.
 
 Gross operating-unlevered tax ledgers supply taxable-basis reconciliation,
 current arising, refund entitlement, payable/receivable states, payment/refund,

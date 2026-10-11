@@ -54,6 +54,58 @@ def cohort(f, asset_class, amount, period=1):
     }
 
 
+def cohort_schedule(weights, *, life=1, commissioned="2027-01-01"):
+    req, f = request(profits=(100,) * 8)
+    no_tax(req)
+    cost = sum(amount for _, amount in weights)
+    depreciation = dict(weights)
+    commissioning_period = next(
+        (
+            row["index"]
+            for row in req["operating_schedule"]["periods"]
+            if row["start"] <= commissioned <= row["end"]
+        ),
+        None,
+    )
+    opening = 0 if commissioning_period is not None else cost
+    for row in req["operating_schedule"]["periods"]:
+        index = row["index"]
+        addition = cost if index == commissioning_period else 0
+        dep = depreciation.get(index, 0)
+        closing = opening + addition - dep
+        row["book_da"] = f.operand(dep)
+        asset = row["asset_controls"][0]
+        for field, amount in {
+            "opening": opening,
+            "commissioned_additions": addition,
+            "depreciation": dep,
+            "closing": closing,
+        }.items():
+            asset[field] = f.operand(amount)
+        if addition:
+            row["investment_items"] = [
+                investment(f, "finite-cohort-purchase", cost, index, commissioned)
+            ]
+        opening = closing
+    req["operating_schedule"]["cohorts"] = [
+        {
+            "id": "finite-cohort",
+            "asset_class": "plant",
+            "cost": f.operand(cost),
+            "residual": f.operand(0),
+            "life_years": f.operand(life),
+            "in_service_date": commissioned,
+            "method": "supplied_weights",
+            "weights": [
+                {"period_index": index, "depreciation": f.operand(amount)}
+                for index, amount in weights
+            ],
+            "remaining_basis": "Explicit source-free finite cohort",
+        }
+    ]
+    return req, commissioning_period
+
+
 def investment(f, identity, amount, idx, commissioned, kind="cash_purchase"):
     return {
         "id": identity,
@@ -157,6 +209,63 @@ def test_zero_cohort_is_exempt_and_aligned_cohort_reconciles():
     assert result["operating_cash_flows"]["available"]
     assert result["operating_cash_flows"]["value"][0]["ebit"] == 90
     assert result["operating_cash_flows"]["value"][0]["fcff_operations"] == 100
+
+
+@pytest.mark.parametrize(
+    "weights",
+    (
+        ((3, 10),),
+        ((6, 10),),
+        ((6, 5), (7, 5)),
+        ((1, 0), (6, 10)),
+    ),
+)
+def test_forecast_cohort_life_is_anchored_to_commissioning(weights):
+    req, _ = cohort_schedule(weights)
+
+    result = evaluate(req)
+
+    for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert result[name] == {
+            "available": False,
+            "status": "invalid_input",
+            "reason_codes": ["cohort_weights_exceed_supplied_life"],
+            "missing_inputs": [],
+            "conditions": [],
+            "limitations": [],
+            "value": None,
+        }
+
+
+@pytest.mark.parametrize(
+    ("weights", "life", "commissioned", "investment_period"),
+    (
+        (((1, 10),), 1, "2027-01-01", 1),
+        (((1, 5), (2, 5)), 1, "2027-01-01", 1),
+        (((2, 10),), 1, "2027-01-01", 1),
+        (((6, 10),), 6, "2027-01-01", 1),
+        (((6, 10),), 1, "2032-01-01", 6),
+        (((1, 10), (6, 0)), 1, "2027-01-01", 1),
+        (((1, 10),), 1, "2020-01-01", None),
+    ),
+)
+def test_supported_cohort_life_counterparts_keep_cash(
+    weights, life, commissioned, investment_period
+):
+    req, actual_investment_period = cohort_schedule(
+        weights, life=life, commissioned=commissioned
+    )
+
+    result = evaluate(req)
+
+    assert actual_investment_period == investment_period
+    assert result["operating_cash_flows"]["available"], result["operating_cash_flows"]
+    expected_cash = [100] * 8
+    if investment_period is not None:
+        expected_cash[investment_period - 1] = 90
+    assert [
+        row["fcff_operations"] for row in result["operating_cash_flows"]["value"]
+    ] == expected_cash
 
 
 def test_a2_cash_advance_spent_once_commissioned_next_year():
