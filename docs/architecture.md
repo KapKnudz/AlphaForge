@@ -1,7 +1,7 @@
 # Architecture entry point
 
 AlphaForge has three implemented research-input paths joined by company identity
-and an explicit `as_of` date, not by a model conversation:
+and explicit dated boundaries, not by a model conversation:
 
 ```text
 Börsdata → stored observations → deterministic calculations → ranking / readiness → JSON + CSV

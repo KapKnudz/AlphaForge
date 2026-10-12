@@ -162,8 +162,8 @@ retention helper. [Migration 020](../db/migrations/020_forward_fcff_runs.sql) ad
 one append-only `forward_fcff_runs` table linked to numerical identity, **not**
 a ranking-run FK. No synthetic ranking, calibration or approval rows are created.
 Old records remain unchanged; old rank replay retains its honest code/rule
-incompatibility refusal. A v19 upgrade is additive; the sole existing migration
-assertion follows current schema version rather than hardcoding v19.
+incompatibility refusal. The v20 upgrade is additive and preserves existing
+retained rows.
 
 `freeze` canonicalizes JSON keys and ID-keyed economic arrays; annual periods
 remain ordered. Catalog hashes are verified against supplied bodies before
@@ -231,10 +231,13 @@ the public arithmetic oracle or issuer admission. Portable procedure:
    compatible retained replay must match canonical bytes exactly.
 5. Retain private `cases.json` with `tolerance` (keys `absolute_millions`,
    `relative`, `justification`), `oracle_basis`, and `cases` (each `id`,
-   `input_file`, `expected_file`, optional `transitional_input_file`). Expected
-   files contain `rows` (`index`, `values`: dot-separated output paths to Decimal
-   strings), `horizon`, `terminal_numerator`, `explicit_pv`, `terminal_pv`,
-   `operating_value`. No expected field may be copied from the new evaluator.
+   `input_file`, `expected_file`, plus `transitional_input_file` where required).
+   The checker's `REQUIRED_CASES` and `REQUIRED_FINANCIAL_PATHS` are the exact
+   matrix and annual-path authority, including case IDs and file naming. Expected
+   files bind `basis` to `oracle_basis` and contain all 22 `rows` (`index`,
+   `values`: dot-separated output paths to Decimal strings), `horizon`,
+   `terminal_numerator`, `explicit_pv`, `terminal_pv`, and `operating_value`.
+   No expected field may be copied from the new evaluator.
 6. Run the portable consumer, with all private paths explicitly paired:
 
    ```sh

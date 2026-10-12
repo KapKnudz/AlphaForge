@@ -139,7 +139,7 @@ def test_a18_write_once_export_conflict_and_identical_retry(tmp_path):
 
 def test_a19_migration_append_only_and_old_bytes_preserved(tmp_path):
     conn = db(tmp_path / "db")
-    # A retained old body survives v19 upgrade without interpretation or backfill.
+    # A retained old body survives the v19-to-v20 upgrade without interpretation or backfill.
     conn.execute("INSERT INTO numerical_input_bodies VALUES ('legacy','hash','{}','{}')")
     old = conn.execute("SELECT * FROM numerical_input_bodies").fetchall()
     conn.execute("DROP TABLE forward_fcff_runs")
