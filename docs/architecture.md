@@ -1,12 +1,13 @@
 # Architecture entry point
 
-AlphaForge has two implemented research-input paths joined by company identity
-and an explicit `as_of` date, not by a model conversation:
+AlphaForge has three implemented research-input paths joined by company identity
+and explicit dated boundaries, not by a model conversation:
 
 ```text
 Börsdata → stored observations → deterministic calculations → ranking / readiness → JSON + CSV
 MFN issuer mapping → retained PDF history → selection manifest → frozen evidence packet
                                                       └────→ ranking / readiness provenance
+Supplied frozen annual schedule → conditional forward FCFF → immutable research export / replay
 ```
 
 `rank` freezes and retains selected stored numerical inputs before calculation,
@@ -14,7 +15,10 @@ then retains original outputs before publication; it fetches no live market data
 [Executed-run audit replay](executed-run-replay.md) reconstructs from retained
 bodies without mutable numerical lookup. `evidence` acquires
 and freezes textual inputs for one company; rerun `rank` to consume the resulting
-packet. Neither command currently generates a thesis.
+packet. `forward-fcff` consumes an explicitly supplied original SEK/EUR schedule
+without acquisition or model calls and exposes independent conditional operating,
+equity and per-share outputs; it does not affect ranking or readiness. None of
+these commands generates a thesis.
 
 ## Contract ownership
 
@@ -53,7 +57,9 @@ packet. Neither command currently generates a thesis.
 
 **Implemented:** watchlist import, Börsdata sync, stored-input ranking and DCF
 exports, immutable executed-run numerical retention/audit replay, readiness
-assessment, and the one-company MFN/PDF evidence lane.
+assessment, the one-company MFN/PDF evidence lane, and separate
+[supplied-schedule conditional FCFF research](valuation.md#conditional-supplied-schedule-forward-fcff-research)
+with [retained-only replay](executed-run-replay.md#forward-fcff-research-lane).
 Optional [Jev shadow signals](jev-shadow.md) are observational: they do not
 change selection, readiness or packet contents.
 

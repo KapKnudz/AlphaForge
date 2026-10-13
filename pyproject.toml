@@ -32,6 +32,7 @@ include = ["alphaforge*"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not integration'"
+pythonpath = ["."]
 markers = [
     "integration: live Börsdata/FI/MFN tests (requires BORSDATA_API_KEY env var)",
 ]
