@@ -753,7 +753,7 @@ def _cohorts(schedule, o, rows, commissioned_by_period):
             else:
                 within_life = max(positive) <= commissioning_period + math.ceil(life)
             _require(within_life, "cohort_weights_exceed_supplied_life")
-        if commissioning_period is not None:
+        if commissioning_period is not None or commissioned >= iso_date(rows[0]["start"]):
             key = (asset_class, commissioning_period)
             forecast_cost[key] = forecast_cost.get(key, 0) + cost
         reconcile(total, cost - residual, "cohort_finite_life_not_exhausted")
@@ -771,7 +771,11 @@ def _cohorts(schedule, o, rows, commissioned_by_period):
             "cohort_class_da_mismatch",
         )
         for (asset_class, period_index), cost in forecast_cost.items():
-            additions = commissioned_by_period[period_index - 1].get(asset_class, 0)
+            additions = (
+                commissioned_by_period[period_index - 1].get(asset_class, 0)
+                if period_index is not None
+                else 0
+            )
             covered = cost <= additions or (
                 additions != 0 and math.isclose(cost, additions, abs_tol=1e-8, rel_tol=1e-8)
             )

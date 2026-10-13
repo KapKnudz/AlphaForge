@@ -67,7 +67,7 @@ def cohort_schedule(weights, *, life=1, commissioned="2027-01-01"):
         ),
         None,
     )
-    opening = 0 if commissioning_period is not None else cost
+    opening = cost if commissioned < req["operating_schedule"]["periods"][0]["start"] else 0
     for row in req["operating_schedule"]["periods"]:
         index = row["index"]
         addition = cost if index == commissioning_period else 0
@@ -266,6 +266,22 @@ def test_supported_cohort_life_counterparts_keep_cash(
     assert [
         row["fcff_operations"] for row in result["operating_cash_flows"]["value"]
     ] == expected_cash
+
+
+def test_post_horizon_positive_cohort_cost_requires_commissioning_coverage():
+    req, commissioning_period = cohort_schedule(((1, 0),), commissioned="2035-01-01")
+    item = req["operating_schedule"]["cohorts"][0]
+    item["cost"]["value"] = 10
+    item["residual"]["value"] = 10
+
+    result = evaluate(req)
+
+    assert commissioning_period is None
+    for name in ("operating_cash_flows", "operating_value", "common_equity", "per_share"):
+        assert result[name]["status"] == "invalid_input"
+        assert result[name]["reason_codes"] == ["cohort_commissioned_cost_uncovered"]
+        assert result[name]["missing_inputs"] == ["plant"]
+        assert result[name]["value"] is None
 
 
 def test_forecast_cohort_costs_aggregate_before_addition_coverage():
