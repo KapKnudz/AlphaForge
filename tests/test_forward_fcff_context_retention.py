@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from forward_fcff_fixtures import request
 
 from alphaforge.core.valuation.forward_fcff_contract import canonical, digest, freeze
@@ -68,7 +70,7 @@ def prepare(tmp_path):
 def child(tmp_path, command, label="command"):
     # Explicit minimal environment excludes all private acceptance opt-ins.
     env = {
-        "PATH": os.defpath,
+        "PATH": os.environ.get("PATH", os.defpath),
         "PYTHONPATH": str(ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
@@ -205,3 +207,95 @@ def test_completed_replay_and_separate_corruption_copies(tmp_path):
             )
             assert refused.returncode == 1 and reason in refused.stderr
         assert canonical(runs.replay(good, receipt["run_id"])["outputs"]).encode() == original
+
+
+@pytest.mark.parametrize("embedded_context", ["different", "absent"])
+def test_replay_embedded_context_with_valid_preceding_hashes(tmp_path, embedded_context):
+    _, _, _, database, args = prepare(tmp_path)
+    result = child(tmp_path, [sys.executable, "-B", "-m", "alphaforge.cli.main", *args])
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    with sqlite3.connect(database) as good:
+        original = good.execute("SELECT outputs FROM forward_fcff_runs").fetchone()[0]
+        copy = tmp_path / "synthetic-context-shape.db"
+        with sqlite3.connect(copy) as synthetic:
+            good.backup(synthetic)
+    with sqlite3.connect(copy) as synthetic:
+        body_json, rules_json = synthetic.execute(
+            "SELECT body,rules FROM numerical_input_bodies"
+        ).fetchone()
+        body, rules = json.loads(body_json), json.loads(rules_json)
+        # A synthetic legacy shape with CURRENT compatible rules, not a claim
+        # that genuine old-code snapshots are replayable or can be backfilled.
+        assert rules == runs.rules_bundle()
+        if embedded_context == "absent":
+            del body["request"]["evidence_context"]
+        else:
+            context = body["request"]["evidence_context"]
+            context["catalog"]["sources"][0]["limitations"] = ["Different synthetic context"]
+            context["catalog_hash"] = digest(context["catalog"])
+        financial_hash = digest(body)
+        identity = digest({"financial_inputs_hash": financial_hash, "rules": rules})
+        synthetic.execute("DROP TRIGGER numerical_body_no_update")
+        synthetic.execute("DROP TRIGGER forward_fcff_no_update")
+        synthetic.execute(
+            "UPDATE numerical_input_bodies SET numerical_identity=?,financial_inputs_hash=?,body=?",
+            (identity, financial_hash, canonical(body)),
+        )
+        synthetic.execute("UPDATE forward_fcff_runs SET numerical_identity=?", (identity,))
+        synthetic.commit()
+        stored_identity, stored_hash, stored_body, stored_rules = synthetic.execute(
+            "SELECT * FROM numerical_input_bodies"
+        ).fetchone()
+        text_body, text_hash, outputs_body, outputs_hash = synthetic.execute(
+            "SELECT textual_context,textual_context_hash,outputs,outputs_hash FROM forward_fcff_runs"
+        ).fetchone()
+        # Prove every preceding replay check is valid, so mismatch cannot be
+        # masked by an earlier input/context integrity or rules refusal.
+        assert stored_body == canonical(json.loads(stored_body))
+        assert digest(json.loads(stored_body)) == stored_hash == financial_hash
+        assert (
+            digest({"financial_inputs_hash": stored_hash, "rules": json.loads(stored_rules)})
+            == stored_identity
+            == identity
+        )
+        assert canonical(json.loads(text_body)) == text_body
+        assert digest(json.loads(text_body)) == text_hash == body["context_hash"]
+        assert canonical(json.loads(outputs_body)) == outputs_body == original
+        assert digest(json.loads(outputs_body)) == outputs_hash
+        assert json.loads(stored_rules) == runs.rules_bundle()
+        if embedded_context == "different":
+            assert canonical(body["request"]["evidence_context"]) != text_body
+            with pytest.raises(runs.ReplayRefusal, match="^invalid_textual_context$"):
+                runs.replay(synthetic, receipt["run_id"])
+        else:
+            assert "evidence_context" not in body["request"]
+            replayed = runs.replay(synthetic, receipt["run_id"])
+            assert replayed["status"] == "exact_replay"
+            assert canonical(replayed["outputs"]) == original
+    with sqlite3.connect(database) as good:
+        assert canonical(runs.replay(good, receipt["run_id"])["outputs"]) == original
+
+
+def test_child_preserves_custom_executable_path(tmp_path, monkeypatch):
+    git = shutil.which("git")
+    assert git is not None
+    custom_path = tmp_path / "custom-bin"
+    custom_path.mkdir()
+    (custom_path / "git").symlink_to(git)
+    empty_default = tmp_path / "empty-default"
+    empty_default.mkdir()
+    monkeypatch.setattr(os, "defpath", str(empty_default))
+    monkeypatch.setenv("PATH", str(custom_path))
+    result = child(
+        tmp_path,
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "from alphaforge.db.forward_fcff_runs import rules_bundle; "
+            "print(rules_bundle()['code_revision'])",
+        ],
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == runs.rules_bundle()["code_revision"]
