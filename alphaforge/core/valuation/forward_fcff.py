@@ -1715,9 +1715,7 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             "common_equity",
             "bridge_material_claim_unresolved",
         )
-        equity, boundary_pv = _bridge(
-            req, o, value, rows, lots, activated_boundary_lots, r
-        )
+        equity, boundary_pv = _bridge(req, o, value, rows, lots, activated_boundary_lots, r)
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(
             equity, conditions=conditions, limitations=req["limitations"]

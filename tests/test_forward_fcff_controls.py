@@ -1009,9 +1009,7 @@ def test_synthetic_runoff_deactivated_movement_claim_accepts_qualified_zero(leg,
 
     result = evaluate(req)
 
-    adjustment = counterpart["value"]["value"] * (
-        1 if counterpart["direction"] == "asset" else -1
-    )
+    adjustment = counterpart["value"]["value"] * (1 if counterpart["direction"] == "asset" else -1)
     expected_equity = result["operating_value"]["value"] + adjustment
     assert result["operating_cash_flows"]["available"]
     assert result["operating_value"]["available"]
@@ -1027,9 +1025,7 @@ def test_synthetic_runoff_inactive_zero_boundary_claim_needs_no_bridge_item(leg)
 
     result = evaluate(req)
 
-    adjustment = counterpart["value"]["value"] * (
-        1 if counterpart["direction"] == "asset" else -1
-    )
+    adjustment = counterpart["value"]["value"] * (1 if counterpart["direction"] == "asset" else -1)
     expected_equity = result["operating_value"]["value"] + adjustment
     assert result["operating_cash_flows"]["available"]
     assert result["operating_value"]["available"]
@@ -1102,9 +1098,7 @@ def test_synthetic_runoff_outstanding_forecast_created_lot_still_refuses():
 
     result = evaluate(req)
     assert [row["fcff_operations"] for row in result["operating_cash_flows"]["value"]] == [20, 30]
-    assert result["explicit_pv"] == pytest.approx(
-        float(D(20) / D("1.1") + D(30) / D("1.1") ** 2)
-    )
+    assert result["explicit_pv"] == pytest.approx(float(D(20) / D("1.1") + D(30) / D("1.1") ** 2))
     assert result["operating_value"]["reason_codes"] == ["finite_runoff_incomplete"]
     assert result["operating_value"]["value"] is None
     assert result["common_equity"]["reason_codes"] == ["operating_value_unavailable"]

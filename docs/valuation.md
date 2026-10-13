@@ -388,15 +388,17 @@ may be no later than `j + ceil(life_years)`, retaining the supplied partial-peri
 allowance. Zero weights remain validated records but do not alter lifetime.
 Forecast cohort initial costs are aggregated by full asset-class identity and
 commissioning period and may not exceed that period's validated commissioned
-additions, including dated construction transfers. Partial asset-cost inventory
-is allowed; cohorts are not a compulsory vintage inventory. When cohorts are
-supplied, complete declared class-period depreciation coverage is still required:
-cohort depreciation must equal every matching aggregate asset-control depreciation
-leg, including classes without a supplied cohort. Pre-forecast cohorts retain
-valuation-boundary remaining-life semantics and are not charged to future
-additions. Every nonzero cohort class-period depreciation entry requires its
-matching asset-control depreciation leg; zero entries create no coverage
-obligation. There is no default life or builder. Noncash items
+additions, including dated construction transfers. A positive-cost cohort dated
+on or after the first forecast start must commission within a supplied period;
+a post-horizon date has no commissioning coverage and refuses. Zero-cost cohorts
+create no funding obligation. Partial asset-cost inventory is allowed; cohorts
+are not a compulsory vintage inventory. When cohorts are supplied, complete
+declared class-period depreciation coverage is still required: cohort depreciation
+must equal every matching aggregate asset-control depreciation leg, including
+classes without a supplied cohort. Pre-forecast cohorts retain valuation-boundary
+remaining-life semantics and are not charged to future additions. Every nonzero
+cohort class-period depreciation entry requires its matching asset-control
+depreciation leg; zero entries create no coverage obligation. There is no default life or builder. Noncash items
 distinguish asset impairments from other charges; recurring stock compensation
 has no automatic free-cash addback. Financing principal/interest are diagnostics,
 not FCFF.
@@ -496,10 +498,15 @@ operating cash rows, operating value, common equity and basic per-share. Optiona
 rate/tail/bridge/ownership refusal does not poison valid upstream cash rows.
 A bridge needs a dated same-currency complete category inventory, already-valued
 claim PVs or separately discounted boundary cash, and count-once event allocation.
-Known opening tax claims cannot be declared absent; restricted cash/obligation
-pairs must be excluded together. Missing material cash/consideration/deferred/
-pension/legal/noncommon claims withhold **equity and per-share**, not operating
-value. A missing basic count alone withholds per-share, not equity. Externally
+A `boundary_existing` tax lot needs explicit qualified bridge coverage if its
+opening amount is positive or any validated positive lot movement activates it,
+even if it is later settled, reversed or written off; a genuinely inactive zero
+lot needs no bridge item. A qualified zero value may cover an activated claim that
+was reversed or written off, but zero is never inferred. Missing coverage
+withholds **equity and per-share**, not operating value. Restricted
+cash/obligation pairs must be excluded together. Missing material
+cash/consideration/deferred/pension/legal/noncommon claims have the same scoped
+withholding. A missing basic count alone withholds per-share, not equity. Externally
 valued rights provide an exact, non-overlapping cover of noncommon bridge claims
 and are subtracted once with basic shares; exercise dilution and option pricing
 are unsupported. Negative equity is retained as nontradable, not floored.
