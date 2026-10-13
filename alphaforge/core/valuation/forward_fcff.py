@@ -211,6 +211,8 @@ def _lots(schedule, o):
             "remaining": amount,
             "remaining_by_period": {},
             "paid": 0.0,
+            "settled": 0.0,
+            "written_off": 0.0,
         }
     for lot in lots.values():
         for prerequisite in lot["record"]["prerequisites"]:
@@ -510,6 +512,10 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 "tax_lot_overallocated",
             )
             v["remaining"] = max(0.0, v["remaining"] - amount)
+            if kind == "writeoff":
+                v["written_off"] += amount
+            else:
+                v["settled"] += amount
             if kind == "payment":
                 v["paid"] += amount
                 if a["cash_date"] is not None:
@@ -1233,7 +1239,7 @@ def _tail(req, o, rows, lots, rate):
     )
 
 
-def _bridge(req, o, operating_value, rows, rate):
+def _bridge(req, o, operating_value, rows, lots, rate):
     b = req.get("bridge")
     if b is None:
         raise ContractError("bridge_material_claim_unresolved", "bridge")
@@ -1274,9 +1280,10 @@ def _bridge(req, o, operating_value, rows, rate):
         {cat["id"] for cat in categories} == set(BRIDGE_CATEGORIES), "bridge_inventory_incomplete"
     )
     boundary_lots = {
-        lot["id"]: lot
-        for lot in req["operating_schedule"]["tax_lots"]
-        if lot["origin"] == "boundary_existing" and number(lot["amount"]["value"]) > 0
+        identity: lot
+        for identity, lot in lots.items()
+        if lot["record"]["origin"] == "boundary_existing"
+        and (lot["amount"] > 0 or lot["remaining"] > 0 or lot["settled"] > 0)
     }
     cash_by_lot = {}
     boundary_records = {}
@@ -1292,7 +1299,7 @@ def _bridge(req, o, operating_value, rows, rate):
         amount = _amount(o, cash, "amount", True)
         if cash["lot_id"] is not None:
             _require(cash["lot_id"] in boundary_lots, "boundary_lot_origin_mismatch")
-            lot = boundary_lots[cash["lot_id"]]
+            lot = boundary_lots[cash["lot_id"]]["record"]
             _require(
                 cash["direction"] == ("obligation" if lot["leg"] == "payable" else "asset"),
                 "boundary_direction_mismatch",
@@ -1430,7 +1437,8 @@ def _bridge(req, o, operating_value, rows, rate):
         _require(bool(valued) or bool(scheduled), "bridge_material_claim_unresolved", identity)
         if valued:
             _require(
-                valued[0]["direction"] == ("obligation" if lot["leg"] == "payable" else "asset"),
+                valued[0]["direction"]
+                == ("obligation" if lot["record"]["leg"] == "payable" else "asset"),
                 "boundary_direction_mismatch",
             )
         else:
@@ -1458,7 +1466,7 @@ def _bridge(req, o, operating_value, rows, rate):
                 recovered += cash_amount
             reconcile(
                 recovered + written_off,
-                number(lot["amount"]["value"]),
+                lot["settled"] + lot["written_off"] + lot["remaining"],
                 "boundary_cash_completeness_mismatch",
                 identity,
             )
@@ -1697,7 +1705,7 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             "common_equity",
             "bridge_material_claim_unresolved",
         )
-        equity, boundary_pv = _bridge(req, o, value, rows, r)
+        equity, boundary_pv = _bridge(req, o, value, rows, lots, r)
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(
             equity, conditions=conditions, limitations=req["limitations"]

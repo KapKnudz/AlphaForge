@@ -792,6 +792,131 @@ def outstanding_boundary_payable_request():
     return req, f
 
 
+def movement_created_boundary_payable_request(*, settle=False):
+    req, f = boundary_request()
+    payable_lot = req["operating_schedule"]["tax_lots"][0]
+    payable_lot["amount"] = f.operand(0)
+    first, second = req["operating_schedule"]["periods"]
+    first_ledger = first["tax_ledgers"][0]
+    first_ledger["allocations"] = [
+        allocation
+        for allocation in first_ledger["allocations"]
+        if allocation["lot_id"] != "opening-payable"
+    ]
+    first_ledger["payable_open"] = f.operand(0)
+    first_ledger["payable_close"] = f.operand(10)
+    first_ledger["payment"] = f.operand(0)
+    first_ledger["payable_other"] = [
+        {
+            "id": "boundary-payable-recognition",
+            "amount": f.operand(10),
+            "rationale": "Explicit synthetic boundary movement",
+        }
+    ]
+    first_ledger["lot_movements"] = [
+        {
+            "id": "boundary-payable-lot-recognition",
+            "lot_id": "opening-payable",
+            "amount": f.operand(10),
+            "rationale": "Allocate movement to the identified boundary lot",
+        }
+    ]
+    second_ledger = second["tax_ledgers"][0]
+    second_ledger["payable_open"] = f.operand(10)
+    second_ledger["payable_close"] = f.operand(0 if settle else 10)
+    second_ledger["payment"] = f.operand(10 if settle else 0)
+    if settle:
+        second_ledger["allocations"].append(
+            {
+                "id": "movement-payment-2",
+                "kind": "payment",
+                "lot_id": "opening-payable",
+                "amount": f.operand(10),
+                "cash_date": None,
+                "eligibility_order": {
+                    "rank": 2,
+                    "basis": "Explicit synthetic within-year sequence",
+                },
+            }
+        )
+    return req, f
+
+
+def boundary_refund_claim(req, f):
+    return claim(
+        req,
+        f,
+        "opening-refund",
+        "opening_current_tax",
+        float(D(20) / D("1.1") ** 2),
+        "asset",
+    )
+
+
+def test_synthetic_runoff_movement_created_claim_requires_bridge_coverage():
+    req, f = movement_created_boundary_payable_request()
+    complete_bridge(req, f, [boundary_refund_claim(req, f)])
+
+    result = evaluate(req)
+
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["reason_codes"] == ["bridge_material_claim_unresolved"]
+    assert result["common_equity"]["missing_inputs"] == ["opening-payable"]
+    assert result["per_share"]["reason_codes"] == ["common_equity_unavailable"]
+
+
+def test_synthetic_runoff_movement_created_claim_accepts_supplied_value():
+    req, f = movement_created_boundary_payable_request()
+    payable_pv = 4
+    refund = boundary_refund_claim(req, f)
+    complete_bridge(
+        req,
+        f,
+        [claim(req, f, "opening-payable", "opening_current_tax", payable_pv), refund],
+    )
+
+    result = evaluate(req)
+
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["value"] == pytest.approx(
+        result["operating_value"]["value"] - payable_pv + refund["value"]["value"]
+    )
+    assert result["per_share"]["available"]
+
+
+def test_synthetic_runoff_settled_movement_claim_retains_cash_history():
+    req, f = movement_created_boundary_payable_request(settle=True)
+    refund = boundary_refund_claim(req, f)
+    complete_bridge(req, f, [refund])
+
+    missing = evaluate(req)
+
+    assert missing["operating_value"]["available"]
+    assert missing["common_equity"]["reason_codes"] == ["bridge_material_claim_unresolved"]
+    scheduled = claim(req, f, "movement-payable-cash", "opening_current_tax", 10)
+    scheduled["location"] = "boundary_schedule"
+    scheduled["period_index"] = 2
+    complete_bridge(req, f, [refund, scheduled])
+    req["bridge"]["boundary_cash"] = [
+        {
+            "id": "movement-payable-cash",
+            "lot_id": "opening-payable",
+            "period_index": 2,
+            "direction": "obligation",
+            "amount": f.operand(10),
+            "claim_rate": f.operand(0.1),
+            "rationale": "Explicit synthetic movement-created payable cash",
+        }
+    ]
+
+    result = evaluate(req)
+    payable_pv = float(D(10) / D("1.1") ** 2)
+    assert result["common_equity"]["value"] == pytest.approx(
+        result["operating_value"]["value"] - payable_pv + refund["value"]["value"]
+    )
+    assert result["per_share"]["available"]
+
+
 def test_synthetic_runoff_outstanding_prevalued_opening_payable_bridges_once():
     req, f = outstanding_boundary_payable_request()
     payable_pv = 12  # Independently supplied hypothetical same-date PV, not carrying value.
