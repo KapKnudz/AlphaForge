@@ -212,7 +212,6 @@ def _lots(schedule, o):
             "remaining_by_period": {},
             "paid": 0.0,
             "settled": 0.0,
-            "written_off": 0.0,
         }
     for lot in lots.values():
         for prerequisite in lot["record"]["prerequisites"]:
@@ -512,9 +511,7 @@ def _tax(o, row, ebit, da, lots, prior, index, start, end):
                 "tax_lot_overallocated",
             )
             v["remaining"] = max(0.0, v["remaining"] - amount)
-            if kind == "writeoff":
-                v["written_off"] += amount
-            else:
+            if kind != "writeoff":
                 v["settled"] += amount
             if kind == "payment":
                 v["paid"] += amount
@@ -1466,7 +1463,7 @@ def _bridge(req, o, operating_value, rows, lots, rate):
                 recovered += cash_amount
             reconcile(
                 recovered + written_off,
-                lot["settled"] + lot["written_off"] + lot["remaining"],
+                lot["settled"] + written_off + lot["remaining"],
                 "boundary_cash_completeness_mismatch",
                 identity,
             )
