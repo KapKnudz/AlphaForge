@@ -760,6 +760,122 @@ def boundary_request():
     return req, f
 
 
+def outstanding_boundary_payable_request():
+    """SYNTHETIC-only variant: opening payable survives the operating runoff."""
+    req, f = boundary_request()
+    for row in req["operating_schedule"]["periods"]:
+        ledger = row["tax_ledgers"][0]
+        ledger["allocations"] = [
+            allocation
+            for allocation in ledger["allocations"]
+            if allocation["lot_id"] != "opening-payable"
+        ]
+        ledger["payable_open"] = f.operand(40)
+        ledger["payable_close"] = f.operand(40)
+        ledger["payment"] = f.operand(0)
+    return req, f
+
+
+def test_synthetic_runoff_outstanding_prevalued_opening_payable_bridges_once():
+    req, f = outstanding_boundary_payable_request()
+    payable_pv = 12  # Independently supplied hypothetical same-date PV, not carrying value.
+    refund_pv = float(D(20) / D("1.1") ** 2)
+    complete_bridge(
+        req,
+        f,
+        [
+            claim(req, f, "opening-payable", "opening_current_tax", payable_pv),
+            claim(req, f, "opening-refund", "opening_current_tax", refund_pv, "asset"),
+        ],
+    )
+
+    result = evaluate(req)
+    expected_operations = float(D(20) / D("1.1") + D(30) / D("1.1") ** 2)
+    rows = result["operating_cash_flows"]["value"]
+    assert [row["fcff_operations"] for row in rows] == [20, 30]
+    assert [row["fcff_with_boundary_tax"] for row in rows] == [20, 50]
+    assert result["explicit_pv"] == pytest.approx(expected_operations)
+    assert result["operating_value"]["value"] == pytest.approx(expected_operations)
+    expected_equity = expected_operations - payable_pv + refund_pv
+    assert result["common_equity"]["value"] == pytest.approx(expected_equity)
+    assert result["per_share"]["value"] == pytest.approx(expected_equity / 100)
+
+
+def test_synthetic_runoff_uncovered_opening_claim_withholds_only_equity():
+    req, f = outstanding_boundary_payable_request()
+    complete_bridge(
+        req,
+        f,
+        [
+            claim(
+                req,
+                f,
+                "opening-refund",
+                "opening_current_tax",
+                float(D(20) / D("1.1") ** 2),
+                "asset",
+            )
+        ],
+    )
+
+    result = evaluate(req)
+    expected_operations = float(D(20) / D("1.1") + D(30) / D("1.1") ** 2)
+    assert [row["fcff_operations"] for row in result["operating_cash_flows"]["value"]] == [20, 30]
+    assert result["explicit_pv"] == pytest.approx(expected_operations)
+    assert result["operating_value"]["value"] == pytest.approx(expected_operations)
+    assert result["common_equity"]["reason_codes"] == ["bridge_material_claim_unresolved"]
+    assert result["common_equity"]["value"] is None
+    assert result["per_share"]["reason_codes"] == ["common_equity_unavailable"]
+    assert result["per_share"]["value"] is None
+
+
+def test_synthetic_runoff_outstanding_forecast_created_lot_still_refuses():
+    req, f = outstanding_boundary_payable_request()
+    first = req["operating_schedule"]["periods"][0]
+    lot = req["operating_schedule"]["tax_lots"][0]
+    lot["origin"] = "forecast_created"
+    lot["source_period"] = 1
+    lot["accounting_date"] = first["end"]
+    first["tax_ledgers"][0]["payable_open"] = f.operand(0)
+    first["tax_ledgers"][0]["arising"] = f.operand(40)
+
+    result = evaluate(req)
+    assert [row["fcff_operations"] for row in result["operating_cash_flows"]["value"]] == [20, 30]
+    assert result["explicit_pv"] == pytest.approx(
+        float(D(20) / D("1.1") + D(30) / D("1.1") ** 2)
+    )
+    assert result["operating_value"]["reason_codes"] == ["finite_runoff_incomplete"]
+    assert result["operating_value"]["value"] is None
+    assert result["common_equity"]["reason_codes"] == ["operating_value_unavailable"]
+    assert result["per_share"]["reason_codes"] == ["operating_value_unavailable"]
+
+
+def test_synthetic_runoff_fully_settled_boundary_counterpart_preserves_value():
+    req, f = boundary_request()
+    payable_pv = float(D(40) / D("1.1"))
+    refund_pv = float(D(20) / D("1.1") ** 2)
+    complete_bridge(
+        req,
+        f,
+        [
+            claim(req, f, "opening-payable", "opening_current_tax", payable_pv),
+            claim(req, f, "opening-refund", "opening_current_tax", refund_pv, "asset"),
+        ],
+    )
+
+    result = evaluate(req)
+    expected_operations = float(D(20) / D("1.1") + D(30) / D("1.1") ** 2)
+    rows = result["operating_cash_flows"]["value"]
+    assert [row["fcff_operations"] for row in rows] == [20, 30]
+    assert [row["fcff_with_boundary_tax"] for row in rows] == [-20, 50]
+    assert result["explicit_pv"] == pytest.approx(expected_operations)
+    assert result["operating_value"]["value"] == pytest.approx(expected_operations)
+    assert result["boundary_tax_pv"] == pytest.approx(payable_pv - refund_pv)
+    expected_equity = expected_operations - payable_pv + refund_pv
+    assert result["common_equity"]["value"] == pytest.approx(expected_equity)
+    assert result["per_share"]["value"] == pytest.approx(expected_equity / 100)
+
+
 def test_tax_lot_origin_period_and_boundary_date_are_bidirectional():
     forecast, _ = request()
     assert evaluate(forecast)["operating_cash_flows"]["available"]

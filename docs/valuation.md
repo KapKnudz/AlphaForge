@@ -388,10 +388,13 @@ may be no later than `j + ceil(life_years)`, retaining the supplied partial-peri
 allowance. Zero weights remain validated records but do not alter lifetime.
 Forecast cohort initial costs are aggregated by full asset-class identity and
 commissioning period and may not exceed that period's validated commissioned
-additions, including dated construction transfers. Cohorts may cover only part of
-an aggregate class; they are not a compulsory vintage inventory. Pre-forecast
-cohorts retain valuation-boundary remaining-life semantics and are not charged to
-future additions. Every nonzero class-period depreciation entry requires its
+additions, including dated construction transfers. Partial asset-cost inventory
+is allowed; cohorts are not a compulsory vintage inventory. When cohorts are
+supplied, complete declared class-period depreciation coverage is still required:
+cohort depreciation must equal every matching aggregate asset-control depreciation
+leg, including classes without a supplied cohort. Pre-forecast cohorts retain
+valuation-boundary remaining-life semantics and are not charged to future
+additions. Every nonzero cohort class-period depreciation entry requires its
 matching asset-control depreciation leg; zero entries create no coverage
 obligation. There is no default life or builder. Noncash items
 distinguish asset impairments from other charges; recurring stock compensation

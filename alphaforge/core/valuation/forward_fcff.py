@@ -960,8 +960,14 @@ def _tail(req, o, rows, lots, rate):
         _require(horizon == len(rows) and t["residual_zero"] is True, "finite_runoff_incomplete")
         text(t["rationale"])
         last = rows[-1]
+        # Opening tax claims are valued separately by the equity bridge, not operating runoff.
         _require(
-            last["legs"]["wc_close"] == 0 and all(v["remaining"] == 0 for v in lots.values()),
+            last["legs"]["wc_close"] == 0
+            and all(
+                v["remaining"] == 0
+                for v in lots.values()
+                if v["record"]["origin"] == "forecast_created"
+            ),
             "finite_runoff_incomplete",
         )
         for k, v in last["legs"].items():
