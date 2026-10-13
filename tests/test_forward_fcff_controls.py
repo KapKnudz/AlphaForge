@@ -792,45 +792,62 @@ def outstanding_boundary_payable_request():
     return req, f
 
 
-def movement_created_boundary_payable_request(*, settle=False):
+def movement_created_boundary_claim_request(*, leg="payable", state="outstanding"):
+    assert leg in {"payable", "refund"}
+    assert state in {"inactive", "outstanding", "payment", "reversal", "writeoff"}
+    assert state != "payment" or leg == "payable"
+    assert state != "writeoff" or leg == "refund"
     req, f = boundary_request()
-    payable_lot = req["operating_schedule"]["tax_lots"][0]
-    payable_lot["amount"] = f.operand(0)
+    lot_id = "opening-" + leg
+    lot = next(lot for lot in req["operating_schedule"]["tax_lots"] if lot["id"] == lot_id)
+    lot["amount"] = f.operand(0)
     first, second = req["operating_schedule"]["periods"]
+    open_field = "payable_open" if leg == "payable" else "receivable_open"
+    close_field = "payable_close" if leg == "payable" else "receivable_close"
+    cash_field = "payment" if leg == "payable" else "refund"
+    other_field = "payable_other" if leg == "payable" else "receivable_other"
+    for row in (first, second):
+        ledger = row["tax_ledgers"][0]
+        ledger["allocations"] = [
+            allocation for allocation in ledger["allocations"] if allocation["lot_id"] != lot_id
+        ]
+        ledger[open_field] = f.operand(0)
+        ledger[close_field] = f.operand(0)
+        ledger[cash_field] = f.operand(0)
+        ledger[other_field] = []
+    if leg == "refund":
+        first["tax_ledgers"][0]["writeoff"] = f.operand(0)
+    if state == "inactive":
+        return req, f
+
     first_ledger = first["tax_ledgers"][0]
-    first_ledger["allocations"] = [
-        allocation
-        for allocation in first_ledger["allocations"]
-        if allocation["lot_id"] != "opening-payable"
-    ]
-    first_ledger["payable_open"] = f.operand(0)
-    first_ledger["payable_close"] = f.operand(10)
-    first_ledger["payment"] = f.operand(0)
-    first_ledger["payable_other"] = [
+    second_ledger = second["tax_ledgers"][0]
+    first_ledger[other_field] = [
         {
-            "id": "boundary-payable-recognition",
+            "id": f"boundary-{leg}-recognition",
             "amount": f.operand(10),
             "rationale": "Explicit synthetic boundary movement",
         }
     ]
     first_ledger["lot_movements"] = [
         {
-            "id": "boundary-payable-lot-recognition",
-            "lot_id": "opening-payable",
+            "id": f"boundary-{leg}-lot-recognition",
+            "lot_id": lot_id,
             "amount": f.operand(10),
             "rationale": "Allocate movement to the identified boundary lot",
         }
     ]
-    second_ledger = second["tax_ledgers"][0]
-    second_ledger["payable_open"] = f.operand(10)
-    second_ledger["payable_close"] = f.operand(0 if settle else 10)
-    second_ledger["payment"] = f.operand(10 if settle else 0)
-    if settle:
+    first_ledger[close_field] = f.operand(10)
+    second_ledger[open_field] = f.operand(10)
+    second_ledger[close_field] = f.operand(10)
+    if state == "payment":
+        second_ledger[close_field] = f.operand(0)
+        second_ledger[cash_field] = f.operand(10)
         second_ledger["allocations"].append(
             {
                 "id": "movement-payment-2",
                 "kind": "payment",
-                "lot_id": "opening-payable",
+                "lot_id": lot_id,
                 "amount": f.operand(10),
                 "cash_date": None,
                 "eligibility_order": {
@@ -839,6 +856,41 @@ def movement_created_boundary_payable_request(*, settle=False):
                 },
             }
         )
+    elif state == "reversal":
+        second_ledger[close_field] = f.operand(0)
+        second_ledger[other_field] = [
+            {
+                "id": f"boundary-{leg}-reversal",
+                "amount": f.operand(-10),
+                "rationale": "Explicit synthetic boundary movement reversal",
+            }
+        ]
+        second_ledger["lot_movements"] = [
+            {
+                "id": f"boundary-{leg}-lot-reversal",
+                "lot_id": lot_id,
+                "amount": f.operand(-10),
+                "rationale": "Allocate reversal to the identified boundary lot",
+            }
+        ]
+    elif state == "writeoff":
+        first_ledger[close_field] = f.operand(0)
+        first_ledger["writeoff"] = f.operand(10)
+        first_ledger["allocations"].append(
+            {
+                "id": "movement-writeoff-1",
+                "kind": "writeoff",
+                "lot_id": lot_id,
+                "amount": f.operand(10),
+                "cash_date": None,
+                "eligibility_order": {
+                    "rank": 2,
+                    "basis": "Explicit synthetic within-year sequence",
+                },
+            }
+        )
+        second_ledger[open_field] = f.operand(0)
+        second_ledger[close_field] = f.operand(0)
     return req, f
 
 
@@ -853,8 +905,20 @@ def boundary_refund_claim(req, f):
     )
 
 
+def boundary_counterpart_claim(req, f, leg):
+    if leg == "payable":
+        return boundary_refund_claim(req, f)
+    return claim(
+        req,
+        f,
+        "opening-payable",
+        "opening_current_tax",
+        float(D(40) / D("1.1")),
+    )
+
+
 def test_synthetic_runoff_movement_created_claim_requires_bridge_coverage():
-    req, f = movement_created_boundary_payable_request()
+    req, f = movement_created_boundary_claim_request()
     complete_bridge(req, f, [boundary_refund_claim(req, f)])
 
     result = evaluate(req)
@@ -866,7 +930,7 @@ def test_synthetic_runoff_movement_created_claim_requires_bridge_coverage():
 
 
 def test_synthetic_runoff_movement_created_claim_accepts_supplied_value():
-    req, f = movement_created_boundary_payable_request()
+    req, f = movement_created_boundary_claim_request()
     payable_pv = 4
     refund = boundary_refund_claim(req, f)
     complete_bridge(
@@ -885,7 +949,7 @@ def test_synthetic_runoff_movement_created_claim_accepts_supplied_value():
 
 
 def test_synthetic_runoff_settled_movement_claim_retains_cash_history():
-    req, f = movement_created_boundary_payable_request(settle=True)
+    req, f = movement_created_boundary_claim_request(state="payment")
     refund = boundary_refund_claim(req, f)
     complete_bridge(req, f, [refund])
 
@@ -915,6 +979,62 @@ def test_synthetic_runoff_settled_movement_claim_retains_cash_history():
         result["operating_value"]["value"] - payable_pv + refund["value"]["value"]
     )
     assert result["per_share"]["available"]
+
+
+@pytest.mark.parametrize(("leg", "state"), (("payable", "reversal"), ("refund", "writeoff")))
+def test_synthetic_runoff_deactivated_movement_claim_requires_bridge_coverage(leg, state):
+    req, f = movement_created_boundary_claim_request(leg=leg, state=state)
+    complete_bridge(req, f, [boundary_counterpart_claim(req, f, leg)])
+
+    result = evaluate(req)
+
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["status"] == "insufficient_evidence"
+    assert result["common_equity"]["reason_codes"] == ["bridge_material_claim_unresolved"]
+    assert result["common_equity"]["missing_inputs"] == ["opening-" + leg]
+    assert result["common_equity"]["value"] is None
+    assert result["per_share"]["status"] == "insufficient_evidence"
+    assert result["per_share"]["reason_codes"] == ["common_equity_unavailable"]
+    assert result["per_share"]["value"] is None
+
+
+@pytest.mark.parametrize(("leg", "state"), (("payable", "reversal"), ("refund", "writeoff")))
+def test_synthetic_runoff_deactivated_movement_claim_accepts_qualified_zero(leg, state):
+    req, f = movement_created_boundary_claim_request(leg=leg, state=state)
+    counterpart = boundary_counterpart_claim(req, f, leg)
+    direction = "obligation" if leg == "payable" else "asset"
+    qualified_zero = claim(req, f, "opening-" + leg, "opening_current_tax", 0, direction)
+    complete_bridge(req, f, [counterpart, qualified_zero])
+
+    result = evaluate(req)
+
+    adjustment = counterpart["value"]["value"] * (
+        1 if counterpart["direction"] == "asset" else -1
+    )
+    expected_equity = result["operating_value"]["value"] + adjustment
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["value"] == pytest.approx(expected_equity)
+    assert result["per_share"]["value"] == pytest.approx(expected_equity / 100)
+
+
+@pytest.mark.parametrize("leg", ("payable", "refund"))
+def test_synthetic_runoff_inactive_zero_boundary_claim_needs_no_bridge_item(leg):
+    req, f = movement_created_boundary_claim_request(leg=leg, state="inactive")
+    counterpart = boundary_counterpart_claim(req, f, leg)
+    complete_bridge(req, f, [counterpart])
+
+    result = evaluate(req)
+
+    adjustment = counterpart["value"]["value"] * (
+        1 if counterpart["direction"] == "asset" else -1
+    )
+    expected_equity = result["operating_value"]["value"] + adjustment
+    assert result["operating_cash_flows"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["common_equity"]["value"] == pytest.approx(expected_equity)
+    assert result["per_share"]["value"] == pytest.approx(expected_equity / 100)
 
 
 def test_synthetic_runoff_outstanding_prevalued_opening_payable_bridges_once():

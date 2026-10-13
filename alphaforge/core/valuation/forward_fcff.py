@@ -931,7 +931,15 @@ def _schedule(req, o):
             "tax_lot_unconsumed_source",
         )
     _cohorts(s, o, result, commissioned_by_period)
-    return result, lots
+    activated_boundary_lots = {
+        movement["lot_id"]
+        for row in periods
+        for ledger in row["tax_ledgers"]
+        for movement in ledger.get("lot_movements", [])
+        if number(movement["amount"]["value"]) > 0
+        and lots[movement["lot_id"]]["record"]["origin"] == "boundary_existing"
+    }
+    return result, lots, activated_boundary_lots
 
 
 def _discount(req, o):
@@ -1236,7 +1244,7 @@ def _tail(req, o, rows, lots, rate):
     )
 
 
-def _bridge(req, o, operating_value, rows, lots, rate):
+def _bridge(req, o, operating_value, rows, lots, activated_boundary_lots, rate):
     b = req.get("bridge")
     if b is None:
         raise ContractError("bridge_material_claim_unresolved", "bridge")
@@ -1280,7 +1288,12 @@ def _bridge(req, o, operating_value, rows, lots, rate):
         identity: lot
         for identity, lot in lots.items()
         if lot["record"]["origin"] == "boundary_existing"
-        and (lot["amount"] > 0 or lot["remaining"] > 0 or lot["settled"] > 0)
+        and (
+            lot["amount"] > 0
+            or lot["remaining"] > 0
+            or lot["settled"] > 0
+            or identity in activated_boundary_lots
+        )
     }
     cash_by_lot = {}
     boundary_records = {}
@@ -1583,7 +1596,7 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
                 )
             }
         )
-        rows, lots = _schedule(req, o)
+        rows, lots, activated_boundary_lots = _schedule(req, o)
         _require_no_material_limitation(
             req,
             "operating_cash_flows",
@@ -1702,7 +1715,9 @@ def evaluate(request: FrozenRequest | dict | str) -> dict:
             "common_equity",
             "bridge_material_claim_unresolved",
         )
-        equity, boundary_pv = _bridge(req, o, value, rows, lots, r)
+        equity, boundary_pv = _bridge(
+            req, o, value, rows, lots, activated_boundary_lots, r
+        )
         _require(math.isfinite(equity), "nonfinite_derived_value")
         result["common_equity"] = output(
             equity, conditions=conditions, limitations=req["limitations"]
