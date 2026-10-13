@@ -749,6 +749,7 @@ def test_rule_scope_conversion_and_sampling_changes_are_identity_bound(monkeypat
             assert digest(rules_bundle()["growth_domain"]) != digest(original)
 
 
+@pytest.mark.integration
 def test_private_authentic_snapshot_remains_unavailable():
     snapshot = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_SNAPSHOT")
     cutoff = os.environ.get("ALPHAFORGE_AUTHENTIC_DCF_AS_OF")
