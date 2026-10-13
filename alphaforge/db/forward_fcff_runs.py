@@ -57,10 +57,10 @@ def rules_bundle():
 
 
 def execute(conn, request: FrozenRequest):
-    # Separate retained textual body, bound by hash inside the numerical request.
+    # Retain the complete frozen request before evaluation; outputs also bind context.
     request = freeze(request.body)
     full = request.unpack()
-    context = full.pop("evidence_context")
+    context = full["evidence_context"]
     body = {"encoding": ENCODING, "request": full, "context_hash": digest(context)}
     rules = rules_bundle()
     identity, financial_hash = retain_inputs(conn, body, rules)  # commits before evaluate
@@ -131,6 +131,10 @@ def replay(conn, run_id):
             digest(context) != text_hash
             or text_hash != body["context_hash"]
             or canonical(context) != text_body
+            or (
+                "evidence_context" in body["request"]
+                and canonical(body["request"]["evidence_context"]) != text_body
+            )
         ):
             raise ReplayRefusal("invalid_textual_context")
         if digest(original) != outputs_hash or canonical(original) != outputs_body:
