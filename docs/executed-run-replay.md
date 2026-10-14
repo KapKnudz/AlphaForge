@@ -167,15 +167,18 @@ retained rows.
 
 `freeze` canonicalizes JSON keys and ID-keyed economic arrays; annual periods
 remain ordered. Catalog hashes are verified against supplied bodies before
-canonical source ordering is normalized. The numerical body includes the selected
-request and retained textual-context digest; catalog bodies/anchors stay in the
-separate context column. Both are integrity-bound. Identity excludes filesystem
+canonical source ordering is normalized. The numerical body includes the
+complete frozen request, including catalog bodies/anchors, and its textual-context
+digest. Completed runs also retain the separate context column; both copies are
+integrity-bound and must agree. Identity excludes filesystem
 paths and collection wall time, but includes actually consumed preparation,
 publication/review facts and limitations. Rules pin schema/method/economic/control
 versions, executing sources and retention/CLI/schema helpers, Git revision and
 Python/SQLite runtime. No live source/company lookup occurs during replay.
 
-Input retention **commits before evaluation**. Canonical output and its hash
+Complete request and evidence-context retention **commits before evaluation**.
+This applies to new inputs only; historical digest-only records remain unchanged
+and are not backfilled with invented source bodies. Canonical output and its hash
 commit before filesystem publication. Output-retention failure leaves at most
 an unused input body, no consumable research run. Triggers prohibit update,
 delete and replacement. Replay verifies all retained bodies/context/output hashes,
