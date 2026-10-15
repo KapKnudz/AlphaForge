@@ -2,15 +2,27 @@
 
 import copy
 import csv
+import hashlib
 import json
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 
+from alphaforge.cli.estimated_forward import (
+    SOURCE_PATHS as EXPORT_SOURCE_PATHS,
+    _code_sources,
+)
 from alphaforge.cli.main import build_parser
 from alphaforge.core.valuation.estimated_fcff import evaluate
-from alphaforge.core.valuation.estimated_inputs import LABEL, content_identity, revise
+from alphaforge.core.valuation.estimated_inputs import LABEL, canonical, content_identity, revise
 from tests.estimated_fixtures import block, pack, response
+from tools.check_estimated_forward_acceptance import (
+    SOURCE_PATHS as ACCEPTANCE_SOURCE_PATHS,
+    AcceptanceError,
+    _code_identity,
+    compare_outputs,
+)
 
 
 def base(p):
@@ -84,6 +96,81 @@ def test_operating_gap_retains_unaffected_years_and_tail_gap_preserves_explicit(
     assert r["explicit_pv"]["available"] and not r["operating_value"]["available"]
 
 
+@pytest.mark.parametrize(
+    "value,status,code",
+    [
+        (None, "insufficient_evidence", "missing_operand"),
+        ("abc", "invalid_input", "invalid_number"),
+    ],
+)
+def test_first_ten_row_refusal_preserves_root_status_and_reason(value, status, code):
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"][2]["operating_cash_tax"] = value
+    result = base(p)
+    expected = [{"code": code, "path": "annual.3.operating_cash_tax"}]
+    assert result["annual_fcff"]["status"] == status
+    assert result["annual_fcff"]["reasons"] == expected
+    assert result["annual_fcff"]["value"][2]["reasons"] == expected
+    for output in ("explicit_pv", "terminal", "operating_value", "common_equity"):
+        assert result[output]["status"] == status
+        assert result[output]["reasons"] == expected
+
+
+def test_unsupported_row_refusal_is_not_collapsed_by_consumers():
+    p = pack()
+    p["records"]["unsupported-row"] = {
+        **copy.deepcopy(p["records"]["budget"]),
+        "status": "unsupported",
+    }
+    p["scenarios"]["base"]["operations"]["rows"][2]["record_ids"] = ["unsupported-row"]
+    result = base(p)
+    expected = [{"code": "unqualified_record", "path": "unsupported-row"}]
+    assert result["annual_fcff"]["status"] == "unsupported"
+    assert result["annual_fcff"]["reasons"] == expected
+    assert result["operating_value"]["status"] == "unsupported"
+    assert result["operating_value"]["reasons"] == expected
+
+
+def test_annual_refusal_summary_is_chronological_and_structural_failures_are_distinct():
+    p = pack()
+    rows = p["scenarios"]["base"]["operations"]["rows"]
+    rows[2]["operating_cash_tax"] = None
+    rows[3]["operating_cash_tax"] = "abc"
+    result = base(p)["annual_fcff"]
+    assert result["status"] == "insufficient_evidence"
+    assert result["reasons"] == [{"code": "missing_operand", "path": "annual.3.operating_cash_tax"}]
+    assert not result["value"][2]["available"] and not result["value"][3]["available"]
+
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"] = p["scenarios"]["base"]["operations"]["rows"][:9]
+    structural = base(p)["annual_fcff"]
+    assert structural["status"] == "invalid_input"
+    assert structural["reasons"] == [{"code": "ten_full_years_required", "path": ""}]
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"] = {}
+    assert base(p)["annual_fcff"]["reasons"] == [{"code": "invalid_annual_rows", "path": ""}]
+
+
+@pytest.mark.parametrize("index", [10, 11])
+@pytest.mark.parametrize(
+    "value,status,code",
+    [
+        (None, "insufficient_evidence", "missing_operand"),
+        ("abc", "invalid_input", "invalid_number"),
+    ],
+)
+def test_terminal_witness_refusal_preserves_root_and_explicit_pv(index, value, status, code):
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"][index]["operating_cash_tax"] = value
+    result = base(p)
+    expected = [{"code": code, "path": f"annual.{index + 1}.operating_cash_tax"}]
+    assert result["annual_fcff"]["available"]
+    assert result["explicit_pv"]["available"]
+    assert result["terminal"]["status"] == status and result["terminal"]["reasons"] == expected
+    assert result["operating_value"]["status"] == status
+    assert result["operating_value"]["reasons"] == expected
+
+
 @pytest.mark.parametrize("bad", ["0", "-0.1"])
 def test_invalid_rate_preserves_cash(bad):
     p = pack()
@@ -104,6 +191,84 @@ def test_gordon_strict_pole_and_not_final_row_shortcut():
     p = pack()
     p["scenarios"]["base"]["operations"]["rows"][11]["cash_investment"] = "7"
     assert not base(p)["operating_value"]["available"]
+
+
+def test_zero_cash_response_requires_revenue_growth_to_match_gordon_growth():
+    p = response()
+    inputs = p["scenarios"]["base"]["operations"]["inputs"]
+    inputs.update(
+        initial_growth=".05",
+        terminal_growth=".05",
+        margin_first="0",
+        margin_terminal="0",
+        da_first="0",
+        da_terminal="0",
+        cash_renewal_rate="0",
+        cash_growth_capital="0",
+        lease_renewal_rate="0",
+        lease_growth_capital="0",
+        wc_ratio="0",
+        opening_wc="0",
+        refundable_profit_share="0",
+        ordinary_tax_rate="0",
+    )
+    p["scenarios"]["base"]["terminal"]["growth"] = ".02"
+    mismatch = base(p)
+    assert mismatch["explicit_pv"]["available"]
+    assert mismatch["terminal"]["reasons"] == [
+        {"code": "terminal_growth_mismatch", "path": "terminal.growth"}
+    ]
+    p["scenarios"]["base"]["terminal"]["growth"] = ".05"
+    assert base(p)["terminal"]["available"]
+
+
+def test_direct_terminal_drivers_are_optional_but_coherent_when_retained():
+    assert base(pack())["terminal"]["available"]
+
+    p = pack()
+    rows = p["scenarios"]["base"]["operations"]["rows"]
+    rows[10]["growth"] = "0.00"
+    rows[11]["growth"] = "0"
+    rows[10]["revenue"] = "100"
+    rows[11]["revenue"] = "100.000000019"
+    assert base(p)["terminal"]["available"]
+
+    rows[11]["growth"] = ".01"
+    assert base(p)["terminal"]["reasons"] == [
+        {"code": "terminal_growth_mismatch", "path": "terminal.growth"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "first,second,status,code",
+    [
+        ("100", None, "insufficient_evidence", "terminal_revenue_pair_required"),
+        (None, None, "insufficient_evidence", "missing_operand"),
+        ("abc", "100", "invalid_input", "invalid_number"),
+        ("100", "101", "invalid_input", "reconciliation_failed"),
+    ],
+)
+def test_direct_terminal_revenue_refusals_are_typed(first, second, status, code):
+    p = pack()
+    rows = p["scenarios"]["base"]["operations"]["rows"]
+    rows[10]["revenue"] = first
+    if code != "terminal_revenue_pair_required":
+        rows[11]["revenue"] = second
+    result = base(p)["terminal"]
+    assert result["status"] == status
+    assert result["reasons"] == [{"code": code, "path": "terminal.revenue"}]
+
+
+def test_direct_terminal_growth_null_and_malformed_keep_typed_status():
+    for value, status, code in (
+        (None, "insufficient_evidence", "missing_operand"),
+        ("abc", "invalid_input", "invalid_number"),
+    ):
+        p = pack()
+        p["scenarios"]["base"]["operations"]["rows"][10]["growth"] = value
+        result = base(p)["terminal"]
+        assert result["status"] == status
+        assert result["reasons"] == [{"code": code, "path": "terminal.growth"}]
 
 
 def test_loss_has_no_automatic_refund_but_opening_recovery_survives():
@@ -238,6 +403,49 @@ def test_every_registered_allocation_is_consumed_once_by_its_destination():
     assert base(p)["common_equity"]["available"]
 
 
+def test_earnings_linked_bridge_preserves_consumed_row_refusal_scope():
+    def earnings_linked(p):
+        item = next(
+            x for x in p["scenarios"]["base"]["bridge"]["items"] if x["category"] == "legal_other"
+        )
+        item.update(
+            method="earnings_linked_pv",
+            inputs={
+                "recurring_baseline_ebit": "20",
+                "current_pv_anchor": "1",
+                "later_pv_anchor": "0",
+            },
+        )
+
+    p = pack()
+    earnings_linked(p)
+    p["scenarios"]["base"]["operations"]["rows"][2]["ebit"] = "abc"
+    result = base(p)
+    expected = [{"code": "invalid_number", "path": "annual.3.ebit"}]
+    assert result["bridge"]["status"] == "invalid_input"
+    assert result["bridge"]["reasons"] == expected
+
+    p = pack()
+    earnings_linked(p)
+    p["records"]["unsupported-earnings"] = {
+        **copy.deepcopy(p["records"]["budget"]),
+        "status": "unsupported",
+    }
+    p["scenarios"]["base"]["operations"]["rows"][2]["record_ids"] = ["unsupported-earnings"]
+    result = base(p)["bridge"]
+    assert result["status"] == "unsupported"
+    assert result["reasons"] == [{"code": "unqualified_record", "path": "unsupported-earnings"}]
+
+    p = pack()
+    earnings_linked(p)
+    p["scenarios"]["base"]["operations"]["rows"][5]["ebit"] = "abc"
+    assert base(p)["bridge"]["available"]
+
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"][2]["ebit"] = "abc"
+    assert base(p)["bridge"]["available"]
+
+
 def test_negative_residual_is_not_tradable_or_floored():
     p = pack()
     item = next(
@@ -321,6 +529,54 @@ def test_parented_override_recalculates_and_invalidates_review_without_mutation(
     assert number(base(p)["per_share_quote"], "price_estimate") == pytest.approx(D(31))
 
 
+def test_revision_diff_distinguishes_missing_from_explicit_null():
+    p = pack()
+    scenarios = copy.deepcopy(p["scenarios"])
+    scenarios["base"]["rights"]["fx_date"] = None
+    added = revise(
+        p,
+        version="synthetic-null-added",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Retain explicit null",
+        changes={"scenarios": scenarios},
+    )
+    addition = next(
+        item for item in added["revision"]["changed_inputs"] if item["path"].endswith("fx_date")
+    )
+    assert addition == {
+        "path": "scenarios.base.rights.fx_date",
+        "before": None,
+        "after": None,
+        "before_present": False,
+        "after_present": True,
+    }
+
+    original = copy.deepcopy(added)
+    original.pop("revision")
+    original["pack_version"] = "synthetic-null-parent"
+    original["parent"] = None
+    original["prepared_by"] = "Synthetic preparer"
+    original["prepared_on"] = "2024-03-17"
+    scenarios = copy.deepcopy(original["scenarios"])
+    del scenarios["base"]["rights"]["fx_date"]
+    removed = revise(
+        original,
+        version="synthetic-null-removed",
+        author="Synthetic override",
+        prepared_on="2024-03-18",
+        reason="Remove explicit null",
+        changes={"scenarios": scenarios},
+    )
+    removal = next(
+        item for item in removed["revision"]["changed_inputs"] if item["path"].endswith("fx_date")
+    )
+    assert removal["before_present"] and not removal["after_present"]
+    assert removal["before"] is None and removal["after"] is None
+    assert not base(original)["common_equity"]["available"]
+    assert base(removed)["common_equity"]["available"]
+
+
 def test_source_anchor_and_limitation_scope():
     p = pack()
     p["limitations"].append(
@@ -370,16 +626,32 @@ def test_real_cli_detached_exports_are_self_describing_and_write_once(tmp_path, 
     )
     assert args.func(args) == 0
     directory = json.loads(capsys.readouterr().out)["export_directory"]
-    from pathlib import Path
-
     root = Path(directory)
     detached = json.loads((root / "base-per_share_quote.json").read_text())
     assert detached["identity"]["label"] == LABEL
     assert detached["assumption_pack"] == pack()
     assert detached["identity"]["human_status"] == "not_implementation_accepted"
+    combined = json.loads((root / "outputs.json").read_text())
+    context = {key: combined[key] for key in ("identity", "assumption_pack", "execution")}
+    assert all(detached[key] == value for key, value in context.items())
+    assert detached["scenario"] == "base"
+    assert detached["output"] == "per_share_quote"
+    selected = combined["scenarios"]["base"]["per_share_quote"]
+    assert all(detached[key] == value for key, value in selected.items())
+    run = json.loads((root / "run.json").read_text())
+    assert all(run[key] == value for key, value in context.items())
     csv_rows = list(csv.DictReader((root / "annual.csv").open()))
     assert len(csv_rows) == 12
-    assert json.loads(csv_rows[0]["context"])["assumption_pack"]["pack_version"] == "synthetic-r1"
+    assert json.loads(csv_rows[0]["context"]) == context
+    assert canonical(context) in (root / "report.md").read_text()
+    for helper in (
+        "alphaforge/core/valuation/forward_fcff.py",
+        "alphaforge/core/valuation/forward_fcff_contract.py",
+    ):
+        assert (
+            context["execution"]["code_sources"][helper]
+            == hashlib.sha256((Path(__file__).parents[1] / helper).read_bytes()).hexdigest()
+        )
     before = {x.name: x.read_bytes() for x in root.iterdir()}
     assert args.func(args) == 0
     assert before == {x.name: x.read_bytes() for x in root.iterdir()}
@@ -641,8 +913,6 @@ def test_override_cli_retains_both_versions_and_actual_differences(tmp_path, cap
         ]
     )
     assert args.func(args) == 0
-    from pathlib import Path
-
     directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
     exported = json.loads((directory / "outputs.json").read_text())
     assert exported["parent_assumption_pack"] == p
@@ -657,6 +927,46 @@ def test_override_cli_retains_both_versions_and_actual_differences(tmp_path, cap
     ]
     assert set(revision["result_differences"]["base"]) == {"per_share_quote"}
     assert json.loads((tmp_path / "pack.json").read_text()) == p
+
+
+def test_override_cli_records_null_membership_with_ordinary_edit(tmp_path, capsys):
+    p = pack()
+    p["scenarios"]["base"]["rights"]["fx_date"] = None
+    (tmp_path / "null-pack.json").write_text(json.dumps(p))
+    scenarios = copy.deepcopy(p["scenarios"])
+    del scenarios["base"]["rights"]["fx_date"]
+    scenarios["base"]["fx"]["quote_per_reporting"] = "3"
+    change = {
+        "version": "synthetic-null-r2",
+        "author": "Synthetic override",
+        "prepared_on": "2024-03-17",
+        "reason": "Remove null and revise FX",
+        "changes": {"scenarios": scenarios},
+    }
+    (tmp_path / "null-override.json").write_text(json.dumps(change))
+    args = build_parser().parse_args(
+        [
+            "estimated-forward",
+            "--input-json",
+            str(tmp_path / "null-pack.json"),
+            "--override-json",
+            str(tmp_path / "null-override.json"),
+            "--exports-dir",
+            str(tmp_path),
+        ]
+    )
+    assert args.func(args) == 0
+    directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
+    revision = json.loads((directory / "outputs.json").read_text())["assumption_pack"]["revision"]
+    membership = next(
+        item for item in revision["changed_inputs"] if item["path"].endswith("rights.fx_date")
+    )
+    assert membership["before_present"] and not membership["after_present"]
+    assert membership["before"] is None and membership["after"] is None
+    assert any(
+        item["path"].endswith("fx.quote_per_reporting") for item in revision["changed_inputs"]
+    )
+    assert revision["result_differences"]["base"]
 
 
 def test_casefolded_scenario_export_names_are_refused(tmp_path, capsys):
@@ -711,8 +1021,6 @@ def test_unavailable_export_keeps_full_context_and_propagated_reasons(tmp_path, 
         ]
     )
     assert args.func(args) == 0
-    from pathlib import Path
-
     directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
     output = json.loads((directory / "base-operating_value.json").read_text())
     assert output["value"] is None and output["reasons"]
@@ -738,9 +1046,41 @@ def test_malformed_optional_bridge_does_not_poison_operations():
     assert r["common_equity"]["status"] == "invalid_input"
 
 
-def test_reference_comparison_preserves_component_tolerances_and_exact_metadata():
-    from tools.check_estimated_forward_acceptance import AcceptanceError, compare_outputs
+def test_runtime_helper_identity_is_owned_by_exports_and_acceptance(tmp_path):
+    repository = Path(__file__).parents[1]
+    export_sources = _code_sources(repository)
+    helpers = (
+        "alphaforge/core/valuation/forward_fcff.py",
+        "alphaforge/core/valuation/forward_fcff_contract.py",
+    )
+    for helper in helpers:
+        expected = hashlib.sha256((repository / helper).read_bytes()).hexdigest()
+        assert export_sources[helper] == expected
+        assert helper in ACCEPTANCE_SOURCE_PATHS
 
+    expected_acceptance = hashlib.sha256(
+        b"".join(
+            path.encode() + b"\0" + (repository / path).read_bytes()
+            for path in ACCEPTANCE_SOURCE_PATHS
+        )
+    ).hexdigest()
+    assert _code_identity(repository) == expected_acceptance
+
+    for path in set(EXPORT_SOURCE_PATHS) | set(ACCEPTANCE_SOURCE_PATHS):
+        destination = tmp_path / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((repository / path).read_bytes())
+    for helper in helpers:
+        export_before = _code_sources(tmp_path)
+        acceptance_before = _code_identity(tmp_path)
+        (tmp_path / helper).write_bytes(
+            (tmp_path / helper).read_bytes() + b"\n# synthetic identity change\n"
+        )
+        assert _code_sources(tmp_path)[helper] != export_before[helper]
+        assert _code_identity(tmp_path) != acceptance_before
+
+
+def test_reference_comparison_preserves_component_tolerances_and_exact_metadata():
     expected = {
         "identity": {"valuation_date": "2024-02-29", "currency": "EUR"},
         "scenarios": {
@@ -756,9 +1096,7 @@ def test_reference_comparison_preserves_component_tolerances_and_exact_metadata(
                         }
                     ],
                 },
-                "bridge": {
-                    "value": [{"id": "1", "allocation_id": "1", "amount": "5.00000000"}]
-                },
+                "bridge": {"value": [{"id": "1", "allocation_id": "1", "amount": "5.00000000"}]},
                 "operating_value": {"value": {"ev": "140.00000000"}},
                 "per_share_reporting": {"value": {"price_estimate": "15.50000000"}},
                 "basic_shares": {"value": "10000000"},
@@ -766,20 +1104,14 @@ def test_reference_comparison_preserves_component_tolerances_and_exact_metadata(
         },
     }
     actual = copy.deepcopy(expected)
-    actual["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = (
-        "14.000000019"
-    )
+    actual["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = "14.000000019"
     actual["scenarios"]["base"]["bridge"]["value"][0]["amount"] = "5.00000009"
     actual["scenarios"]["base"]["operating_value"]["value"]["ev"] = "140.00000009"
-    actual["scenarios"]["base"]["per_share_reporting"]["value"]["price_estimate"] = (
-        "15.500000009"
-    )
+    actual["scenarios"]["base"]["per_share_reporting"]["value"]["price_estimate"] = "15.500000009"
     compare_outputs(actual, expected)
 
     outside = copy.deepcopy(expected)
-    outside["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = (
-        "14.000000021"
-    )
+    outside["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = "14.000000021"
     with pytest.raises(AcceptanceError, match="annual comparison mismatch"):
         compare_outputs(outside, expected)
 

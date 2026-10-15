@@ -24,6 +24,19 @@ from alphaforge.core.valuation.estimated_inputs import (
 )
 from alphaforge.core.valuation.forward_fcff_contract import ContractError
 
+SOURCE_PATHS = (
+    "alphaforge/core/valuation/estimated_inputs.py",
+    "alphaforge/core/valuation/estimated_projection.py",
+    "alphaforge/core/valuation/estimated_fcff.py",
+    "alphaforge/core/valuation/forward_fcff.py",
+    "alphaforge/core/valuation/forward_fcff_contract.py",
+    "alphaforge/cli/estimated_forward.py",
+)
+
+
+def _code_sources(root):
+    return {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in SOURCE_PATHS}
+
 
 def export(root, pack, outputs, parent_pack=None):
     """Publish a complete write-once local bundle, with inspectable detached contexts."""
@@ -31,21 +44,13 @@ def export(root, pack, outputs, parent_pack=None):
     root = Path(root) / "estimated-forward"
     root.mkdir(parents=True, exist_ok=True)
     code_root = Path(__file__).resolve().parents[2]
-    paths = [
-        "alphaforge/core/valuation/estimated_inputs.py",
-        "alphaforge/core/valuation/estimated_projection.py",
-        "alphaforge/core/valuation/estimated_fcff.py",
-        "alphaforge/cli/estimated_forward.py",
-    ]
     receipt = {
         "pack_identity": content_identity(pack),
         "outputs_identity": digest(outputs),
         "code_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=code_root, text=True
         ).strip(),
-        "code_sources": {
-            p: hashlib.sha256((code_root / p).read_bytes()).hexdigest() for p in paths
-        },
+        "code_sources": _code_sources(code_root),
         "scope": "software calculation only; not financial or human implementation acceptance",
     }
     artifact = digest(receipt)

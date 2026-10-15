@@ -262,13 +262,26 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
     child = copy.deepcopy(pack)
     child.update(copy.deepcopy(changes))
     changed = []
+    missing = object()
 
     def diff(a, b, path):
-        if isinstance(a, dict) and isinstance(b, dict):
+        if a is not missing and b is not missing and isinstance(a, dict) and isinstance(b, dict):
             for key in sorted(set(a) | set(b)):
-                diff(a.get(key), b.get(key), f"{path}.{key}" if path else key)
-        elif a != b:
-            changed.append({"path": path, "before": a, "after": b})
+                diff(
+                    a[key] if key in a else missing,
+                    b[key] if key in b else missing,
+                    f"{path}.{key}" if path else key,
+                )
+        elif a is missing or b is missing or a != b:
+            changed.append(
+                {
+                    "path": path,
+                    "before": None if a is missing else copy.deepcopy(a),
+                    "after": None if b is missing else copy.deepcopy(b),
+                    "before_present": a is not missing,
+                    "after_present": b is not missing,
+                }
+            )
 
     diff(pack, child, "")
     require(bool(changed), "override_has_no_change")
