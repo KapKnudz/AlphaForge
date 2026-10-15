@@ -223,7 +223,9 @@ def annual(block, evidence, valuation):
                 else _anniversary(valuation, i - 1) + timedelta(days=1)
             )
             end = _anniversary(valuation, i)
-            if "start" in row:
+            has_start, has_end = "start" in row, "end" in row
+            require(has_start == has_end, "annual_period_pair_required", str(i))
+            if has_start:
                 require(
                     row["start"] == start.isoformat() and row["end"] == end.isoformat(),
                     "annual_period_mismatch",

@@ -40,8 +40,10 @@ not evidence for any company. No issuer inputs or financial golden files ship.
 
 Amounts are original EUR or SEK **millions**, rates fractions, shares absolute
 basic counts net of treasury. Forecasts cover ten full rolling annual periods
-starting the day after V, plus full N+1/N+2 Gordon witnesses. Endpoints follow the
-original valuation anniversary, including restoration of February 29. K is a
+starting the day after V, plus full N+1/N+2 Gordon witnesses. Direct rows either
+omit both period endpoints for deterministic generation or supply and match both;
+one supplied endpoint is never silently rewritten. Endpoints follow the original
+valuation anniversary, including restoration of February 29. K is a
 separate UTC knowledge cutoff; later-than-V evidence requires
 `retrospective_research`. Preparation and actual review dates are separate facts.
 
@@ -122,9 +124,10 @@ EV = ExplicitPV + TV_10/(1+r)^10, with r>0 and -1<g<r
 
 Witnesses never enter explicit PV. Finite effects must be exhausted; every
 material annual witness leg, including available gross tax/investment
-constituents, must grow coherently. Aggregate response recovery lags cannot begin
-after the two witnesses, and finite supplied settlements cannot enter or extend
-beyond them.
+constituents, must grow coherently. Aggregate response recovery queues are checked
+from the first witness through the first mature-regime source year, so a loss-created
+or other pending transition cannot hide behind two accidentally equal recoveries.
+Finite supplied settlements cannot enter or extend beyond the witnesses.
 `FCFF_10*(1+g)` is not a terminal substitute.
 A tail gap preserves finite explicit-PV diagnostics, not a zero-tail EV. Runoff,
 stubs and alternative terminal models are not implemented. Near-pole and
@@ -221,9 +224,10 @@ The externally supplied manifest uses
 `oracle_basis`, repeats the three tolerance objects above exactly, and lists
 sibling `input_file`/`expected_file` pairs. Each expected file contains that same
 `oracle_basis` and a complete independently prepared evaluator result. The checker
-requires the complete output shape, compares computed financial components by
-their fixed class, compares identity/date/unit/share/status/withholding fields
-exactly, and prints only the matched case count plus code revision and code-source
+requires the complete output shape, compares only enumerated computed financial
+fields by their fixed class, compares all other fields—including identifiers,
+allocations, dates, units, shares, statuses and extensions—exactly, and prints only
+the matched case count plus code revision and code-source
 identity. It neither generates expected answers nor acquires, rewrites, exports or
 registers reference material. Repository tests and examples remain synthetic; a
 real-reference run is separate private evidence and must be repeated against the

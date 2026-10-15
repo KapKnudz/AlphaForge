@@ -195,4 +195,18 @@ def project(block):
         row["undistributed_cash_diagnostic"] = cash
         rows.append(row)
         wc = close
+
+    recovery_transition = D(0)
+    if lag > 1:
+        terminal_recovery = entitlements[11 - lag]
+        for t in range(12, 11 + lag):
+            actual = entitlements[t - lag]
+            expected = terminal_recovery * (1 + growth) ** (t - 11)
+            if abs(actual - expected) > max(
+                D("2e-8"), D("2e-12") * max(abs(actual), abs(expected))
+            ):
+                recovery_transition = D(1)
+                break
+    for row in rows[10:]:
+        row["finite_effects"]["recovery_transition"] = recovery_transition
     return rows
