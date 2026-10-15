@@ -323,14 +323,32 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
     from alphaforge.core.valuation.estimated_fcff import evaluate
 
     before, after = evaluate(pack), evaluate(child)
-    child["revision"]["result_differences"] = {
-        name: {
-            key: {"before": before["scenarios"].get(name, {}).get(key), "after": value}
-            for key, value in result.items()
-            if before["scenarios"].get(name, {}).get(key) != value
+    scenario_differences = {}
+    for name in sorted(set(before["scenarios"]) | set(after["scenarios"])):
+        before_result = before["scenarios"].get(name, {})
+        after_result = after["scenarios"].get(name, {})
+        output_differences = {}
+        for key in sorted(set(before_result) | set(after_result)):
+            before_present = key in before_result
+            after_present = key in after_result
+            before_value = before_result.get(key)
+            after_value = after_result.get(key)
+            if before_present != after_present or before_value != after_value:
+                output_differences[key] = {
+                    "before": before_value,
+                    "after": after_value,
+                    "before_present": before_present,
+                    "after_present": after_present,
+                }
+        if output_differences:
+            scenario_differences[name] = output_differences
+    result_differences = {"scenarios": scenario_differences}
+    if before["firm_investment_conclusion"] != after["firm_investment_conclusion"]:
+        result_differences["firm_investment_conclusion"] = {
+            "before": before["firm_investment_conclusion"],
+            "after": after["firm_investment_conclusion"],
         }
-        for name, result in after["scenarios"].items()
-    }
+    child["revision"]["result_differences"] = result_differences
     return child
 
 

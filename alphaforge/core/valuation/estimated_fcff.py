@@ -9,7 +9,6 @@ from decimal import Decimal as D
 from decimal import localcontext
 
 from alphaforge.core.valuation.estimated_inputs import (
-    OUTPUTS,
     Evidence,
     Unavailable,
     decimal,
@@ -46,6 +45,19 @@ CASH_LEGS = (
     "wc_close",
     "other_operating_cash",
 )
+SCENARIO_STAGES = (
+    "annual_fcff",
+    "wacc",
+    "explicit_pv",
+    "terminal",
+    "operating_value",
+    "bridge",
+    "basic_shares",
+    "common_equity",
+    "per_share_reporting",
+    "per_share_quote",
+    "reverse",
+)
 
 
 def close(a, b, path, annual=True):
@@ -64,6 +76,16 @@ def outcome(value=None, error=None):
         "value": encode(value) if error is None else None,
         "reasons": [{"code": error.code, "path": error.path}] if error else [],
     }
+
+
+def reverse_outcome():
+    return outcome(error=Unavailable("reverse_not_implemented_stage4", "reverse", "not_requested"))
+
+
+def scenario_refusal(error):
+    result = {stage: outcome(error=error) for stage in SCENARIO_STAGES[:-1]}
+    result["reverse"] = reverse_outcome()
+    return result
 
 
 def first_row_error(rows):
@@ -366,7 +388,7 @@ def terminal(block, rows, evidence, r):
     }
 
 
-def bridge(block, evidence, rows, valuation, allocations):
+def bridge(block, evidence, annual_result, valuation, allocations):
     evidence.block(block, "bridge")
     require(block["valuation_date"] == valuation.isoformat(), "bridge_date_mismatch")
     categories = block["categories"]
@@ -411,6 +433,9 @@ def bridge(block, evidence, rows, valuation, allocations):
             )
             baseline = decimal(p.get("recurring_baseline_ebit"))
             require(baseline > 0, "invalid_claim_baseline")
+            rows = annual_result["value"]
+            if rows is None:
+                rows = _dependent(annual_result)
             require(len(rows) >= 5, "claim_earnings_missing")
             earnings_error = first_row_error(rows[:5])
             if earnings_error is not None:
@@ -670,9 +695,7 @@ def _scenario(pack, scenario, valuation):
     result["bridge"] = _stage(
         evidence,
         "common_equity",
-        lambda: bridge(
-            scenario.get("bridge"), evidence, cash["value"] or [], valuation, allocations
-        ),
+        lambda: bridge(scenario.get("bridge"), evidence, cash, valuation, allocations),
     )
 
     shares = _stage(
@@ -759,9 +782,7 @@ def _scenario(pack, scenario, valuation):
         }
 
     result["per_share_quote"] = _stage(evidence, "per_share_quote", quote)
-    result["reverse"] = outcome(
-        error=Unavailable("reverse_not_implemented_stage4", "reverse", "not_requested")
-    )
+    result["reverse"] = reverse_outcome()
     return result
 
 
@@ -778,10 +799,10 @@ def evaluate(pack):
                 require(isinstance(scenario, dict), "invalid_scenario", name)
                 scenarios[name] = _scenario(pack, scenario, valuation)
             except Unavailable as error:
-                scenarios[name] = {k: outcome(error=error) for k in OUTPUTS}
+                scenarios[name] = scenario_refusal(error)
             except (KeyError, TypeError, AttributeError, ContractError) as error:
                 malformed = Unavailable("malformed_scenario_input", str(error), "invalid_input")
-                scenarios[name] = {k: outcome(error=malformed) for k in OUTPUTS}
+                scenarios[name] = scenario_refusal(malformed)
         conclusion = {"status": "withheld", "reasons": ["not_an_investment_recommendation"]}
         values = []
         for s in scenarios.values():

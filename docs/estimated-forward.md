@@ -157,7 +157,9 @@ Bridge methods are supplied reporting-currency PV, explicitly dated foreign PV
 converted using an explicit foreign/reporting pair and `foreign_per_reporting`,
 and an explicitly selected `earnings_linked_pv` response: current anchor times
 positive year-one EBIT plus later anchor times mean positive years 1–5 EBIT,
-divided by supplied positive recurring baseline EBIT. Asset categories are signed
+divided by supplied positive recurring baseline EBIT. It preserves any whole-stage
+or consumed-row annual refusal; supplied and foreign PV claims remain independent.
+Asset categories are signed
 as additions; debt, tax, consideration, pension, legal and noncommon categories
 are signed as deductions. Earnings-linked PV is claim-only. This is a conditional
 aggregate response, not invented contractual earnout terms. Book/PV and economic
@@ -179,9 +181,11 @@ shares withhold per-share only unless endogenous rights actually require that
 denominator for common allocation. Missing quote FX withholds quote output only;
 any separately required rights FX remains a genuine common-value dependency.
 
-Each stage exports availability, conditional/insufficient-evidence/invalid-input/
-unsupported/not-requested/numerical-failure status and direct or propagated
-reasons. An aggregate or dependent consumer preserves the first chronologically
+Each scenario always exports the same forward diagnostic stages plus the
+independent not-requested reverse stage, including scenario-level malformed-input
+fallbacks. Each stage exports availability, conditional/insufficient-evidence/
+invalid-input/unsupported/not-requested/numerical-failure status and direct or
+propagated reasons. An aggregate or dependent consumer preserves the first chronologically
 consumed unavailable row's status and root reason/path; structural row-count or
 shape failures remain distinct. Operating gaps suppress dependent complete PVs; rate gaps preserve
 undiscounted cash; tail gaps preserve explicit PV; bridge gaps preserve EV;
@@ -203,6 +207,8 @@ distributions or guaranteed bounds; smaller differences can also be material.
 `changes` (replacement top-level fields). It leaves the original untouched,
 creates a content-bound parented version, recomputes outputs, records changed
 paths/affected outputs/actual result differences, and invalidates current reviews.
+Result differences compare both versions' scenario and output-key unions with
+presence flags and separately retain the full changed firm-conclusion pair.
 Each changed path records before/after values and explicit presence flags, so a
 missing key is distinguishable from an explicitly supplied null. Because built WACC consumes ownership and quote FX, revisions to either conservatively
 invalidate every downstream output from explicit PV through both per-share values.
