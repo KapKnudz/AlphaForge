@@ -658,7 +658,7 @@ def _scenario(pack, scenario, valuation):
             ),
             "annual_pv": [
                 decimal(row["value"]["fcff"]) / (1 + r) ** t if row["available"] else None
-                for t, row in enumerate(rows, 1)
+                for t, row in enumerate(rows[:10], 1)
             ],
         }
 

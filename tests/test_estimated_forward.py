@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 from decimal import Decimal as D
+from decimal import localcontext
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from alphaforge.core.valuation.estimated_inputs import (
     Unavailable,
     canonical,
     content_identity,
+    load,
     revise,
 )
 from tests.estimated_fixtures import block, pack, response
@@ -82,9 +84,11 @@ def test_independent_constant_perpetuity_and_every_annual_leg():
             assert D(v["cash_investment"]) == 6 and D(v["lease_additions"]) == 1
             assert D(v["wc_open"]) == 10 and D(v["wc_close"]) == 10
             assert D(v["other_operating_cash"]) == 0 and D(v["fcff"]) == 14
-            assert D(result["explicit_pv"]["value"]["annual_pv"][t - 1]) == pytest.approx(
-                D(14) / D("1.1") ** t
-            )
+            if t <= 10:
+                assert D(result["explicit_pv"]["value"]["annual_pv"][t - 1]) == pytest.approx(
+                    D(14) / D("1.1") ** t
+                )
+        assert len(result["explicit_pv"]["value"]["annual_pv"]) == 10
         assert result["annual_fcff"]["value"][3]["value"]["end"] == "2028-02-29"
         assert number(result["terminal"], "numerator") == 14
         assert result["reverse"]["status"] == "not_requested"
@@ -128,6 +132,62 @@ def test_operating_gap_retains_unaffected_years_and_tail_gap_preserves_explicit(
     rows[10]["operating_cash_tax"] = None
     r = base(p)
     assert r["explicit_pv"]["available"] and not r["operating_value"]["available"]
+
+
+@pytest.mark.parametrize("horizon", [10, 11, 12])
+def test_explicit_pv_components_are_exactly_first_ten_years(horizon):
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"] = p["scenarios"]["base"]["operations"]["rows"][
+        :horizon
+    ]
+    result = base(p)
+    explicit = result["explicit_pv"]
+    assert explicit["available"]
+    components = [D(value) for value in explicit["value"]["annual_pv"]]
+    assert len(components) == 10
+    with localcontext() as context:
+        context.prec = 64
+        expected = [D(14) / D("1.1") ** year for year in range(1, 11)]
+        expected_sum = sum(expected, D(0))
+    assert components == expected
+    assert D(explicit["value"]["sum"]) == expected_sum
+    assert result["terminal"]["available"] == (horizon == 12)
+
+
+def test_explicit_pv_is_invariant_to_zero_changed_and_unavailable_witnesses():
+    baseline = base(pack())["explicit_pv"]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        for key in (
+            "ebit",
+            "noncash_addbacks",
+            "operating_cash_tax",
+            "cash_investment",
+            "lease_additions",
+        ):
+            row[key] = "0"
+    zero = base(p)
+    assert zero["explicit_pv"] == baseline
+    assert number(zero["terminal"], "numerator") == 0
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row["ebit"] = "30"
+    changed = base(p)
+    assert changed["explicit_pv"] == baseline
+    assert number(changed["terminal"], "numerator") == 24
+
+    for index in (10, 11):
+        p = pack()
+        p["scenarios"]["base"]["operations"]["rows"][index]["operating_cash_tax"] = None
+        unavailable = base(p)
+        assert unavailable["explicit_pv"] == baseline
+        assert not unavailable["terminal"]["available"]
+
+    p = pack()
+    p["scenarios"]["base"]["operations"]["rows"][2]["operating_cash_tax"] = None
+    assert not base(p)["explicit_pv"]["available"]
 
 
 @pytest.mark.parametrize(
@@ -817,6 +877,58 @@ def test_source_anchor_and_limitation_scope():
     assert not base(p)["annual_fcff"]["available"]
 
 
+@pytest.mark.parametrize("anchor", [None, "", "   "])
+def test_consumed_null_or_empty_anchor_never_qualifies(anchor):
+    p = pack()
+    p["sources"][0]["anchors"] = [anchor]
+    p["records"]["budget"]["anchors"] = [{"source_id": "synthetic", "anchor": anchor}]
+    result = base(load(json.dumps(p)))
+    expected = [{"code": "anchor_not_owned", "path": "budget"}]
+    assert result["annual_fcff"]["status"] == "insufficient_evidence"
+    assert result["annual_fcff"]["reasons"] == expected
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [None, {}, {"source_id": "missing-source", "anchor": "budget-table"}],
+)
+def test_malformed_or_unowned_record_anchor_is_scoped(reference):
+    p = pack()
+    p["records"]["budget"]["anchors"] = [reference]
+    result = base(load(json.dumps(p)))
+    assert result["annual_fcff"]["reasons"] == [{"code": "anchor_not_owned", "path": "budget"}]
+
+
+def test_nonempty_numeric_and_unused_invalid_source_anchors_remain_compatible():
+    p = pack()
+    p["sources"][0]["anchors"] = [7]
+    p["records"]["budget"]["anchors"] = [{"source_id": "synthetic", "anchor": 7}]
+    assert base(load(json.dumps(p)))["per_share_quote"]["available"]
+
+    p = pack()
+    unused = copy.deepcopy(p["sources"][0])
+    unused.update(id="unused-source", anchors=[None, ""])
+    p["sources"].append(unused)
+    assert base(load(json.dumps(p)))["per_share_quote"]["available"]
+
+
+def test_invalid_quote_anchor_withholds_only_quote_output():
+    p = pack()
+    quote_source = copy.deepcopy(p["sources"][0])
+    quote_source.update(id="quote-source", anchors=[None])
+    p["sources"].append(quote_source)
+    quote_record = copy.deepcopy(p["records"]["budget"])
+    quote_record["anchors"] = [{"source_id": "quote-source", "anchor": None}]
+    p["records"]["quote"] = quote_record
+    p["scenarios"]["base"]["fx"]["record_ids"] = ["quote"]
+    result = base(load(json.dumps(p)))
+    assert result["annual_fcff"]["available"]
+    assert result["operating_value"]["available"]
+    assert result["per_share_reporting"]["available"]
+    assert result["per_share_quote"]["status"] == "insufficient_evidence"
+    assert result["per_share_quote"]["reasons"] == [{"code": "anchor_not_owned", "path": "quote"}]
+
+
 def test_scenario_disagreement_and_scaling():
     p = pack()
     p["scenarios"]["downside"] = copy.deepcopy(p["scenarios"]["base"])
@@ -861,6 +973,13 @@ def test_real_cli_detached_exports_are_self_describing_and_write_once(tmp_path, 
     assert detached["output"] == "per_share_quote"
     selected = combined["scenarios"]["base"]["per_share_quote"]
     assert all(detached[key] == value for key, value in selected.items())
+    explicit = json.loads((root / "base-explicit_pv.json").read_text())
+    components = [D(value) for value in explicit["value"]["annual_pv"]]
+    assert len(components) == 10
+    with localcontext() as decimal_context:
+        decimal_context.prec = 64
+        assert sum(components, D(0)) == D(explicit["value"]["sum"])
+    assert explicit["value"] == combined["scenarios"]["base"]["explicit_pv"]["value"]
     run = json.loads((root / "run.json").read_text())
     assert all(run[key] == value for key, value in context.items())
     csv_rows = list(csv.DictReader((root / "annual.csv").open()))
@@ -878,6 +997,37 @@ def test_real_cli_detached_exports_are_self_describing_and_write_once(tmp_path, 
     before = {x.name: x.read_bytes() for x in root.iterdir()}
     assert args.func(args) == 0
     assert before == {x.name: x.read_bytes() for x in root.iterdir()}
+
+
+def test_cli_exports_scoped_anchor_withholding_immutably(tmp_path, capsys):
+    p = pack()
+    p["sources"][0]["anchors"] = ["budget-table", None]
+    p["records"]["budget"]["anchors"] = [{"source_id": "synthetic", "anchor": None}]
+    control = copy.deepcopy(p["records"]["budget"])
+    control["anchors"] = [{"source_id": "synthetic", "anchor": "budget-table"}]
+    p["records"]["control"] = control
+    p["scenarios"]["base"]["operations"]["record_ids"] = ["control"]
+    input_path = tmp_path / "invalid-anchor.json"
+    input_path.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+    )
+    assert args.func(args) == 0
+    directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
+    annual = json.loads((directory / "base-annual_fcff.json").read_text())
+    expected = [{"code": "anchor_not_owned", "path": "budget"}]
+    assert annual["status"] == "insufficient_evidence"
+    assert annual["reasons"] == expected
+    combined = json.loads((directory / "outputs.json").read_text())
+    assert combined["scenarios"]["base"]["annual_fcff"]["reasons"] == expected
+    csv_rows = list(csv.DictReader((directory / "annual.csv").open()))
+    assert len(csv_rows) == 12
+    assert all(json.loads(row["reasons"]) == expected for row in csv_rows)
+    assert canonical(expected) in (directory / "report.md").read_text()
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    assert args.func(args) == 0
+    capsys.readouterr()
+    assert before == {path.name: path.read_bytes() for path in directory.iterdir()}
 
 
 def test_supported_wacc_build_effective_compounding_and_shield_once():
@@ -1107,8 +1257,21 @@ def test_publication_upper_bound_and_unknown_source_scope():
         publication_limitation="Exact first posting unknown; public by retained capture",
     )
     assert base(p)["annual_fcff"]["available"]
+    source["observed_on"] = None
+    assert base(p)["annual_fcff"]["available"]
     source["public_by"] = "2024-03-17"
     assert base(p)["annual_fcff"]["status"] == "invalid_input"
+
+    p = pack()
+    source = p["sources"][0]
+    source.update(published_on="", public_by="2024-03-10")
+    refused = base(load(json.dumps(p)))["annual_fcff"]
+    assert refused["status"] == "invalid_input"
+    assert refused["reasons"] == [
+        {"code": "malformed_stage_input", "path": "nonempty_text_required: synthetic"}
+    ]
+    source["publication_limitation"] = "First publication omitted; public bound retained"
+    assert base(load(json.dumps(p)))["annual_fcff"]["available"]
 
 
 def test_override_cli_retains_both_versions_and_actual_differences(tmp_path, capsys):

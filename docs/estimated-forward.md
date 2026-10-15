@@ -56,14 +56,17 @@ malformed scenario or optional-stage mappings produce scoped invalid-input outpu
 Only `controlled_nonfinancial_operations` and capitalized/debt-like leases are
 implemented. Acquisition/perimeter judgments are supplied, not inferred.
 
-Sources retain content identities, owned anchors, publication, observation and
-UTC ingestion facts. A separately disclosed `public_by` upper bound can prove
+Sources retain content identities, genuinely nonempty owned anchors, publication,
+observation and UTC ingestion facts. Null or blank source/reference anchors never
+qualify consumed evidence. A separately disclosed `public_by` upper bound can prove
 cutoff eligibility without inventing a first publication date; it needs a
 `publication_limitation`. Same-cutoff-day publication needs `published_at` or
 `public_by_at` to establish eligibility at the precise UTC cutoff; a later
 same-day timestamp is not treated as known earlier. Unknown publication with no
-established upper bound withholds consuming stages. Content hashes bind supplied identities; this
-calculator does not authenticate documents or accounting interpretations.
+established upper bound withholds consuming stages. A null or blank first-publication
+value using an upper bound requires an explicit publication limitation. Content
+hashes bind supplied identities; this calculator does not authenticate documents
+or accounting interpretations.
 
 Each material block has nonempty `record_ids`. Records distinguish `fact`,
 `adjustment`, `estimate` and `condition`, with source/anchor references, rationale,
@@ -125,7 +128,8 @@ TV_10 = fully_built_FCFF_11 / (r-g)
 EV = ExplicitPV + TV_10/(1+r)^10, with r>0 and -1<g<r
 ```
 
-Witnesses never enter explicit PV. Finite effects must be exhausted; every
+Witnesses never enter explicit PV: its component list contains exactly years
+1–10 and reconciles to the declared explicit sum. Finite effects must be exhausted; every
 material annual witness leg, including available gross tax/investment
 constituents, must grow coherently. Retained witness growth must exactly equal the
 selected Gordon growth. Retained witness revenue is optional for direct rows, but
