@@ -49,11 +49,47 @@ def _bd() -> BorsdataAdapter:
     return _borsdata
 
 
-def _mfn_client() -> MfnScraper:
+def _mfn_client(max_articles: int = 24) -> MfnScraper:
     global _mfn
-    if _mfn is None:
-        _mfn = MfnScraper()
+    if _mfn is not None:
+        return _mfn
+    if max_articles != 24:
+        return MfnScraper(max_articles=max_articles)
+    _mfn = MfnScraper()
     return _mfn
+
+
+def _mfn_all(mfn_slug: str, *, reports_only: bool, limit: int) -> list[dict[str, Any]]:
+    """Collect MFN feed items across pages, up to `limit` (MFN caps at 480).
+
+    The issuer feed paginates with offset/limit (e.g. /all/a/<issuer> uses
+    the same JSON contract); a single-page discovery caps at 24 items, so
+    walk pages of 48 until the tail or the requested limit is reached.
+    """
+    limit = max(1, min(limit, 480))
+    # The full archive lives under /all/a/<issuer>; the plain issuer page
+    # only exposes the most recent page. Map bare slugs to the archive.
+    slug = mfn_slug.strip("/")
+    if slug.startswith("a/"):
+        slug = f"all/{slug}"
+    mfn_slug = slug
+    client = _mfn_client(max_articles=limit)
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    offset: int | None = 0
+    while offset is not None and len(collected) < limit:
+        page, next_offset = client.discover_feed_paginated(
+            mfn_slug, offset=offset, limit=48, reports_only=reports_only
+        )
+        for article in page:
+            url = str(article.get("url") or "")
+            if url and url not in seen:
+                seen.add(url)
+                collected.append(article)
+        if not page:
+            break
+        offset = next_offset
+    return collected[:limit]
 
 
 def _envelope(source: str, params: dict[str, Any], data: Any) -> dict[str, Any]:
@@ -242,7 +278,7 @@ def borsdata_report_calendar(ins_ids: list[int]) -> dict[str, Any]:
 
 
 @mcp.tool()
-def mfn_reports(mfn_slug: str, limit: int = 24) -> dict[str, Any]:
+def mfn_reports(mfn_slug: str, limit: int = 480) -> dict[str, Any]:
     """List financial-report releases for an issuer on MFN.se.
 
     mfn_slug is the issuer path on mfn.se, in the form "a/<issuer>"
@@ -253,19 +289,19 @@ def mfn_reports(mfn_slug: str, limit: int = 24) -> dict[str, Any]:
     return _guard(
         "mfn/reports",
         {"mfn_slug": mfn_slug, "limit": limit},
-        lambda: _mfn_client().discover_feed(mfn_slug, reports_only=True)[:limit],
+        lambda: _mfn_all(mfn_slug, reports_only=True, limit=limit),
     )
 
 
 @mcp.tool()
-def mfn_releases(mfn_slug: str, limit: int = 24) -> dict[str, Any]:
+def mfn_releases(mfn_slug: str, limit: int = 480) -> dict[str, Any]:
     """List all press releases for an issuer on MFN.se (news and events,
     not only financial reports), with title and source URL for each.
     mfn_slug uses the form "a/<issuer>", e.g. "a/evolution"."""
     return _guard(
         "mfn/releases",
         {"mfn_slug": mfn_slug, "limit": limit},
-        lambda: _mfn_client().discover_feed(mfn_slug, reports_only=False)[:limit],
+        lambda: _mfn_all(mfn_slug, reports_only=False, limit=limit),
     )
 
 

@@ -38,6 +38,11 @@ class FakeMfn:
     def discover_feed(self, slug, *, reports_only=True):
         return [{"url": "https://mfn.se/a/x", "title": "Interim report"}]
 
+    def discover_feed_paginated(self, slug, *, offset=0, limit=48, reports_only=True):
+        if offset:
+            return [], None
+        return [{"url": "https://mfn.se/a/x", "title": "Interim report"}], None
+
 
 @pytest.fixture(autouse=True)
 def fake_providers(monkeypatch):
@@ -88,3 +93,39 @@ def test_provider_error_is_sanitized(monkeypatch):
     out = _call(server.borsdata_prices)(750)
     assert "SECRETKEY123" not in out["error"]
     assert "***" in out["error"]
+
+
+class FakeMfnPaged(FakeMfn):
+    def __init__(self, pages):
+        self._pages = pages
+
+    def discover_feed_paginated(self, slug, *, offset=0, limit=48, reports_only=True):
+        return self._pages.get(offset, ([], None))
+
+
+def test_mfn_all_walks_pages_and_dedupes(monkeypatch):
+    page1 = [{"url": f"https://mfn.se/a/r{i}", "title": f"Report {i}"} for i in range(48)]
+    page2 = [
+        {"url": "https://mfn.se/a/r0", "title": "dup"},
+        {"url": "https://mfn.se/a/r48", "title": "Report 48"},
+    ]
+    fake = FakeMfnPaged({0: (page1, 48), 48: (page2, None)})
+    monkeypatch.setattr(server, "_mfn_client", lambda max_articles=24: fake)
+    out = server._mfn_all("a/evolution", reports_only=True, limit=480)
+    assert len(out) == 49
+    assert out[-1]["title"] == "Report 48"
+
+
+def test_mfn_all_caps_at_480(monkeypatch):
+    pages = {}
+    offset = 0
+    while offset < 960:
+        pages[offset] = (
+            [{"url": f"https://mfn.se/a/x{offset + i}", "title": "R"} for i in range(48)],
+            offset + 48,
+        )
+        offset += 48
+    fake = FakeMfnPaged(pages)
+    monkeypatch.setattr(server, "_mfn_client", lambda max_articles=24: fake)
+    out = server._mfn_all("a/evolution", reports_only=True, limit=9999)
+    assert len(out) == 480

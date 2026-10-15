@@ -47,8 +47,12 @@ Börsdata (instrument ids come from `borsdata_search_company`):
 
 MFN (slug form is `a/<issuer>`, e.g. `a/evolution`, `a/clas-ohlson`):
 
-- `mfn_reports(mfn_slug, limit)` — annual/interim report releases only.
-- `mfn_releases(mfn_slug, limit)` — all press releases.
+- `mfn_reports(mfn_slug, limit=480)` — annual/interim report releases from the full archive.
+- `mfn_releases(mfn_slug, limit=480)` — all press releases from the full archive.
+
+Both MFN tools page through the archive feed (`/all/a/<issuer>`, capped by
+MFN at 480 items) and deduplicate by URL, so a default call returns the
+complete history MFN exposes, not only the latest page.
 
 ## Response shape and reproducibility
 
