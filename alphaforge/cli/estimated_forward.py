@@ -20,12 +20,14 @@ from alphaforge.core.valuation.estimated_inputs import (
     digest,
     load,
     revise,
+    validate_envelope,
 )
 from alphaforge.core.valuation.forward_fcff_contract import ContractError
 
 
 def export(root, pack, outputs, parent_pack=None):
     """Publish a complete write-once local bundle, with inspectable detached contexts."""
+    validate_envelope(pack)
     root = Path(root) / "estimated-forward"
     root.mkdir(parents=True, exist_ok=True)
     code_root = Path(__file__).resolve().parents[2]
@@ -148,7 +150,15 @@ def command(args):
             )
         )
         return 0
-    except (ContractError, OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+    except (
+        ContractError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        ArithmeticError,
+    ) as error:
         print(
             canonical({"status": "estimated_research_refused", "reason": str(error)}),
             file=sys.stderr,

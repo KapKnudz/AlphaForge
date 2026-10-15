@@ -67,6 +67,7 @@ def content_identity(pack):
 
 
 def validate_envelope(pack):
+    require(isinstance(pack, dict), "invalid_pack")
     require(pack.get("standard") == STANDARD, "unsupported_standard", status="unsupported")
     require(pack.get("contract") == CONTRACT, "unsupported_contract", status="unsupported")
     for key in ("pack_version", "entity", "perimeter", "prepared_by"):
@@ -107,7 +108,9 @@ def validate_envelope(pack):
     require(
         isinstance(pack["conditions"], list) and bool(pack["conditions"]), "conditions_required"
     )
+    require(isinstance(pack["limitations"], list), "invalid_limitations")
     for limitation in pack["limitations"]:
+        require(isinstance(limitation, dict), "invalid_limitation")
         text(limitation["reason"])
         require(bool(limitation["affected_outputs"]), "limitation_dependency_required")
         require(
@@ -120,6 +123,8 @@ def validate_envelope(pack):
             "invalid_limitation_status",
         )
     sources = pack["sources"]
+    require(isinstance(sources, list), "invalid_sources")
+    require(all(isinstance(source, dict) for source in sources), "invalid_source")
     require(len({s["id"] for s in sources}) == len(sources), "duplicate_source")
     for source in sources:
         text(source["id"])
@@ -135,12 +140,21 @@ def validate_envelope(pack):
             isinstance(source["anchors"], list) and bool(source["anchors"]),
             "source_anchors_required",
         )
+    require(isinstance(pack["records"], dict), "invalid_records")
+    require(isinstance(pack["scenarios"], dict), "invalid_scenarios")
     require(bool(pack["scenarios"]) and "base" in pack["scenarios"], "base_scenario_required")
-    for name in pack["scenarios"]:
+    scenario_names = list(pack["scenarios"])
+    for name in scenario_names:
         require(
             isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None,
             "unsafe_scenario_id",
         )
+    require(
+        len({name.casefold() for name in scenario_names}) == len(scenario_names),
+        "duplicate_scenario_export_id",
+    )
+    require(isinstance(pack["allocations"], list), "invalid_allocations")
+    require(all(isinstance(item, dict) for item in pack["allocations"]), "invalid_allocation")
     return v, k, prepared
 
 
@@ -262,9 +276,9 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
     for entry in changed:
         path = entry["path"]
         if ".fx." in path:
-            affected.add("per_share_quote")
+            affected.update(OUTPUTS[1:])
         elif ".ownership." in path:
-            affected.update(("common_equity", "per_share_reporting", "per_share_quote"))
+            affected.update(OUTPUTS[1:])
         elif ".bridge." in path or ".rights." in path:
             affected.update(("common_equity", "per_share_reporting", "per_share_quote"))
         elif ".terminal." in path:

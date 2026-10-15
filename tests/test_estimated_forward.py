@@ -218,6 +218,26 @@ def test_no_duplicate_lease_tax_compensation_claims():
     assert base(p)["annual_fcff"]["status"] == "unsupported"
 
 
+def test_every_registered_allocation_is_consumed_once_by_its_destination():
+    for destination, unavailable in (
+        ("operations", "annual_fcff"),
+        ("bridge", "bridge"),
+        ("rights", "common_equity"),
+    ):
+        p = pack()
+        p["allocations"].append({"id": "orphan", "destination": destination})
+        result = base(p)
+        assert result[unavailable]["status"] == "invalid_input"
+
+    p = pack()
+    p["scenarios"]["base"]["operations"]["allocation_ids"].append("renewal")
+    assert base(p)["annual_fcff"]["status"] == "invalid_input"
+
+    p = pack()
+    p["allocations"].append({"id": "documented-exclusion", "destination": "excluded_pair"})
+    assert base(p)["common_equity"]["available"]
+
+
 def test_negative_residual_is_not_tradable_or_floored():
     p = pack()
     item = next(
@@ -289,6 +309,14 @@ def test_parented_override_recalculates_and_invalidates_review_without_mutation(
     assert child["parent"]["content_identity"] == content_identity(p)
     assert child["reviews"] == [] and child["revision"]["invalidated_reviews"] == p["reviews"]
     assert child["revision"]["changed_inputs"][0]["path"].endswith("quote_per_reporting")
+    assert child["revision"]["affected_outputs"] == [
+        "common_equity",
+        "explicit_pv",
+        "operating_value",
+        "per_share_quote",
+        "per_share_reporting",
+        "conclusion",
+    ]
     assert number(base(child)["per_share_quote"], "price_estimate") == pytest.approx(D("46.5"))
     assert number(base(p)["per_share_quote"], "price_estimate") == pytest.approx(D(31))
 
@@ -390,6 +418,46 @@ def test_supported_wacc_build_effective_compounding_and_shield_once():
     shared = base(p)
     assert number(shared["wacc"], "market_equity") == 200
     assert D(shared["basic_shares"]["value"]) == 20000000
+
+
+def test_built_wacc_revision_dependencies_cover_downstream_outputs():
+    p = pack()
+    p["scenarios"]["base"]["discount"]["inputs"] = {
+        "risk_free_continuous": ".03",
+        "beta": "1.2",
+        "equity_risk_premium": ".05",
+        "market_close": "20",
+        "market_close_date": p["valuation_date"],
+        "market_close_currency": "SEK",
+        "debt": "25",
+        "debt_date": p["valuation_date"],
+        "debt_currency": "EUR",
+        "debt_cost": ".06",
+        "debt_cost_date": p["valuation_date"],
+        "debt_cost_basis": "nominal_annual_effective_pre_tax",
+        "shield_rate": ".2",
+        "shield_rate_date": p["valuation_date"],
+    }
+    scenarios = copy.deepcopy(p["scenarios"])
+    scenarios["base"]["ownership"]["basic_shares"] = "20000000"
+    child = revise(
+        p,
+        version="synthetic-built-r2",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Synthetic ownership alternative",
+        changes={"scenarios": scenarios},
+    )
+    assert child["revision"]["affected_outputs"] == [
+        "common_equity",
+        "explicit_pv",
+        "operating_value",
+        "per_share_quote",
+        "per_share_reporting",
+        "conclusion",
+    ]
+    differences = child["revision"]["result_differences"]["base"]
+    assert {"wacc", "explicit_pv", "operating_value", "common_equity"} <= set(differences)
 
 
 def test_wacc_and_ownership_bases_are_dated_and_shared():
@@ -579,9 +647,54 @@ def test_override_cli_retains_both_versions_and_actual_differences(tmp_path, cap
     exported = json.loads((directory / "outputs.json").read_text())
     assert exported["parent_assumption_pack"] == p
     revision = exported["assumption_pack"]["revision"]
-    assert revision["affected_outputs"] == ["per_share_quote", "conclusion"]
+    assert revision["affected_outputs"] == [
+        "common_equity",
+        "explicit_pv",
+        "operating_value",
+        "per_share_quote",
+        "per_share_reporting",
+        "conclusion",
+    ]
     assert set(revision["result_differences"]["base"]) == {"per_share_quote"}
     assert json.loads((tmp_path / "pack.json").read_text()) == p
+
+
+def test_casefolded_scenario_export_names_are_refused(tmp_path, capsys):
+    p = pack()
+    p["scenarios"]["BASE"] = copy.deepcopy(p["scenarios"]["base"])
+    input_path = tmp_path / "casefold-collision.json"
+    input_path.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+    )
+    assert args.func(args) == 1
+    refusal = json.loads(capsys.readouterr().err)
+    assert refusal["status"] == "estimated_research_refused"
+    assert "duplicate_scenario_export_id" in refusal["reason"]
+    assert not (tmp_path / "estimated-forward").exists()
+
+
+def test_malformed_mapping_shapes_have_structured_refusals(tmp_path, capsys):
+    malformed_records = pack()
+    malformed_records["records"] = []
+    for index, payload in enumerate(([], malformed_records)):
+        input_path = tmp_path / f"malformed-{index}.json"
+        input_path.write_text(json.dumps(payload))
+        args = build_parser().parse_args(
+            ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+        )
+        assert args.func(args) == 1
+        refusal = json.loads(capsys.readouterr().err)
+        assert refusal["status"] == "estimated_research_refused"
+
+    malformed_scenario = pack()
+    malformed_scenario["scenarios"]["base"] = []
+    scenario = evaluate(malformed_scenario)["scenarios"]["base"]
+    assert scenario["annual_fcff"]["status"] == "invalid_input"
+
+    malformed_projection = response()
+    malformed_projection["scenarios"]["base"]["operations"]["inputs"] = []
+    assert base(malformed_projection)["annual_fcff"]["status"] == "invalid_input"
 
 
 def test_unavailable_export_keeps_full_context_and_propagated_reasons(tmp_path, capsys):

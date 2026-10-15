@@ -11,6 +11,7 @@ from alphaforge.core.valuation.estimated_inputs import decimal, require
 
 def project(block):
     p = block["inputs"]
+    require(isinstance(p, dict), "invalid_projection_inputs")
 
     def n(key):
         return decimal(p.get(key), key)

@@ -50,6 +50,9 @@ separate UTC knowledge cutoff; later-than-V evidence requires
 The envelope contains standard/contract, pack version/parent, entity/perimeter,
 V/K/knowledge basis, preparer/date, object, denomination/lease basis, conditions,
 limitations, sources, records, allocations and named scenarios (including base).
+Scenario IDs must also be unique after case-folding because each scenario owns
+export filenames. Malformed envelope mappings are refused before calculation;
+malformed scenario or optional-stage mappings produce scoped invalid-input outputs.
 Only `controlled_nonfinancial_operations` and capitalized/debt-like leases are
 implemented. Acquisition/perimeter judgments are supplied, not inferred.
 
@@ -141,8 +144,10 @@ nonoperating assets, nonlease/lease debt, independently nonoperating taxes,
 consideration, pension/employee, legal/other and noncommon claims. Each category
 needs an explicit supported estimate, including any zero. Allocation IDs are
 aggregate labels assigned once to operations, bridge, rights or excluded matched
-pairs, not invented underlying censuses. Reusing an embedded allocation in the
-bridge or rights is invalid.
+pairs, not invented underlying censuses. In every scenario, each registered
+operations, bridge and rights allocation is consumed exactly once by its declared
+destination; only an `excluded_pair` is intentionally unconsumed. Reusing an
+embedded allocation or omitting a registered claim is invalid.
 
 Bridge methods are supplied reporting-currency PV, explicitly dated foreign PV
 converted using an explicit foreign/reporting pair and `foreign_per_reporting`,
@@ -192,6 +197,8 @@ distributions or guaranteed bounds; smaller differences can also be material.
 `changes` (replacement top-level fields). It leaves the original untouched,
 creates a content-bound parented version, recomputes outputs, records changed
 paths/affected outputs/actual result differences, and invalidates current reviews.
+Because built WACC consumes ownership and quote FX, revisions to either conservatively
+invalidate every downstream output from explicit PV through both per-share values.
 The export retains the parent pack as well as the child. It does not edit an
 accepted reference or silently carry its approval into changed premises.
 

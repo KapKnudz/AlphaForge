@@ -66,6 +66,19 @@ def outcome(value=None, error=None):
     }
 
 
+def require_allocations(supplied, allocations, destination, path):
+    require(isinstance(supplied, list), "invalid_allocation_consumption", path)
+    for allocation in supplied:
+        text(allocation, path)
+    require(
+        len(supplied) == len(set(supplied)),
+        "duplicate_allocation_consumption",
+        path,
+    )
+    expected = {key for key, owner in allocations.items() if owner == destination}
+    require(set(supplied) == expected, "incomplete_allocation_consumption", path)
+
+
 def exchange_rate(block, valuation, reporting_currency, currency_key, rate_key, date_key, path):
     require(block[date_key] == valuation.isoformat(), "fx_date_mismatch", path)
     require(
@@ -188,8 +201,9 @@ def rate(block, evidence, scenario, valuation):
     }
 
 
-def annual(block, evidence, valuation):
+def annual(block, evidence, valuation, allocations):
     evidence.block(block, "operations")
+    require_allocations(block.get("allocation_ids"), allocations, "operations", "operations")
     require(
         block["basis"] == "recurring_ebit_after_da_no_compensation_addback",
         "unsupported_earnings_basis",
@@ -331,19 +345,19 @@ def bridge(block, evidence, rows, valuation, allocations):
         "incomplete_bridge_inventory",
     )
     require(isinstance(block["items"], list), "invalid_bridge_items")
-    ids, used, result = set(), set(), []
+    require(all(isinstance(item, dict) for item in block["items"]), "invalid_bridge_item")
+    require_allocations(
+        [item["allocation_id"] for item in block["items"]],
+        allocations,
+        "bridge",
+        "bridge",
+    )
+    ids, result = set(), []
     for item in block["items"]:
         evidence.block(item, "bridge." + item["id"])
         require(item["id"] not in ids, "duplicate_bridge_id", item["id"])
         ids.add(item["id"])
         require(item["category"] in BRIDGE_CATEGORIES, "unknown_bridge_category")
-        allocation = item["allocation_id"]
-        require(
-            allocation not in used and allocations.get(allocation) == "bridge",
-            "duplicate_or_embedded_claim",
-            allocation,
-        )
-        used.add(allocation)
         p = item["inputs"]
         if item["method"] == "supplied_pv":
             amount = decimal(p.get("amount"), item["id"])
@@ -444,7 +458,7 @@ def rights_exchange_rate(block, evidence, valuation):
     return D(1)
 
 
-def allocate(block, preclaims, shares, evidence, valuation, allocations):
+def allocate(block, preclaims, shares, evidence, valuation):
     evidence.block(block, "rights")
     require(block["valuation_date"] == valuation.isoformat(), "rights_date_mismatch")
     require(
@@ -455,17 +469,9 @@ def allocate(block, preclaims, shares, evidence, valuation, allocations):
     q = rights_exchange_rate(block, evidence, valuation)
     items = block["items"]
     require(len({x["id"] for x in items}) == len(items), "duplicate_right_id")
-    used = set()
     prepared = []
     for item in items:
         evidence.block(item, "rights." + item["id"])
-        allocation = item["allocation_id"]
-        require(
-            allocation not in used and allocations.get(allocation) == "rights",
-            "duplicate_or_embedded_claim",
-            allocation,
-        )
-        used.add(allocation)
 
         def n(k, item=item):
             return decimal(item.get(k), "rights." + item["id"] + "." + k)
@@ -535,7 +541,7 @@ def _stage(evidence, target, fn):
         return outcome(fn())
     except Unavailable as error:
         return outcome(error=error)
-    except (KeyError, TypeError, ContractError) as error:
+    except (KeyError, TypeError, AttributeError, ContractError) as error:
         return outcome(error=Unavailable("malformed_stage_input", str(error), "invalid_input"))
     except ArithmeticError as error:
         return outcome(error=Unavailable("numerical_failure", str(error), "numerical_failure"))
@@ -563,7 +569,9 @@ def _scenario(pack, scenario, valuation):
     )
     result = {}
     result["annual_fcff"] = _stage(
-        evidence, "annual_fcff", lambda: annual(scenario.get("operations"), evidence, valuation)
+        evidence,
+        "annual_fcff",
+        lambda: annual(scenario.get("operations"), evidence, valuation, allocations),
     )
     cash = result["annual_fcff"]
     if cash["available"] and not all(row["available"] for row in cash["value"][:10]):
@@ -571,8 +579,6 @@ def _scenario(pack, scenario, valuation):
         cash["calculation_status"] = "incomplete_annual_rows"
         cash["available"] = False
         cash["reasons"] = [{"code": "incomplete_annual_fcff", "path": "annual_fcff"}]
-    for aid in (scenario.get("operations") or {}).get("allocation_ids", []):
-        require(allocations.get(aid) == "operations", "operating_allocation_mismatch", aid)
     rate_result = _stage(
         evidence,
         "explicit_pv",
@@ -660,6 +666,14 @@ def _scenario(pack, scenario, valuation):
             "unsupported_rights",
             status="unsupported",
         )
+        require(isinstance(rights["items"], list), "invalid_right_items")
+        require(all(isinstance(item, dict) for item in rights["items"]), "invalid_right_item")
+        require_allocations(
+            [item["allocation_id"] for item in rights["items"]],
+            allocations,
+            "rights",
+            "rights",
+        )
         # Empty, explicitly evidenced rights do not make common total depend on shares.
         if not rights["items"]:
             require(rights["currency"] == pack["currency"], "empty_rights_currency_mismatch")
@@ -678,7 +692,6 @@ def _scenario(pack, scenario, valuation):
                 decimal(_dependent(shares, "basic_shares")),
                 evidence,
                 valuation,
-                allocations,
             )
         return {"bridge_total": total, "residual_before_rights": pre, **allocated}
 
@@ -735,9 +748,13 @@ def evaluate(pack):
         scenarios = {}
         for name, scenario in pack["scenarios"].items():
             try:
+                require(isinstance(scenario, dict), "invalid_scenario", name)
                 scenarios[name] = _scenario(pack, scenario, valuation)
             except Unavailable as error:
                 scenarios[name] = {k: outcome(error=error) for k in OUTPUTS}
+            except (KeyError, TypeError, AttributeError, ContractError) as error:
+                malformed = Unavailable("malformed_scenario_input", str(error), "invalid_input")
+                scenarios[name] = {k: outcome(error=malformed) for k in OUTPUTS}
         conclusion = {"status": "withheld", "reasons": ["not_an_investment_recommendation"]}
         values = []
         for s in scenarios.values():
