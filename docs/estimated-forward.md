@@ -130,8 +130,11 @@ EV = ExplicitPV + TV_10/(1+r)^10, with r>0 and -1<g<r
 
 Witnesses never enter explicit PV: its component list contains exactly years
 1–10 and reconciles to the declared explicit sum. Finite effects must be exhausted; every
-material annual witness leg, including available gross tax/investment
-constituents, must grow coherently. Retained witness growth must exactly equal the
+material annual witness leg, including supplied recurring tax, investment and
+lease constituents, must grow coherently. Complete supplied decompositions reconcile
+to their selected cash aggregate; partial optional detail remains optional, and
+charge/payment or entitlement/recovery timing is not collapsed. Retained witness
+growth must exactly equal the
 selected Gordon growth. Retained witness revenue is optional for direct rows, but
 when present it must be present in both witnesses and reconcile at the annual
 witness tolerance; generated response revenue is always checked. Aggregate
@@ -221,8 +224,10 @@ accepted reference or silently carry its approval into changed premises.
 
 Write-once local bundles under `estimated-forward/<artifact identity>/` contain
 original inputs, outputs, execution/code identities, report, annual CSV and
-individual output JSON files. Code identities cover the estimated modules and the
-shared supplied-schedule calculation/contract helpers they execute. Detached output files/CSV rows/report retain the
+individual output JSON files. Scenario sections and CSV rows are composed in
+canonical scenario-id order, so insertion order cannot change an artifact bundle.
+Code identities cover the estimated modules and the shared supplied-schedule
+calculation/contract helpers they execute. Detached output files/CSV rows/report retain the
 full identity and assumption pack, source anchors, conditions, limitations,
 preparation/actual review facts and distinct calculation/financial/human status.
 These are user-requested **local exports**, not permission to publish private

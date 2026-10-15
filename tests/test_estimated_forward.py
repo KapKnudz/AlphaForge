@@ -4,6 +4,7 @@ import copy
 import csv
 import hashlib
 import json
+import subprocess
 from decimal import Decimal as D
 from decimal import localcontext
 from pathlib import Path
@@ -363,6 +364,157 @@ def test_direct_terminal_growth_null_and_malformed_keep_typed_status():
         result = base(p)["terminal"]
         assert result["status"] == status
         assert result["reasons"] == [{"code": code, "path": "terminal.growth"}]
+
+
+def test_terminal_optional_monetary_constituents_must_grow_coherently():
+    p = pack()
+    rows = p["scenarios"]["base"]["operations"]["rows"]
+    rows[10]["gross_charge"] = "8"
+    rows[11]["gross_charge"] = "0"
+    result = base(p)["terminal"]
+    assert result["reasons"] == [{"code": "reconciliation_failed", "path": "terminal.gross_charge"}]
+
+    p = pack()
+    rows = p["scenarios"]["base"]["operations"]["rows"]
+    for row, gross, ordinary in zip(rows[10:], ("8", "0"), ("0", "8")):
+        row.update(
+            gross_charge=gross,
+            ordinary_charge=ordinary,
+            topup_charge="0",
+            new_charge="8",
+        )
+    assert base(p)["terminal"]["reasons"] == [
+        {"code": "reconciliation_failed", "path": "terminal.gross_charge"}
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(gross_charge="8", ordinary_charge="0", topup_charge="0", new_charge="8")
+    assert base(p)["terminal"]["available"]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row["gross_charge"] = "8"
+    assert base(p)["terminal"]["available"]
+
+
+def test_terminal_complete_investment_decompositions_reconcile_without_rewriting():
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(renewal_investment="5", lead_investment="0")
+    result = base(p)
+    assert result["terminal"]["reasons"] == [
+        {
+            "code": "reconciliation_failed",
+            "path": "terminal.11.cash_investment_decomposition",
+        }
+    ]
+    assert D(result["annual_fcff"]["value"][10]["value"]["cash_investment"]) == 6
+
+    for lead, available in (("1", True), ("1.000000019", True), ("1.000000021", False)):
+        p = pack()
+        for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+            row.update(renewal_investment="5", lead_investment=lead)
+        assert base(p)["terminal"]["available"] == available
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row["renewal_investment"] = "5"
+    assert base(p)["terminal"]["available"]
+
+
+def test_terminal_complete_tax_cash_decompositions_preserve_timing_distinctions():
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(
+            gross_charge="3",
+            ordinary_charge="4",
+            topup_charge="1",
+            new_charge="8",
+            new_entitlement="6",
+            new_payment="5",
+            new_recovery="1",
+            opening_payment="0",
+            opening_recovery="0",
+            opening_deferred_cash="0",
+            opening_tax="0",
+            new_cash_tax="4",
+        )
+    assert base(p)["terminal"]["available"]
+
+    p["scenarios"]["base"]["operations"]["rows"][10]["new_cash_tax"] = "3"
+    assert base(p)["terminal"]["reasons"] == [
+        {"code": "reconciliation_failed", "path": "terminal.new_cash_tax"}
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(new_payment="5", new_recovery="1", new_cash_tax="3")
+    assert base(p)["terminal"]["reasons"] == [
+        {
+            "code": "reconciliation_failed",
+            "path": "terminal.11.new_cash_tax_decomposition",
+        }
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(
+            opening_tax="0",
+            new_payment="6",
+            new_recovery="1",
+            new_cash_tax="5",
+        )
+    assert base(p)["terminal"]["reasons"] == [
+        {
+            "code": "reconciliation_failed",
+            "path": "terminal.11.operating_cash_tax_decomposition",
+        }
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(
+            gross_charge="3",
+            ordinary_charge="4",
+            topup_charge="0",
+            new_charge="8",
+        )
+    assert base(p)["terminal"]["reasons"] == [
+        {
+            "code": "reconciliation_failed",
+            "path": "terminal.11.new_charge_decomposition",
+        }
+    ]
+
+
+def test_terminal_ratios_and_finite_opening_components_are_distinct():
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(revenue="100", growth="0", margin=".2")
+    assert base(p)["terminal"]["available"]
+
+    p["scenarios"]["base"]["operations"]["rows"][11]["margin"] = ".3"
+    assert base(p)["terminal"]["reasons"] == [
+        {"code": "terminal_ratio_mismatch", "path": "terminal.margin"}
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(opening_payment="1", opening_recovery="1", opening_deferred_cash="0")
+    assert base(p)["terminal"]["reasons"] == [
+        {"code": "finite_cash_in_terminal", "path": "terminal.opening_payment"}
+    ]
+
+    p = pack()
+    for row in p["scenarios"]["base"]["operations"]["rows"][10:]:
+        row.update(ongoing_da="4", legacy_da="0")
+    assert base(p)["terminal"]["reasons"] == [
+        {
+            "code": "reconciliation_failed",
+            "path": "terminal.11.noncash_addbacks_decomposition",
+        }
+    ]
 
 
 def test_loss_has_no_automatic_refund_but_opening_recovery_survives():
@@ -997,6 +1149,63 @@ def test_real_cli_detached_exports_are_self_describing_and_write_once(tmp_path, 
     before = {x.name: x.read_bytes() for x in root.iterdir()}
     assert args.func(args) == 0
     assert before == {x.name: x.read_bytes() for x in root.iterdir()}
+
+
+def test_cli_export_is_invariant_to_scenario_insertion_order(tmp_path, capsys):
+    first = pack()
+    base_scenario = copy.deepcopy(first["scenarios"]["base"])
+    first["scenarios"] = {
+        "base": copy.deepcopy(base_scenario),
+        "downside": copy.deepcopy(base_scenario),
+    }
+    second = copy.deepcopy(first)
+    second["scenarios"] = {
+        "downside": copy.deepcopy(base_scenario),
+        "base": copy.deepcopy(base_scenario),
+    }
+    changed = copy.deepcopy(first)
+    for row in changed["scenarios"]["downside"]["operations"]["rows"]:
+        row["ebit"] = "10"
+
+    parser = build_parser()
+
+    def run(name, value):
+        input_path = tmp_path / f"{name}.json"
+        input_path.write_text(json.dumps(value))
+        args = parser.parse_args(
+            ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+        )
+        assert args.func(args) == 0
+        return Path(json.loads(capsys.readouterr().out)["export_directory"]), args
+
+    first_directory, first_args = run("first-order", first)
+    first_bytes = {path.name: path.read_bytes() for path in first_directory.iterdir()}
+    assert len(first_bytes) == 27
+    second_directory, _ = run("second-order", second)
+    assert second_directory == first_directory
+    assert first_bytes == {path.name: path.read_bytes() for path in second_directory.iterdir()}
+
+    assert first_args.func(first_args) == 0
+    capsys.readouterr()
+    assert first_bytes == {path.name: path.read_bytes() for path in first_directory.iterdir()}
+
+    combined = json.loads((first_directory / "outputs.json").read_text())
+    execution = combined["execution"]
+    repository = Path(__file__).parents[1]
+    assert (
+        execution["code_revision"]
+        == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    )
+    for path, identity in execution["code_sources"].items():
+        assert identity == hashlib.sha256((repository / path).read_bytes()).hexdigest()
+    report = (first_directory / "report.md").read_text()
+    assert report.index("## Scenario: base") < report.index("## Scenario: downside")
+    csv_rows = list(csv.DictReader((first_directory / "annual.csv").open()))
+    assert [row["scenario"] for row in csv_rows] == ["base"] * 12 + ["downside"] * 12
+
+    changed_directory, _ = run("changed-content", changed)
+    assert changed_directory != first_directory
+    assert changed_directory.name != first_directory.name
 
 
 def test_cli_exports_scoped_anchor_withholding_immutably(tmp_path, capsys):
