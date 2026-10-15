@@ -129,3 +129,33 @@ def test_mfn_all_caps_at_480(monkeypatch):
     monkeypatch.setattr(server, "_mfn_client", lambda max_articles=24: fake)
     out = server._mfn_all("a/evolution", reports_only=True, limit=9999)
     assert len(out) == 480
+
+
+def test_reports_sorted_by_period_end_and_original_currency(monkeypatch):
+    captured = {}
+
+    class R(FakeBorsdata):
+        def get_reports(self, ins_ids, **kwargs):
+            captured.update(kwargs)
+            return [
+                {"insId": 750, "period_type": "year", "period_End": "2023-12-31", "net_Sales": 1},
+                {"insId": 750, "period_type": "year", "period_End": "2025-12-31", "net_Sales": 3},
+                {"insId": 750, "period_type": "year", "period_End": "2024-12-31", "net_Sales": 2},
+            ]
+
+    monkeypatch.setattr(server, "_borsdata", R())
+    out = _call(server.borsdata_reports)(750, period_type="year", limit=2)
+    assert [r["net_Sales"] for r in out["data"]] == [3, 2]
+    assert captured.get("original") == 1
+
+
+def test_prices_zero_limit_returns_empty():
+    out = _call(server.borsdata_prices)(750, limit=0)
+    assert out["count"] == 0
+    assert out["data"] == []
+
+
+def test_cached_instruments_keep_original_fetch_time(monkeypatch):
+    server._cache["instruments"] = ("2000-01-01T00:00:00+00:00", FakeBorsdata().get_instruments())
+    out = _call(server.borsdata_search_company)("evo")
+    assert out["fetched_at"] == "2000-01-01T00:00:00+00:00"

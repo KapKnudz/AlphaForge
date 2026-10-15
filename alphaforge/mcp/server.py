@@ -92,11 +92,17 @@ def _mfn_all(mfn_slug: str, *, reports_only: bool, limit: int) -> list[dict[str,
     return collected[:limit]
 
 
-def _envelope(source: str, params: dict[str, Any], data: Any) -> dict[str, Any]:
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _envelope(
+    source: str, params: dict[str, Any], data: Any, *, fetched_at: str | None = None
+) -> dict[str, Any]:
     payload = json.dumps(data, sort_keys=True, default=str, ensure_ascii=False)
     return {
         "source": source,
-        "fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "fetched_at": fetched_at or _now(),
         "params": params,
         "count": len(data) if isinstance(data, list) else (1 if data is not None else 0),
         "sha256": hashlib.sha256(payload.encode()).hexdigest(),
@@ -125,6 +131,13 @@ def _guard(source: str, params: dict[str, Any], fn: Callable[[], Any]) -> dict[s
         return {"source": source, "params": params, "error": _sanitize(str(exc))}
 
 
+def _cached(key: str, fetch: Callable[[], Any]) -> tuple[str, Any]:
+    """Return (fetched_at, data); cache hits keep the original fetch time."""
+    if key not in _cache:
+        _cache[key] = (_now(), fetch())
+    return _cache[key]
+
+
 # ---------------------------------------------------------------- Börsdata
 
 
@@ -139,20 +152,35 @@ def borsdata_search_company(query: str, limit: int = 20) -> dict[str, Any]:
     if err := _require_key():
         return {"error": err}
 
-    def fetch() -> Any:
-        if "instruments" not in _cache:
-            _cache["instruments"] = _bd().get_instruments()
-        q = query.strip().lower()
-        rows = [
-            row
-            for row in _cache["instruments"]
-            if q in str(row.get("ticker") or "").lower()
-            or q in str(row.get("name") or "").lower()
-            or q in str(row.get("isin") or "").lower()
-        ]
-        return rows[:limit]
+    try:
+        fetched_at, all_rows = _cached("instruments", _bd().get_instruments)
+    except Exception as exc:
+        return {
+            "source": "borsdata/instruments",
+            "params": {"query": query, "limit": limit},
+            "error": _sanitize(str(exc)),
+        }
+    q = query.strip().lower()
+    rows = [
+        row
+        for row in all_rows
+        if q in str(row.get("ticker") or "").lower()
+        or q in str(row.get("name") or "").lower()
+        or q in str(row.get("isin") or "").lower()
+    ]
+    return _envelope(
+        "borsdata/instruments",
+        {"query": query, "limit": limit},
+        rows[:limit],
+        fetched_at=fetched_at,
+    )
 
-    return _guard("borsdata/instruments", {"query": query, "limit": limit}, fetch)
+
+def _period_end_key(row: dict[str, Any]) -> str:
+    for field in ("report_End_Date", "period_End", "period_end", "report_Date", "date"):
+        if row.get(field):
+            return str(row[field])
+    return ""
 
 
 @mcp.tool()
@@ -160,8 +188,9 @@ def borsdata_reports(ins_id: int, period_type: str = "year", limit: int = 20) ->
     """Fetch financial reports (income statement, balance sheet, cash flow).
 
     period_type is one of "year", "quarter" or "r12" (rolling twelve months).
-    Amounts follow Börsdata report metadata units (millions of currency
-    unless the row states otherwise). Rows are returned newest-first as
+    Amounts are in the original report currency (the row's `currency`
+    field), following Börsdata report metadata units (millions of currency
+    unless the row states otherwise). No FX conversion is applied. Rows are returned newest-first as
     flattened by the adapter; use the report_Start_Date / report_End_Date
     fields in each row for period identity.
     """
@@ -169,9 +198,9 @@ def borsdata_reports(ins_id: int, period_type: str = "year", limit: int = 20) ->
         return {"error": err}
 
     def fetch() -> Any:
-        rows = _bd().get_reports([ins_id])
+        rows = _bd().get_reports([ins_id], original=1)
         rows = [r for r in rows if r.get("period_type") == period_type]
-        rows.sort(key=lambda r: str(r.get("report_End_Date") or ""), reverse=True)
+        rows.sort(key=_period_end_key, reverse=True)
         return rows[:limit]
 
     return _guard(
@@ -228,12 +257,11 @@ def borsdata_kpi_metadata() -> dict[str, Any]:
     if err := _require_key():
         return {"error": err}
 
-    def fetch() -> Any:
-        if "kpi_metadata" not in _cache:
-            _cache["kpi_metadata"] = _bd().get_kpi_metadata()
-        return _cache["kpi_metadata"]
-
-    return _guard("borsdata/kpi-metadata", {}, fetch)
+    try:
+        fetched_at, data = _cached("kpi_metadata", _bd().get_kpi_metadata)
+    except Exception as exc:
+        return {"source": "borsdata/kpi-metadata", "params": {}, "error": _sanitize(str(exc))}
+    return _envelope("borsdata/kpi-metadata", {}, data, fetched_at=fetched_at)
 
 
 @mcp.tool()
@@ -246,6 +274,8 @@ def borsdata_prices(ins_id: int, limit: int = 250) -> dict[str, Any]:
     """
     if err := _require_key():
         return {"error": err}
+    if limit <= 0:
+        return _envelope("borsdata/prices", {"ins_id": ins_id, "limit": limit}, [])
     return _guard(
         "borsdata/prices",
         {"ins_id": ins_id, "limit": limit},
