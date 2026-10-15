@@ -49,7 +49,7 @@ CASH_LEGS = (
 
 
 def close(a, b, path, annual=True):
-    a, b = decimal(a), decimal(b)
+    a, b = decimal(a, path), decimal(b, path)
     absolute, relative = (D("2e-8"), D("2e-12")) if annual else (D("1e-7"), D("2e-11"))
     require(
         abs(a - b) <= max(absolute, relative * max(abs(a), abs(b))), "reconciliation_failed", path
@@ -64,6 +64,14 @@ def outcome(value=None, error=None):
         "value": encode(value) if error is None else None,
         "reasons": [{"code": error.code, "path": error.path}] if error else [],
     }
+
+
+def first_row_error(rows):
+    for row in rows:
+        if not row["available"]:
+            reason = row["reasons"][0]
+            return Unavailable(reason["code"], reason["path"], row["status"])
+    return None
 
 
 def require_allocations(supplied, allocations, destination, path):
@@ -222,6 +230,7 @@ def annual(block, evidence, valuation, allocations):
         status="unsupported",
     )
     rows = project(block) if block["mode"] == "aggregate_response" else copy.deepcopy(block["rows"])
+    require(isinstance(rows, list), "invalid_annual_rows")
     require(10 <= len(rows) <= 12, "ten_full_years_required")
     result = []
     for i, row in enumerate(rows, 1):
@@ -288,9 +297,10 @@ def terminal(block, rows, evidence, r):
     require(block["mode"] == "gordon", "unsupported_tail", status="unsupported")
     g = decimal(block.get("growth"), "terminal.growth")
     require(-1 < g < r, "invalid_terminal_growth")
-    require(
-        len(rows) == 12 and all(row["available"] for row in rows), "complete_witnesses_required"
-    )
+    require(len(rows) == 12, "complete_witnesses_required")
+    witness_error = first_row_error(rows[10:12])
+    if witness_error is not None:
+        raise witness_error
     a, b = rows[10]["value"], rows[11]["value"]
     for row in (a, b):
         require(
@@ -305,8 +315,28 @@ def terminal(block, rows, evidence, r):
             decimal(row.get("legacy_da", 0)) == 0 and decimal(row.get("opening_tax", 0)) == 0,
             "finite_cash_in_terminal",
         )
+    for row in (a, b):
+        if "growth" in row:
+            require(
+                decimal(row["growth"], "terminal.growth") == g,
+                "terminal_growth_mismatch",
+                "terminal.growth",
+            )
+    revenue_present = "revenue" in a, "revenue" in b
+    require(
+        revenue_present[0] == revenue_present[1],
+        "terminal_revenue_pair_required",
+        "terminal.revenue",
+        "insufficient_evidence",
+    )
+    if all(revenue_present):
+        close(
+            b["revenue"],
+            decimal(a["revenue"], "terminal.revenue") * (1 + g),
+            "terminal.revenue",
+        )
     for leg in CASH_LEGS + ("fcff",):
-        close(decimal(b[leg]), decimal(a[leg]) * (1 + g), "terminal." + leg)
+        close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
     # Gross charge/recovery and investment constituents must also be stationary
     # whenever this additional supported granularity was actually supplied.
     for leg in (
@@ -381,9 +411,10 @@ def bridge(block, evidence, rows, valuation, allocations):
             )
             baseline = decimal(p.get("recurring_baseline_ebit"))
             require(baseline > 0, "invalid_claim_baseline")
-            require(
-                len(rows) >= 5 and all(x["available"] for x in rows[:5]), "claim_earnings_missing"
-            )
+            require(len(rows) >= 5, "claim_earnings_missing")
+            earnings_error = first_row_error(rows[:5])
+            if earnings_error is not None:
+                raise earnings_error
             earnings = [max(D(0), decimal(x["value"]["ebit"])) for x in rows[:5]]
             amount = (
                 -(
@@ -547,14 +578,10 @@ def _stage(evidence, target, fn):
         return outcome(error=Unavailable("numerical_failure", str(error), "numerical_failure"))
 
 
-def _dependent(upstream, name):
+def _dependent(upstream):
     if not upstream["available"]:
         reason = upstream["reasons"][0]
-        raise Unavailable(
-            "dependency_unavailable:" + name + ":" + reason["code"],
-            reason["path"],
-            upstream["status"],
-        )
+        raise Unavailable(reason["code"], reason["path"], upstream["status"])
     return upstream["value"]
 
 
@@ -574,11 +601,13 @@ def _scenario(pack, scenario, valuation):
         lambda: annual(scenario.get("operations"), evidence, valuation, allocations),
     )
     cash = result["annual_fcff"]
-    if cash["available"] and not all(row["available"] for row in cash["value"][:10]):
-        cash["status"] = "insufficient_evidence"
-        cash["calculation_status"] = "incomplete_annual_rows"
-        cash["available"] = False
-        cash["reasons"] = [{"code": "incomplete_annual_fcff", "path": "annual_fcff"}]
+    if cash["available"]:
+        consumed_error = first_row_error(cash["value"][:10])
+        if consumed_error is not None:
+            cash["status"] = consumed_error.status
+            cash["calculation_status"] = "incomplete_annual_rows"
+            cash["available"] = False
+            cash["reasons"] = [{"code": consumed_error.code, "path": consumed_error.path}]
     rate_result = _stage(
         evidence,
         "explicit_pv",
@@ -592,8 +621,8 @@ def _scenario(pack, scenario, valuation):
     result["wacc"] = rate_result
 
     def explicit():
-        rows = _dependent(cash, "annual_fcff")
-        r = decimal(_dependent(rate_result, "wacc")["wacc"])
+        rows = _dependent(cash)
+        r = decimal(_dependent(rate_result)["wacc"])
         return {
             "sum": sum(
                 (
@@ -611,15 +640,15 @@ def _scenario(pack, scenario, valuation):
     result["explicit_pv"] = _stage(evidence, "explicit_pv", explicit)
 
     def tail():
-        rows = _dependent(cash, "annual_fcff")
-        r = decimal(_dependent(rate_result, "wacc")["wacc"])
+        rows = _dependent(cash)
+        r = decimal(_dependent(rate_result)["wacc"])
         return terminal(scenario.get("terminal"), rows, evidence, r)
 
     result["terminal"] = _stage(evidence, "operating_value", tail)
 
     def ev():
-        explicit_value = decimal(_dependent(result["explicit_pv"], "explicit_pv")["sum"])
-        tail_value = _dependent(result["terminal"], "terminal")
+        explicit_value = decimal(_dependent(result["explicit_pv"])["sum"])
+        tail_value = _dependent(result["terminal"])
         value = explicit_value + decimal(tail_value["pv"])
         fraction = decimal(tail_value["pv"]) / value if value > 0 else None
         return {
@@ -654,8 +683,8 @@ def _scenario(pack, scenario, valuation):
     result["basic_shares"] = shares
 
     def common():
-        value = decimal(_dependent(result["operating_value"], "operating_value")["ev"])
-        items = _dependent(result["bridge"], "bridge")
+        value = decimal(_dependent(result["operating_value"])["ev"])
+        items = _dependent(result["bridge"])
         total = sum((decimal(x["amount"]) for x in items), D(0))
         pre = value + total
         rights = scenario.get("rights")
@@ -689,7 +718,7 @@ def _scenario(pack, scenario, valuation):
             allocated = allocate(
                 rights,
                 pre,
-                decimal(_dependent(shares, "basic_shares")),
+                decimal(_dependent(shares)),
                 evidence,
                 valuation,
             )
@@ -698,10 +727,8 @@ def _scenario(pack, scenario, valuation):
     result["common_equity"] = _stage(evidence, "common_equity", common)
 
     def per_share():
-        c = _dependent(result["common_equity"], "common_equity")
-        quotient = (
-            decimal(c["common_residual"]) * 1_000_000 / decimal(_dependent(shares, "basic_shares"))
-        )
+        c = _dependent(result["common_equity"])
+        quotient = decimal(c["common_residual"]) * 1_000_000 / decimal(_dependent(shares))
         return {
             "signed_quotient": quotient,
             "price_estimate": quotient if quotient > 0 else None,
@@ -711,7 +738,7 @@ def _scenario(pack, scenario, valuation):
     result["per_share_reporting"] = _stage(evidence, "per_share_reporting", per_share)
 
     def quote():
-        value = _dependent(result["per_share_reporting"], "per_share_reporting")
+        value = _dependent(result["per_share_reporting"])
         fx = evidence.block(scenario.get("fx"), "quote_fx")
         require(fx["quote_currency"] == pack["quote_currency"], "fx_quote_currency_mismatch")
         q = exchange_rate(

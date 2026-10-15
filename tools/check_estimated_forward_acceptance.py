@@ -21,6 +21,14 @@ from alphaforge.core.valuation.estimated_inputs import (  # noqa: E402
 )
 
 ACCEPTANCE_CONTRACT = "estimated-forward-reference-acceptance-v1"
+SOURCE_PATHS = (
+    "alphaforge/core/valuation/estimated_inputs.py",
+    "alphaforge/core/valuation/estimated_projection.py",
+    "alphaforge/core/valuation/estimated_fcff.py",
+    "alphaforge/core/valuation/forward_fcff.py",
+    "alphaforge/core/valuation/forward_fcff_contract.py",
+    "tools/check_estimated_forward_acceptance.py",
+)
 TOLERANCES = {
     "annual": {"absolute": "2e-8", "relative": "2e-12"},
     "value": {"absolute": "1e-7", "relative": "2e-11"},
@@ -163,9 +171,7 @@ def _tolerance(path):
         )
     if output == "bridge":
         return (
-            "value"
-            if len(tail) == 2 and isinstance(tail[0], int) and tail[1] == "amount"
-            else None
+            "value" if len(tail) == 2 and isinstance(tail[0], int) and tail[1] == "amount" else None
         )
     if output == "common_equity":
         if len(tail) == 1 and tail[0] in COMMON_VALUE_FIELDS:
@@ -295,13 +301,7 @@ def validate_expected(expected, oracle_basis):
 
 
 def _code_identity(root):
-    paths = (
-        "alphaforge/core/valuation/estimated_inputs.py",
-        "alphaforge/core/valuation/estimated_projection.py",
-        "alphaforge/core/valuation/estimated_fcff.py",
-        "tools/check_estimated_forward_acceptance.py",
-    )
-    body = b"".join(path.encode() + b"\0" + (root / path).read_bytes() for path in paths)
+    body = b"".join(path.encode() + b"\0" + (root / path).read_bytes() for path in SOURCE_PATHS)
     return hashlib.sha256(body).hexdigest()
 
 

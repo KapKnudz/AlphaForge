@@ -127,7 +127,11 @@ EV = ExplicitPV + TV_10/(1+r)^10, with r>0 and -1<g<r
 
 Witnesses never enter explicit PV. Finite effects must be exhausted; every
 material annual witness leg, including available gross tax/investment
-constituents, must grow coherently. Aggregate response recovery queues are checked
+constituents, must grow coherently. Retained witness growth must exactly equal the
+selected Gordon growth. Retained witness revenue is optional for direct rows, but
+when present it must be present in both witnesses and reconcile at the annual
+witness tolerance; generated response revenue is always checked. Aggregate
+response recovery queues are checked
 from the first witness through the first mature-regime source year, so a loss-created
 or other pending transition cannot hide behind two accidentally equal recoveries.
 Finite supplied settlements cannot enter or extend beyond the witnesses.
@@ -177,7 +181,9 @@ any separately required rights FX remains a genuine common-value dependency.
 
 Each stage exports availability, conditional/insufficient-evidence/invalid-input/
 unsupported/not-requested/numerical-failure status and direct or propagated
-reasons. Operating gaps suppress dependent complete PVs; rate gaps preserve
+reasons. An aggregate or dependent consumer preserves the first chronologically
+consumed unavailable row's status and root reason/path; structural row-count or
+shape failures remain distinct. Operating gaps suppress dependent complete PVs; rate gaps preserve
 undiscounted cash; tail gaps preserve explicit PV; bridge gaps preserve EV;
 denominator/quote-FX gaps remain scoped. Unaffected annual rows and supplied
 component diagnostics remain visible. Limitations name their affected outputs.
@@ -197,14 +203,16 @@ distributions or guaranteed bounds; smaller differences can also be material.
 `changes` (replacement top-level fields). It leaves the original untouched,
 creates a content-bound parented version, recomputes outputs, records changed
 paths/affected outputs/actual result differences, and invalidates current reviews.
-Because built WACC consumes ownership and quote FX, revisions to either conservatively
+Each changed path records before/after values and explicit presence flags, so a
+missing key is distinguishable from an explicitly supplied null. Because built WACC consumes ownership and quote FX, revisions to either conservatively
 invalidate every downstream output from explicit PV through both per-share values.
 The export retains the parent pack as well as the child. It does not edit an
 accepted reference or silently carry its approval into changed premises.
 
 Write-once local bundles under `estimated-forward/<artifact identity>/` contain
 original inputs, outputs, execution/code identities, report, annual CSV and
-individual output JSON files. Detached output files/CSV rows/report retain the
+individual output JSON files. Code identities cover the estimated modules and the
+shared supplied-schedule calculation/contract helpers they execute. Detached output files/CSV rows/report retain the
 full identity and assumption pack, source anchors, conditions, limitations,
 preparation/actual review facts and distinct calculation/financial/human status.
 These are user-requested **local exports**, not permission to publish private
@@ -234,8 +242,9 @@ sibling `input_file`/`expected_file` pairs. Each expected file contains that sam
 requires the complete output shape, compares only enumerated computed financial
 fields by their fixed class, compares all other fields—including identifiers,
 allocations, dates, units, shares, statuses and extensions—exactly, and prints only
-the matched case count plus code revision and code-source
-identity. It neither generates expected answers nor acquires, rewrites, exports or
+the matched case count plus code revision and code-source identity, including the
+shared supplied-schedule calculation and contract helpers. It neither generates
+expected answers nor acquires, rewrites, exports or
 registers reference material. Repository tests and examples remain synthetic; a
 real-reference run is separate private evidence and must be repeated against the
 exact delivered head.
