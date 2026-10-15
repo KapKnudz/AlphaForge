@@ -103,11 +103,16 @@ impairment changes the top-up interaction; a loss creates no new refund but can
 still receive an existing recovery. Growth contraction creates no asset-sale
 credit. Full parameters and constituent states remain inspectable in output.
 
-WACC is either an evidenced same-currency nominal annual-effective supplied
+WACC is either an evidenced reporting-currency nominal annual-effective supplied
 estimate, or a build from effective `exp(continuous risk-free)-1`, beta/ERP and
 independent dated market-equity/debt weights with a usable financing shield only
-in the debt cost. It never borrows the SEK size-bucket hurdle or derives weights
-from the DCF itself. Interest and shield cash are excluded from FCFF.
+in the debt cost. The discount block declares V, reporting currency and rate basis.
+A build additionally declares the market-close date/quote currency, debt
+date/reporting currency, and debt-cost and shield dates/bases. It consumes the
+same dated ownership share count and quote-FX block as per-share and quote outputs;
+duplicate WACC share or FX inputs are invalid. It never borrows the SEK size-bucket
+hurdle or derives weights from the DCF itself. Interest and shield cash are excluded
+from FCFF.
 
 ```text
 ExplicitPV = sum(FCFF_t / (1+r)^t, t=1..10)
@@ -117,7 +122,10 @@ EV = ExplicitPV + TV_10/(1+r)^10, with r>0 and -1<g<r
 
 Witnesses never enter explicit PV. Finite effects must be exhausted; every
 material annual witness leg, including available gross tax/investment
-constituents, must grow coherently. `FCFF_10*(1+g)` is not a terminal substitute.
+constituents, must grow coherently. Aggregate response recovery lags cannot begin
+after the two witnesses, and finite supplied settlements cannot enter or extend
+beyond them.
+`FCFF_10*(1+g)` is not a terminal substitute.
 A tail gap preserves finite explicit-PV diagnostics, not a zero-tail EV. Runoff,
 stubs and alternative terminal models are not implemented. Near-pole and
 terminal-dominance flags ask for financial explanation, not automatic rejection
@@ -134,17 +142,21 @@ pairs, not invented underlying censuses. Reusing an embedded allocation in the
 bridge or rights is invalid.
 
 Bridge methods are supplied reporting-currency PV, explicitly dated foreign PV
-converted using `foreign_per_reporting`, and an explicitly selected
-`earnings_linked_pv` response: current anchor times positive year-one EBIT plus
-later anchor times mean positive years 1–5 EBIT, divided by supplied positive
-recurring baseline EBIT. This is a conditional aggregate response, not invented
-contractual earnout terms. Book/PV and economic interpretation remain supplied
-record judgments.
+converted using an explicit foreign/reporting pair and `foreign_per_reporting`,
+and an explicitly selected `earnings_linked_pv` response: current anchor times
+positive year-one EBIT plus later anchor times mean positive years 1–5 EBIT,
+divided by supplied positive recurring baseline EBIT. Asset categories are signed
+as additions; debt, tax, consideration, pension, legal and noncommon categories
+are signed as deductions. Earnings-linked PV is claim-only. This is a conditional
+aggregate response, not invented contractual earnout terms. Book/PV and economic
+interpretation remain supplied record judgments.
 
 Existing European-call rights can be allocated endogenously against common
 value with explicit counts/strikes/expiry/ACT365, volatility, continuous risk-free
 and dividend assumptions. They may use the reporting currency or the declared
-quote currency with their own dated FX. The monotone allocation reconciles
+quote currency with their own explicit dated currency pair. Every differing-currency
+conversion identifies both sides; an explicitly supplied same-currency rate must
+be one. The monotone allocation reconciles
 common plus calls to pre-rights residual, counts claims once and uses **basic**
 shares; no duplicate dilution or exercise-proceeds asset. This internal claims
 allocation is not a revenue-growth reverse DCF. Unsupported right types refuse.
@@ -197,3 +209,22 @@ A=1e-7 million/R=2e-11; per-share A=1e-8 currency/R=2e-11. Identities, dates, un
 share counts and withholding/allocation semantics are exact, never tolerance
 exceptions. Tests cover components as well as totals. Presentation rounding is
 not a license to change assumptions, reference expectations or tolerances.
+
+A private reference can be checked without adding it to the repository:
+
+```sh
+python tools/check_estimated_forward_acceptance.py --manifest "$MANIFEST"
+```
+
+The externally supplied manifest uses
+`estimated-forward-reference-acceptance-v1`, states a nonempty independent
+`oracle_basis`, repeats the three tolerance objects above exactly, and lists
+sibling `input_file`/`expected_file` pairs. Each expected file contains that same
+`oracle_basis` and a complete independently prepared evaluator result. The checker
+requires the complete output shape, compares computed financial components by
+their fixed class, compares identity/date/unit/share/status/withholding fields
+exactly, and prints only the matched case count plus code revision and code-source
+identity. It neither generates expected answers nor acquires, rewrites, exports or
+registers reference material. Repository tests and examples remain synthetic; a
+real-reference run is separate private evidence and must be repeated against the
+exact delivered head.

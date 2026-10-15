@@ -85,6 +85,11 @@ def validate_envelope(pack):
     )
     require(pack["currency"] in {"EUR", "SEK"}, "unsupported_currency", status="unsupported")
     require(
+        pack["quote_currency"] in {"EUR", "SEK"},
+        "unsupported_quote_currency",
+        status="unsupported",
+    )
+    require(
         pack["money_units"] == "millions" and pack["share_units"] == "absolute",
         "unsupported_units",
         status="unsupported",

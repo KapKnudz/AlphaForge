@@ -48,7 +48,12 @@ def pack():
             noncash_compatibility="D&A reduced EBIT; no compensation addback",
             allocation_ids=["operating_tax", "renewal"],
         ),
-        "discount": block(inputs={"wacc": "0.1"}),
+        "discount": block(
+            valuation_date="2024-02-29",
+            currency="EUR",
+            rate_basis="nominal_annual_effective",
+            inputs={"wacc": "0.1"},
+        ),
         "terminal": block(
             mode="gordon",
             growth="0",
@@ -57,14 +62,21 @@ def pack():
         "bridge": block(
             valuation_date="2024-02-29", categories=sorted(BRIDGE_CATEGORIES), items=bridge
         ),
-        "ownership": block(basic_shares="10000000"),
+        "ownership": block(
+            valuation_date="2024-02-29", share_units="absolute", basic_shares="10000000"
+        ),
         "rights": block(
             valuation_date="2024-02-29",
             currency="EUR",
             method="endogenous_european_calls_basic_shares",
             items=[],
         ),
-        "fx": block(valuation_date="2024-02-29", quote_currency="SEK", quote_per_reporting="2"),
+        "fx": block(
+            valuation_date="2024-02-29",
+            reporting_currency="EUR",
+            quote_currency="SEK",
+            quote_per_reporting="2",
+        ),
     }
     return {
         "standard": STANDARD,

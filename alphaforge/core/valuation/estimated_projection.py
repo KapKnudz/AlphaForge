@@ -22,8 +22,11 @@ def project(block):
     lag = p["recovery_lag"]
     years = p["opening_deferred_years"]
     require(type(maturity) is int and 2 <= maturity <= 10, "invalid_maturity")
-    require(type(lag) is int and 0 <= lag <= 12, "invalid_recovery_lag")
+    require(type(lag) is int and 0 <= lag <= 10, "invalid_recovery_lag")
     require(type(years) is int and 1 <= years <= 12, "invalid_deferred_years")
+    settlements = p["settlements"]
+    require(isinstance(settlements, list), "invalid_settlements")
+    require(len(settlements) <= 10, "settlement_in_terminal_witnesses")
     for key in (
         "refundable_profit_share",
         "recovery_fraction",
@@ -128,7 +131,6 @@ def project(block):
         lease_renewal = r * n("lease_renewal_rate")
         lease_lead = increment * n("lease_growth_capital")
         close = r * n("wc_ratio")
-        settlements = p["settlements"]
         settlement = decimal(settlements[t - 1], "settlements") if t <= len(settlements) else D(0)
         row = {
             "revenue": r,

@@ -167,6 +167,17 @@ def test_lag_three_breaks_terminal_transition_not_explicit_value():
     assert r["explicit_pv"]["available"] and not r["operating_value"]["available"]
 
 
+def test_post_witness_recoveries_and_settlements_are_rejected():
+    p = response()
+    inputs = p["scenarios"]["base"]["operations"]["inputs"]
+    inputs.update(refundable_profit_share="1", recovery_lag=12)
+    assert base(p)["annual_fcff"]["status"] == "invalid_input"
+
+    p = response()
+    p["scenarios"]["base"]["operations"]["inputs"]["settlements"] = ["0"] * 10 + ["1"]
+    assert base(p)["annual_fcff"]["status"] == "invalid_input"
+
+
 def test_no_duplicate_lease_tax_compensation_claims():
     p = pack()
     p["scenarios"]["base"]["bridge"]["items"][0]["allocation_id"] = "operating_tax"
@@ -195,7 +206,7 @@ def test_endogenous_calls_independently_known_atm_value():
     p["valuation_date"] = "2023-02-28"
     p["allocations"].append({"id": "call", "destination": "rights"})
     s = p["scenarios"]["base"]
-    for key in ("bridge", "rights", "fx"):
+    for key in ("discount", "bridge", "ownership", "rights", "fx"):
         s[key]["valuation_date"] = p["valuation_date"]
     # One-year ATM call at S=100, sigma=.2, r=q=0:
     # C=100*(2*Phi(.1)-1)=7.965567455405796...
@@ -281,6 +292,17 @@ def test_scenario_disagreement_and_scaling():
     assert number(base(p)["per_share_reporting"], "price_estimate") == pytest.approx(D("7.75"))
 
 
+def test_equal_zero_scenarios_are_not_materially_different():
+    p = pack()
+    bridge = p["scenarios"]["base"]["bridge"]["items"]
+    next(x for x in bridge if x["category"] == "accessible_cash")["inputs"]["amount"] = "0"
+    next(x for x in bridge if x["category"] == "legal_other")["inputs"]["amount"] = "-135"
+    p["scenarios"]["same"] = copy.deepcopy(p["scenarios"]["base"])
+    result = evaluate(p)
+    assert number(result["scenarios"]["base"]["common_equity"], "common_residual") == 0
+    assert "material_scenario_disagreement" not in result["firm_investment_conclusion"]["reasons"]
+
+
 def test_real_cli_detached_exports_are_self_describing_and_write_once(tmp_path, capsys):
     input_path = tmp_path / "synthetic.json"
     input_path.write_text(json.dumps(pack()))
@@ -312,11 +334,16 @@ def test_supported_wacc_build_effective_compounding_and_shield_once():
         "beta": "1.2",
         "equity_risk_premium": ".05",
         "market_close": "20",
-        "basic_shares": "10000000",
-        "quote_per_reporting": "2",
+        "market_close_date": p["valuation_date"],
+        "market_close_currency": "SEK",
         "debt": "25",
+        "debt_date": p["valuation_date"],
+        "debt_currency": "EUR",
         "debt_cost": ".06",
+        "debt_cost_date": p["valuation_date"],
+        "debt_cost_basis": "nominal_annual_effective_pre_tax",
         "shield_rate": ".2",
+        "shield_rate_date": p["valuation_date"],
     }
     p["scenarios"]["base"]["discount"]["inputs"] = inputs
     r = base(p)
@@ -326,6 +353,23 @@ def test_supported_wacc_build_effective_compounding_and_shield_once():
     assert number(r["wacc"], "debt_weight") == D(".2")
     assert number(r["wacc"], "wacc") == pytest.approx(expected)
     assert all(D(x["value"]["operating_cash_tax"]) == 4 for x in r["annual_fcff"]["value"])
+    inputs["basic_shares"] = "5000000"
+    assert base(p)["wacc"]["status"] == "invalid_input"
+    inputs.pop("basic_shares")
+    p["scenarios"]["base"]["ownership"]["basic_shares"] = "20000000"
+    shared = base(p)
+    assert number(shared["wacc"], "market_equity") == 200
+    assert D(shared["basic_shares"]["value"]) == 20000000
+
+
+def test_wacc_and_ownership_bases_are_dated_and_shared():
+    p = pack()
+    p["scenarios"]["base"]["discount"]["valuation_date"] = "2024-02-28"
+    assert base(p)["wacc"]["status"] == "invalid_input"
+    p = pack()
+    p["scenarios"]["base"]["ownership"]["valuation_date"] = "2024-02-28"
+    r = base(p)
+    assert r["wacc"]["available"] and r["basic_shares"]["status"] == "invalid_input"
 
 
 def test_foreign_claims_and_rights_fx_are_scoped_and_dated():
@@ -337,6 +381,7 @@ def test_foreign_claims_and_rights_fx_are_scoped_and_dated():
         inputs={
             "amount": "-12",
             "currency": "USD",
+            "reporting_currency": "EUR",
             "foreign_per_reporting": "1.2",
             "fx_date": p["valuation_date"],
         },
@@ -347,7 +392,12 @@ def test_foreign_claims_and_rights_fx_are_scoped_and_dated():
     assert r["operating_value"]["available"] and not r["common_equity"]["available"]
     claim["inputs"]["foreign_per_reporting"] = "1.2"
     p["allocations"].append({"id": "call", "destination": "rights"})
-    s["rights"].update(currency="SEK", fx_date=p["valuation_date"], quote_per_reporting="2")
+    s["rights"].update(
+        currency="SEK",
+        reporting_currency="EUR",
+        fx_date=p["valuation_date"],
+        quote_per_reporting="2",
+    )
     s["rights"]["items"] = [
         block(
             id="synthetic-call",
@@ -370,6 +420,53 @@ def test_foreign_claims_and_rights_fx_are_scoped_and_dated():
     )
     s["rights"]["quote_per_reporting"] = None
     assert not base(p)["common_equity"]["available"]
+
+
+def test_fx_pairs_reject_same_currency_conversion_and_missing_pair_side():
+    p = pack()
+    p["quote_currency"] = "EUR"
+    fx = p["scenarios"]["base"]["fx"]
+    fx.update(quote_currency="EUR", quote_per_reporting="2")
+    assert base(p)["per_share_quote"]["status"] == "invalid_input"
+    fx["quote_per_reporting"] = "1"
+    assert number(base(p)["per_share_quote"], "price_estimate") == D("15.5")
+
+    p = pack()
+    del p["scenarios"]["base"]["fx"]["reporting_currency"]
+    assert base(p)["per_share_quote"]["status"] == "invalid_input"
+
+    p = pack()
+    p["scenarios"]["base"]["rights"].update(
+        reporting_currency="EUR",
+        fx_date=p["valuation_date"],
+        quote_per_reporting="2",
+    )
+    assert base(p)["common_equity"]["status"] == "invalid_input"
+
+
+def test_bridge_category_controls_method_and_sign():
+    p = pack()
+    debt = next(
+        x for x in p["scenarios"]["base"]["bridge"]["items"] if x["category"] == "nonlease_debt"
+    )
+    debt["inputs"]["amount"] = "10"
+    assert base(p)["common_equity"]["status"] == "invalid_input"
+
+    p = pack()
+    asset = next(
+        x
+        for x in p["scenarios"]["base"]["bridge"]["items"]
+        if x["category"] == "nonoperating_assets"
+    )
+    asset.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "0",
+        },
+    )
+    assert base(p)["common_equity"]["status"] == "invalid_input"
 
 
 @pytest.mark.parametrize("value", ["0", "0.0000000000000000000001", "-1"])
@@ -485,3 +582,45 @@ def test_malformed_optional_bridge_does_not_poison_operations():
     r = base(p)
     assert r["operating_value"]["available"]
     assert r["common_equity"]["status"] == "invalid_input"
+
+
+def test_reference_comparison_preserves_component_tolerances_and_exact_metadata():
+    from tools.check_estimated_forward_acceptance import AcceptanceError, compare_outputs
+
+    expected = {
+        "identity": {"valuation_date": "2024-02-29", "currency": "EUR"},
+        "scenarios": {
+            "base": {
+                "annual_fcff": {
+                    "value": [{"value": {"fcff": "14.000000000"}}],
+                },
+                "operating_value": {"value": {"ev": "140.00000000"}},
+                "per_share_reporting": {"value": {"price_estimate": "15.50000000"}},
+                "basic_shares": {"value": "10000000"},
+            }
+        },
+    }
+    actual = copy.deepcopy(expected)
+    actual["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = (
+        "14.000000019"
+    )
+    actual["scenarios"]["base"]["operating_value"]["value"]["ev"] = "140.00000009"
+    actual["scenarios"]["base"]["per_share_reporting"]["value"]["price_estimate"] = (
+        "15.500000009"
+    )
+    compare_outputs(actual, expected)
+
+    outside = copy.deepcopy(expected)
+    outside["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = (
+        "14.000000021"
+    )
+    with pytest.raises(AcceptanceError, match="annual comparison mismatch"):
+        compare_outputs(outside, expected)
+
+    actual["identity"]["valuation_date"] = "2024-03-01"
+    with pytest.raises(AcceptanceError, match="exact comparison mismatch"):
+        compare_outputs(actual, expected)
+    actual = copy.deepcopy(expected)
+    actual["scenarios"]["base"]["basic_shares"]["value"] = "10000001"
+    with pytest.raises(AcceptanceError, match="exact comparison mismatch"):
+        compare_outputs(actual, expected)
