@@ -15,7 +15,13 @@ from alphaforge.cli.estimated_forward import (
 )
 from alphaforge.cli.main import build_parser
 from alphaforge.core.valuation.estimated_fcff import evaluate
-from alphaforge.core.valuation.estimated_inputs import LABEL, canonical, content_identity, revise
+from alphaforge.core.valuation.estimated_inputs import (
+    LABEL,
+    Unavailable,
+    canonical,
+    content_identity,
+    revise,
+)
 from tests.estimated_fixtures import block, pack, response
 from tools.check_estimated_forward_acceptance import (
     SOURCE_PATHS as ACCEPTANCE_SOURCE_PATHS,
@@ -23,6 +29,20 @@ from tools.check_estimated_forward_acceptance import (
     _code_identity,
     compare_outputs,
 )
+
+SCENARIO_STAGE_NAMES = {
+    "annual_fcff",
+    "wacc",
+    "explicit_pv",
+    "terminal",
+    "operating_value",
+    "bridge",
+    "basic_shares",
+    "common_equity",
+    "per_share_reporting",
+    "per_share_quote",
+    "reverse",
+}
 
 
 def base(p):
@@ -32,6 +52,20 @@ def base(p):
 def number(out, field):
     assert out["available"], out
     return D(out["value"][field])
+
+
+def use_earnings_linked(p):
+    item = next(
+        x for x in p["scenarios"]["base"]["bridge"]["items"] if x["category"] == "legal_other"
+    )
+    item.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "0",
+        },
+    )
 
 
 def test_independent_constant_perpetuity_and_every_annual_leg():
@@ -404,21 +438,8 @@ def test_every_registered_allocation_is_consumed_once_by_its_destination():
 
 
 def test_earnings_linked_bridge_preserves_consumed_row_refusal_scope():
-    def earnings_linked(p):
-        item = next(
-            x for x in p["scenarios"]["base"]["bridge"]["items"] if x["category"] == "legal_other"
-        )
-        item.update(
-            method="earnings_linked_pv",
-            inputs={
-                "recurring_baseline_ebit": "20",
-                "current_pv_anchor": "1",
-                "later_pv_anchor": "0",
-            },
-        )
-
     p = pack()
-    earnings_linked(p)
+    use_earnings_linked(p)
     p["scenarios"]["base"]["operations"]["rows"][2]["ebit"] = "abc"
     result = base(p)
     expected = [{"code": "invalid_number", "path": "annual.3.ebit"}]
@@ -426,7 +447,7 @@ def test_earnings_linked_bridge_preserves_consumed_row_refusal_scope():
     assert result["bridge"]["reasons"] == expected
 
     p = pack()
-    earnings_linked(p)
+    use_earnings_linked(p)
     p["records"]["unsupported-earnings"] = {
         **copy.deepcopy(p["records"]["budget"]),
         "status": "unsupported",
@@ -437,12 +458,91 @@ def test_earnings_linked_bridge_preserves_consumed_row_refusal_scope():
     assert result["reasons"] == [{"code": "unqualified_record", "path": "unsupported-earnings"}]
 
     p = pack()
-    earnings_linked(p)
+    use_earnings_linked(p)
     p["scenarios"]["base"]["operations"]["rows"][5]["ebit"] = "abc"
     assert base(p)["bridge"]["available"]
 
     p = pack()
     p["scenarios"]["base"]["operations"]["rows"][2]["ebit"] = "abc"
+    assert base(p)["bridge"]["available"]
+
+
+@pytest.mark.parametrize(
+    "case,status,reason",
+    [
+        ("missing", "not_requested", {"code": "not_supplied", "path": "operations"}),
+        ("invalid_block", "invalid_input", {"code": "invalid_block", "path": "operations"}),
+        (
+            "missing_record",
+            "insufficient_evidence",
+            {"code": "record_not_catalogued", "path": "absent-operation-record"},
+        ),
+        (
+            "unsupported_basis",
+            "unsupported",
+            {"code": "unsupported_earnings_basis", "path": ""},
+        ),
+        ("malformed_rows", "invalid_input", {"code": "invalid_annual_rows", "path": ""}),
+        ("empty_rows", "invalid_input", {"code": "ten_full_years_required", "path": ""}),
+        (
+            "annual_limitation",
+            "unsupported",
+            {"code": "unresolved_limitation", "path": "Synthetic annual limitation"},
+        ),
+    ],
+)
+def test_earnings_linked_bridge_preserves_whole_annual_refusal(case, status, reason):
+    p = pack()
+    use_earnings_linked(p)
+    operations = p["scenarios"]["base"]["operations"]
+    if case == "missing":
+        p["scenarios"]["base"]["operations"] = None
+    elif case == "invalid_block":
+        p["scenarios"]["base"]["operations"] = []
+    elif case == "missing_record":
+        operations["record_ids"] = ["absent-operation-record"]
+    elif case == "unsupported_basis":
+        operations["basis"] = "unsupported_basis"
+    elif case == "malformed_rows":
+        operations["rows"] = {}
+    elif case == "empty_rows":
+        operations["rows"] = []
+    else:
+        p["limitations"].append(
+            {
+                "reason": "Synthetic annual limitation",
+                "status": "unsupported",
+                "affected_outputs": ["annual_fcff"],
+            }
+        )
+    result = base(p)
+    expected = [reason]
+    assert result["annual_fcff"]["status"] == status
+    assert result["annual_fcff"]["reasons"] == expected
+    assert result["bridge"]["status"] == status
+    assert result["bridge"]["reasons"] == expected
+
+
+def test_non_earnings_bridge_methods_ignore_whole_annual_refusal():
+    p = pack()
+    p["scenarios"]["base"]["operations"] = None
+    assert base(p)["bridge"]["available"]
+
+    p = pack()
+    p["scenarios"]["base"]["operations"] = None
+    item = next(
+        x for x in p["scenarios"]["base"]["bridge"]["items"] if x["category"] == "legal_other"
+    )
+    item.update(
+        method="foreign_pv",
+        inputs={
+            "amount": "0",
+            "currency": "USD",
+            "reporting_currency": "EUR",
+            "foreign_per_reporting": "1",
+            "fx_date": p["valuation_date"],
+        },
+    )
     assert base(p)["bridge"]["available"]
 
 
@@ -527,6 +627,129 @@ def test_parented_override_recalculates_and_invalidates_review_without_mutation(
     ]
     assert number(base(child)["per_share_quote"], "price_estimate") == pytest.approx(D("46.5"))
     assert number(base(p)["per_share_quote"], "price_estimate") == pytest.approx(D(31))
+
+
+def test_revision_result_differences_cover_scenario_addition_and_removal():
+    p = pack()
+    p["scenarios"]["same"] = copy.deepcopy(p["scenarios"]["base"])
+    scenarios = {"base": copy.deepcopy(p["scenarios"]["base"])}
+    removed = revise(
+        p,
+        version="synthetic-remove-neutral",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Remove neutral scenario",
+        changes={"scenarios": scenarios},
+    )
+    differences = removed["revision"]["result_differences"]
+    assert set(differences["scenarios"]) == {"same"}
+    assert set(differences["scenarios"]["same"]) == SCENARIO_STAGE_NAMES
+    assert "firm_investment_conclusion" not in differences
+    for difference in differences["scenarios"]["same"].values():
+        assert difference["before_present"] and not difference["after_present"]
+        assert difference["before"] is not None and difference["after"] is None
+
+    p = pack()
+    scenarios = copy.deepcopy(p["scenarios"])
+    scenarios["same"] = copy.deepcopy(scenarios["base"])
+    added = revise(
+        p,
+        version="synthetic-add-neutral",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Add neutral scenario",
+        changes={"scenarios": scenarios},
+    )
+    addition = added["revision"]["result_differences"]["scenarios"]["same"]
+    assert set(addition) == SCENARIO_STAGE_NAMES
+    for difference in addition.values():
+        assert not difference["before_present"] and difference["after_present"]
+        assert difference["before"] is None and difference["after"] is not None
+
+
+def test_revision_result_differences_record_material_scenario_removal():
+    p = pack()
+    p["scenarios"]["downside"] = copy.deepcopy(p["scenarios"]["base"])
+    for row in p["scenarios"]["downside"]["operations"]["rows"]:
+        row["ebit"] = "10"
+    scenarios = {"base": copy.deepcopy(p["scenarios"]["base"])}
+    child = revise(
+        p,
+        version="synthetic-remove-material",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Remove material scenario",
+        changes={"scenarios": scenarios},
+    )
+    differences = child["revision"]["result_differences"]
+    assert set(differences["scenarios"]["downside"]) == SCENARIO_STAGE_NAMES
+    conclusion = differences["firm_investment_conclusion"]
+    assert conclusion["before"] == evaluate(p)["firm_investment_conclusion"]
+    assert conclusion["after"] == evaluate(child)["firm_investment_conclusion"]
+    assert "material_scenario_disagreement" in conclusion["before"]["reasons"]
+    assert "material_scenario_disagreement" not in conclusion["after"]["reasons"]
+
+
+@pytest.mark.parametrize(("before_ebit", "after_ebit"), [("20", "10"), ("10", "20")])
+def test_revision_records_both_conclusion_directions_with_scenarios_retained(
+    before_ebit, after_ebit
+):
+    p = pack()
+    p["scenarios"]["downside"] = copy.deepcopy(p["scenarios"]["base"])
+    for row in p["scenarios"]["downside"]["operations"]["rows"]:
+        row["ebit"] = before_ebit
+    scenarios = copy.deepcopy(p["scenarios"])
+    for row in scenarios["downside"]["operations"]["rows"]:
+        row["ebit"] = after_ebit
+    child = revise(
+        p,
+        version=f"synthetic-conclusion-{before_ebit}-{after_ebit}",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Change scenario disagreement",
+        changes={"scenarios": scenarios},
+    )
+    differences = child["revision"]["result_differences"]
+    assert set(differences["scenarios"]) == {"downside"}
+    conclusion = differences["firm_investment_conclusion"]
+    assert conclusion == {
+        "before": evaluate(p)["firm_investment_conclusion"],
+        "after": evaluate(child)["firm_investment_conclusion"],
+    }
+
+
+def test_revision_result_differences_cover_malformed_transition_without_identity_churn():
+    p = pack()
+    malformed = revise(
+        p,
+        version="synthetic-malformed-result",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Malformed allocation alternative",
+        changes={"allocations": [{}]},
+    )
+    outputs = malformed["revision"]["result_differences"]["scenarios"]["base"]
+    assert set(outputs) == SCENARIO_STAGE_NAMES - {"reverse"}
+    assert all(item["before_present"] and item["after_present"] for item in outputs.values())
+
+    metadata = revise(
+        p,
+        version="synthetic-metadata-result",
+        author="Synthetic override",
+        prepared_on="2024-03-17",
+        reason="Clarify a condition",
+        changes={"conditions": p["conditions"] + ["Synthetic clarification"]},
+    )
+    assert metadata["revision"]["result_differences"] == {"scenarios": {}}
+    with pytest.raises(Unavailable, match="override_has_no_change"):
+        revise(
+            p,
+            version="synthetic-noop-result",
+            author="Synthetic override",
+            prepared_on="2024-03-17",
+            reason="No effective change",
+            changes={"scenarios": copy.deepcopy(p["scenarios"])},
+        )
 
 
 def test_revision_diff_distinguishes_missing_from_explicit_null():
@@ -728,7 +951,7 @@ def test_built_wacc_revision_dependencies_cover_downstream_outputs():
         "per_share_reporting",
         "conclusion",
     ]
-    differences = child["revision"]["result_differences"]["base"]
+    differences = child["revision"]["result_differences"]["scenarios"]["base"]
     assert {"wacc", "explicit_pv", "operating_value", "common_equity"} <= set(differences)
 
 
@@ -925,7 +1148,16 @@ def test_override_cli_retains_both_versions_and_actual_differences(tmp_path, cap
         "per_share_reporting",
         "conclusion",
     ]
-    assert set(revision["result_differences"]["base"]) == {"per_share_quote"}
+    assert set(revision["result_differences"]["scenarios"]["base"]) == {"per_share_quote"}
+    detached = json.loads((directory / "base-per_share_quote.json").read_text())
+    assert detached["assumption_pack"]["revision"] == revision
+    csv_context = json.loads(next(csv.DictReader((directory / "annual.csv").open()))["context"])
+    assert csv_context["assumption_pack"]["revision"] == revision
+    assert canonical(revision) in (directory / "report.md").read_text()
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    assert args.func(args) == 0
+    capsys.readouterr()
+    assert before == {path.name: path.read_bytes() for path in directory.iterdir()}
     assert json.loads((tmp_path / "pack.json").read_text()) == p
 
 
@@ -966,7 +1198,7 @@ def test_override_cli_records_null_membership_with_ordinary_edit(tmp_path, capsy
     assert any(
         item["path"].endswith("fx.quote_per_reporting") for item in revision["changed_inputs"]
     )
-    assert revision["result_differences"]["base"]
+    assert revision["result_differences"]["scenarios"]["base"]
 
 
 def test_casefolded_scenario_export_names_are_refused(tmp_path, capsys):
@@ -1000,11 +1232,41 @@ def test_malformed_mapping_shapes_have_structured_refusals(tmp_path, capsys):
     malformed_scenario = pack()
     malformed_scenario["scenarios"]["base"] = []
     scenario = evaluate(malformed_scenario)["scenarios"]["base"]
-    assert scenario["annual_fcff"]["status"] == "invalid_input"
+    assert set(scenario) == SCENARIO_STAGE_NAMES
+    expected = [{"code": "invalid_scenario", "path": "base"}]
+    for name in SCENARIO_STAGE_NAMES - {"reverse"}:
+        assert scenario[name]["status"] == "invalid_input"
+        assert scenario[name]["reasons"] == expected
+    assert scenario["reverse"]["status"] == "not_requested"
+    assert scenario["reverse"]["reasons"] == [
+        {"code": "reverse_not_implemented_stage4", "path": "reverse"}
+    ]
 
     malformed_projection = response()
     malformed_projection["scenarios"]["base"]["operations"]["inputs"] = []
     assert base(malformed_projection)["annual_fcff"]["status"] == "invalid_input"
+
+
+def test_scenario_fallback_schema_preserves_healthy_siblings_and_reverse():
+    p = pack()
+    p["scenarios"]["broken"] = []
+    result = evaluate(p)["scenarios"]
+    assert set(result["base"]) == SCENARIO_STAGE_NAMES
+    assert result["base"]["common_equity"]["available"]
+    assert set(result["broken"]) == SCENARIO_STAGE_NAMES
+    assert result["broken"]["common_equity"]["reasons"] == [
+        {"code": "invalid_scenario", "path": "broken"}
+    ]
+    assert result["broken"]["reverse"]["status"] == "not_requested"
+
+    p = pack()
+    p["allocations"] = [{}]
+    fallback = base(p)
+    assert set(fallback) == SCENARIO_STAGE_NAMES
+    for name in SCENARIO_STAGE_NAMES - {"reverse"}:
+        assert fallback[name]["status"] == "invalid_input"
+        assert fallback[name]["reasons"] == [{"code": "malformed_scenario_input", "path": "'id'"}]
+    assert fallback["reverse"]["status"] == "not_requested"
 
 
 def test_unavailable_export_keeps_full_context_and_propagated_reasons(tmp_path, capsys):
@@ -1042,8 +1304,11 @@ def test_malformed_optional_bridge_does_not_poison_operations():
     p = pack()
     p["scenarios"]["base"]["bridge"]["items"] = "not-an-array"
     r = base(p)
-    assert r["operating_value"]["available"]
+    assert set(r) == SCENARIO_STAGE_NAMES
+    assert r["annual_fcff"]["available"] and r["operating_value"]["available"]
+    assert r["bridge"]["status"] == "invalid_input"
     assert r["common_equity"]["status"] == "invalid_input"
+    assert r["reverse"]["status"] == "not_requested"
 
 
 def test_runtime_helper_identity_is_owned_by_exports_and_acceptance(tmp_path):
