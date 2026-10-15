@@ -159,3 +159,19 @@ def test_cached_instruments_keep_original_fetch_time(monkeypatch):
     server._cache["instruments"] = ("2000-01-01T00:00:00+00:00", FakeBorsdata().get_instruments())
     out = _call(server.borsdata_search_company)("evo")
     assert out["fetched_at"] == "2000-01-01T00:00:00+00:00"
+
+
+def test_mfn_all_continues_past_news_only_page(monkeypatch):
+    report = {"url": "https://mfn.se/a/old-report", "title": "Annual report 2015"}
+    fake = FakeMfnPaged({0: ([], 48), 48: ([report], None)})
+    monkeypatch.setattr(server, "_mfn_client", lambda max_articles=24: fake)
+    out = server._mfn_all("a/evolution", reports_only=True, limit=480)
+    assert out == [report]
+
+
+def test_mfn_all_zero_limit_returns_empty_without_fetch(monkeypatch):
+    def boom(max_articles=24):
+        raise AssertionError("provider must not be called for limit=0")
+
+    monkeypatch.setattr(server, "_mfn_client", boom)
+    assert server._mfn_all("a/evolution", reports_only=True, limit=0) == []

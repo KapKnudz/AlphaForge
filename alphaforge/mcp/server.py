@@ -52,10 +52,12 @@ def _bd() -> BorsdataAdapter:
 def _mfn_client(max_articles: int = 24) -> MfnScraper:
     global _mfn
     if _mfn is not None:
+        # A reused scraper must never cap below the requested page coverage,
+        # or paginated walks would silently skip entries.
+        if hasattr(_mfn, "max_articles"):
+            _mfn.max_articles = max(_mfn.max_articles, 48, max_articles)
         return _mfn
-    if max_articles != 24:
-        return MfnScraper(max_articles=max_articles)
-    _mfn = MfnScraper()
+    _mfn = MfnScraper(max_articles=max(48, max_articles))
     return _mfn
 
 
@@ -66,7 +68,9 @@ def _mfn_all(mfn_slug: str, *, reports_only: bool, limit: int) -> list[dict[str,
     the same JSON contract); a single-page discovery caps at 24 items, so
     walk pages of 48 until the tail or the requested limit is reached.
     """
-    limit = max(1, min(limit, 480))
+    if limit <= 0:
+        return []
+    limit = min(limit, 480)
     # The full archive lives under /all/a/<issuer>; the plain issuer page
     # only exposes the most recent page. Map bare slugs to the archive.
     slug = mfn_slug.strip("/")
@@ -86,8 +90,8 @@ def _mfn_all(mfn_slug: str, *, reports_only: bool, limit: int) -> list[dict[str,
             if url and url not in seen:
                 seen.add(url)
                 collected.append(article)
-        if not page:
-            break
+        # An empty filtered page (e.g. news-only, when collecting reports)
+        # is not the end of the archive; only a missing next offset is.
         offset = next_offset
     return collected[:limit]
 
