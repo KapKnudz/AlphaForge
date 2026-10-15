@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from datetime import timedelta
 from decimal import Decimal as D
 from decimal import localcontext
@@ -32,6 +33,7 @@ BRIDGE_CATEGORIES = {
     "legal_other",
     "noncommon",
 }
+ADDITIVE_BRIDGE_CATEGORIES = {"accessible_cash", "nonoperating_assets"}
 CASH_LEGS = (
     "ebit",
     "noncash_addbacks",
@@ -64,25 +66,114 @@ def outcome(value=None, error=None):
     }
 
 
-def rate(block):
+def exchange_rate(block, valuation, reporting_currency, currency_key, rate_key, date_key, path):
+    require(block[date_key] == valuation.isoformat(), "fx_date_mismatch", path)
+    require(
+        block["reporting_currency"] == reporting_currency,
+        "fx_reporting_currency_mismatch",
+        path,
+    )
+    foreign_currency = block[currency_key]
+    require(
+        isinstance(foreign_currency, str)
+        and re.fullmatch(r"[A-Z]{3}", foreign_currency) is not None,
+        "invalid_fx_currency",
+        path,
+    )
+    q = decimal(block.get(rate_key), path)
+    require(q > 0, "nonpositive_fx", path)
+    require(
+        foreign_currency != reporting_currency or q == 1,
+        "nonunity_same_currency_fx",
+        path,
+    )
+    return q
+
+
+def basic_shares(block, evidence, valuation):
+    block = evidence.block(block, "ownership")
+    require(block["valuation_date"] == valuation.isoformat(), "ownership_date_mismatch")
+    require(block["share_units"] == "absolute", "ownership_units_mismatch")
+    value = decimal(block.get("basic_shares"), "basic_shares")
+    require(value > 0, "nonpositive_basic_shares")
+    require(value == value.to_integral_value(), "basic_shares_must_be_absolute_count")
+    return value
+
+
+def rate(block, evidence, scenario, valuation):
+    require(block["valuation_date"] == valuation.isoformat(), "discount_date_mismatch")
+    require(block["currency"] == evidence.pack["currency"], "discount_currency_mismatch")
+    require(
+        block["rate_basis"] == "nominal_annual_effective",
+        "unsupported_discount_rate_basis",
+        status="unsupported",
+    )
     p = block["inputs"]
     if "wacc" in p:
+        require(set(p) == {"wacc"}, "invalid_supplied_wacc_fields")
         r = decimal(p["wacc"], "wacc")
         require(r > 0, "nonpositive_wacc")
         return {"wacc": r, "basis": "supplied_nominal_annual_effective_WACC"}
 
+    require(
+        set(p)
+        == {
+            "risk_free_continuous",
+            "beta",
+            "equity_risk_premium",
+            "market_close",
+            "market_close_date",
+            "market_close_currency",
+            "debt",
+            "debt_date",
+            "debt_currency",
+            "debt_cost",
+            "debt_cost_date",
+            "debt_cost_basis",
+            "shield_rate",
+            "shield_rate_date",
+        },
+        "invalid_wacc_build_fields",
+    )
+
     def n(k):
         return decimal(p.get(k), "wacc." + k)
 
+    valuation_date = valuation.isoformat()
     require(
-        n("market_close") > 0 and n("basic_shares") > 0 and n("quote_per_reporting") > 0,
-        "invalid_market_weight_basis",
+        p["market_close_date"] == valuation_date
+        and p["market_close_currency"] == evidence.pack["quote_currency"],
+        "invalid_market_close_basis",
     )
     require(
-        n("debt") >= 0 and n("debt_cost") >= 0 and 0 <= n("shield_rate") <= 1, "invalid_debt_basis"
+        p["debt_date"] == valuation_date and p["debt_currency"] == evidence.pack["currency"],
+        "invalid_debt_basis",
+    )
+    require(
+        p["debt_cost_date"] == valuation_date
+        and p["debt_cost_basis"] == "nominal_annual_effective_pre_tax",
+        "invalid_debt_cost_basis",
+    )
+    require(p["shield_rate_date"] == valuation_date, "invalid_shield_rate_basis")
+    shares = basic_shares(scenario.get("ownership"), evidence, valuation)
+    fx = evidence.block(scenario.get("fx"), "quote_fx")
+    require(fx["quote_currency"] == evidence.pack["quote_currency"], "fx_quote_currency_mismatch")
+    q = exchange_rate(
+        fx,
+        valuation,
+        evidence.pack["currency"],
+        "quote_currency",
+        "quote_per_reporting",
+        "valuation_date",
+        "wacc.fx",
+    )
+    require(n("market_close") > 0, "invalid_market_weight_basis")
+    require(
+        n("debt") >= 0 and n("debt_cost") >= 0 and 0 <= n("shield_rate") <= 1,
+        "invalid_debt_basis",
     )
     rf = n("risk_free_continuous").exp() - 1
-    equity = n("market_close") * n("basic_shares") / n("quote_per_reporting") / 1_000_000
+    equity = n("market_close") * shares / q / 1_000_000
     debt_weight = n("debt") / (n("debt") + equity)
     ke = rf + n("beta") * n("equity_risk_premium")
     r = (1 - debt_weight) * ke + debt_weight * n("debt_cost") * (1 - n("shield_rate"))
@@ -255,12 +346,23 @@ def bridge(block, evidence, rows, valuation, allocations):
         if item["method"] == "supplied_pv":
             amount = decimal(p.get("amount"), item["id"])
         elif item["method"] == "foreign_pv":
-            require(p["fx_date"] == valuation.isoformat(), "bridge_fx_date_mismatch")
             require(p["currency"] != evidence.pack["currency"], "foreign_currency_required")
-            q = decimal(p.get("foreign_per_reporting"), item["id"] + ".fx")
-            require(q > 0, "nonpositive_bridge_fx")
+            q = exchange_rate(
+                p,
+                valuation,
+                evidence.pack["currency"],
+                "currency",
+                "foreign_per_reporting",
+                "fx_date",
+                item["id"] + ".fx",
+            )
             amount = decimal(p.get("amount"), item["id"]) / q
         elif item["method"] == "earnings_linked_pv":
+            require(
+                item["category"] not in ADDITIVE_BRIDGE_CATEGORIES,
+                "bridge_method_category_mismatch",
+                item["id"],
+            )
             baseline = decimal(p.get("recurring_baseline_ebit"))
             require(baseline > 0, "invalid_claim_baseline")
             require(
@@ -276,6 +378,12 @@ def bridge(block, evidence, rows, valuation, allocations):
             )
         else:
             raise Unavailable("unsupported_bridge_method", item["id"], "unsupported")
+        additive = item["category"] in ADDITIVE_BRIDGE_CATEGORIES
+        require(
+            amount >= 0 if additive else amount <= 0,
+            "bridge_direction_mismatch",
+            item["id"],
+        )
         result.append({**item, "amount": amount})
     require({item["category"] for item in result} == BRIDGE_CATEGORIES, "unvalued_bridge_category")
     return result
@@ -311,6 +419,29 @@ def call_value(s, strike, t, vol, rf, div):
     return max(D(0), s * (-div * t).exp() * cdf(d1) - strike * (-rf * t).exp() * cdf(d2))
 
 
+def rights_exchange_rate(block, evidence, valuation):
+    currency = block["currency"]
+    require(
+        isinstance(currency, str) and re.fullmatch(r"[A-Z]{3}", currency) is not None,
+        "invalid_rights_currency",
+    )
+    if currency != evidence.pack["currency"]:
+        require(currency == evidence.pack["quote_currency"], "rights_currency_mismatch")
+    if currency != evidence.pack["currency"] or any(
+        key in block for key in ("fx_date", "reporting_currency", "quote_per_reporting")
+    ):
+        return exchange_rate(
+            block,
+            valuation,
+            evidence.pack["currency"],
+            "currency",
+            "quote_per_reporting",
+            "fx_date",
+            "rights.fx",
+        )
+    return D(1)
+
+
 def allocate(block, preclaims, shares, evidence, valuation, allocations):
     evidence.block(block, "rights")
     require(block["valuation_date"] == valuation.isoformat(), "rights_date_mismatch")
@@ -319,12 +450,7 @@ def allocate(block, preclaims, shares, evidence, valuation, allocations):
         "unsupported_rights",
         status="unsupported",
     )
-    q = D(1)
-    if block["currency"] != evidence.pack["currency"]:
-        require(block["currency"] == evidence.pack["quote_currency"], "rights_currency_mismatch")
-        require(block["fx_date"] == valuation.isoformat(), "rights_fx_date_mismatch")
-        q = decimal(block.get("quote_per_reporting"), "rights.fx")
-        require(q > 0, "nonpositive_rights_fx")
+    q = rights_exchange_rate(block, evidence, valuation)
     items = block["items"]
     require(len({x["id"] for x in items}) == len(items), "duplicate_right_id")
     used = set()
@@ -446,7 +572,14 @@ def _scenario(pack, scenario, valuation):
     for aid in (scenario.get("operations") or {}).get("allocation_ids", []):
         require(allocations.get(aid) == "operations", "operating_allocation_mismatch", aid)
     rate_result = _stage(
-        evidence, "explicit_pv", lambda: rate(evidence.block(scenario.get("discount"), "discount"))
+        evidence,
+        "explicit_pv",
+        lambda: rate(
+            evidence.block(scenario.get("discount"), "discount"),
+            evidence,
+            scenario,
+            valuation,
+        ),
     )
     result["wacc"] = rate_result
 
@@ -505,14 +638,11 @@ def _scenario(pack, scenario, valuation):
         ),
     )
 
-    def denominator():
-        block = evidence.block(scenario.get("ownership"), "ownership")
-        value = decimal(block.get("basic_shares"), "basic_shares")
-        require(value > 0, "nonpositive_basic_shares")
-        require(value == value.to_integral_value(), "basic_shares_must_be_absolute_count")
-        return value
-
-    shares = _stage(evidence, "per_share_reporting", denominator)
+    shares = _stage(
+        evidence,
+        "per_share_reporting",
+        lambda: basic_shares(scenario.get("ownership"), evidence, valuation),
+    )
     result["basic_shares"] = shares
 
     def common():
@@ -531,6 +661,7 @@ def _scenario(pack, scenario, valuation):
         # Empty, explicitly evidenced rights do not make common total depend on shares.
         if not rights["items"]:
             require(rights["currency"] == pack["currency"], "empty_rights_currency_mismatch")
+            rights_exchange_rate(rights, evidence, valuation)
             allocated = {
                 "common_residual": pre,
                 "rights_value": D(0),
@@ -567,10 +698,16 @@ def _scenario(pack, scenario, valuation):
     def quote():
         value = _dependent(result["per_share_reporting"], "per_share_reporting")
         fx = evidence.block(scenario.get("fx"), "quote_fx")
-        require(fx["valuation_date"] == valuation.isoformat(), "fx_date_mismatch")
-        q = decimal(fx.get("quote_per_reporting"), "quote_fx")
-        require(q > 0, "nonpositive_fx")
         require(fx["quote_currency"] == pack["quote_currency"], "fx_quote_currency_mismatch")
+        q = exchange_rate(
+            fx,
+            valuation,
+            pack["currency"],
+            "quote_currency",
+            "quote_per_reporting",
+            "valuation_date",
+            "quote_fx",
+        )
         return {
             "signed_quotient": decimal(value["signed_quotient"]) * q,
             "price_estimate": decimal(value["price_estimate"]) * q
@@ -608,7 +745,8 @@ def evaluate(pack):
         base = scenarios["base"]["common_equity"]
         if base["available"] and len(values) > 1:
             b = decimal(base["value"]["common_residual"])
-            if max(values) - min(values) >= abs(b) * D(".1") or min(values) <= 0 < max(values):
+            spread = max(values) - min(values)
+            if spread > 0 and (spread >= abs(b) * D(".1") or min(values) <= 0 < max(values)):
                 conclusion["reasons"].append("material_scenario_disagreement")
         return encode(
             {
