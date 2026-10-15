@@ -1,8 +1,19 @@
 # Valuation — heuristic score vs auditable DCF
 
-AlphaForge keeps heuristic ranking, admitted mature/reverse DCF and conditional
-supplied-schedule FCFF research separate. Research results do not confer issuer
-admission, calibration or readiness.
+AlphaForge keeps heuristic ranking, admitted mature/reverse DCF, conditional
+supplied-schedule FCFF research and aggregate estimated forward valuation separate.
+Research results do not confer issuer admission, calibration or readiness.
+
+## Aggregate estimated forward valuation
+
+`alphaforge estimated-forward` implements the separate `estimated-valuation-v1`
+aggregate annual FCFF/nominal WACC lane with full terminal witnesses, dated claims,
+endogenous rights allocation, scoped withholding and inspectable parented overrides.
+The [estimated forward contract](estimated-forward.md) owns its input examples,
+formulas, provenance and actual local JSON/CSV/report composition. It does not
+relabel financing-shield-excluded values, weaken existing eligibility or implement
+reverse DCF. Every output is **PROVISIONAL — ESTIMATED, NOT A VERIFIED FORECAST**;
+calculation, financial review and human implementation acceptance remain distinct.
 
 ## Heuristic valuation_score (ranking)
 
