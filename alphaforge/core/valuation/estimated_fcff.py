@@ -337,6 +337,20 @@ def terminal(block, rows, evidence, r):
             decimal(row.get("legacy_da", 0)) == 0 and decimal(row.get("opening_tax", 0)) == 0,
             "finite_cash_in_terminal",
         )
+        for leg in (
+            "opening_payment",
+            "opening_recovery",
+            "opening_deferred_cash",
+            "opening_payable_remaining",
+            "opening_recoverable_remaining",
+            "opening_deferred_remaining",
+        ):
+            if leg in row:
+                require(
+                    decimal(row[leg], "terminal." + leg) == 0,
+                    "finite_cash_in_terminal",
+                    "terminal." + leg,
+                )
     for row in (a, b):
         if "growth" in row:
             require(
@@ -359,14 +373,34 @@ def terminal(block, rows, evidence, r):
         )
     for leg in CASH_LEGS + ("fcff",):
         close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
-    # Gross charge/recovery and investment constituents must also be stationary
-    # whenever this additional supported granularity was actually supplied.
+    require(("margin" in a) == ("margin" in b), "incomplete_witness_constituent", "margin")
+    if "margin" in a:
+        require(
+            decimal(a["margin"], "terminal.margin") == decimal(b["margin"], "terminal.margin"),
+            "terminal_ratio_mismatch",
+            "terminal.margin",
+        )
     for leg in (
         "ongoing_da",
+        "refundable_profit",
+        "ordinary_profit",
+        "gross_charge",
+        "ordinary_charge",
+        "topup_charge",
         "new_charge",
         "new_entitlement",
         "new_payment",
         "new_recovery",
+        "opening_payment",
+        "opening_recovery",
+        "opening_deferred_cash",
+        "opening_tax",
+        "new_cash_tax",
+        "opening_payable_remaining",
+        "opening_recoverable_remaining",
+        "opening_deferred_remaining",
+        "new_payable_remaining",
+        "new_recoverable_remaining",
         "renewal_investment",
         "lead_investment",
         "lease_renewal",
@@ -374,7 +408,47 @@ def terminal(block, rows, evidence, r):
     ):
         require((leg in a) == (leg in b), "incomplete_witness_constituent", leg)
         if leg in a:
-            close(decimal(b[leg]), decimal(a[leg]) * (1 + g), "terminal." + leg)
+            close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
+    decompositions = (
+        ("noncash_addbacks", (("ongoing_da", 1), ("legacy_da", 1))),
+        ("new_charge", (("gross_charge", 1), ("ordinary_charge", 1), ("topup_charge", 1))),
+        (
+            "opening_tax",
+            (("opening_payment", 1), ("opening_recovery", -1), ("opening_deferred_cash", 1)),
+        ),
+        ("new_cash_tax", (("new_payment", 1), ("new_recovery", -1))),
+        ("operating_cash_tax", (("opening_tax", 1), ("new_cash_tax", 1))),
+        ("cash_investment", (("renewal_investment", 1), ("lead_investment", 1))),
+        ("lease_additions", (("lease_renewal", 1), ("lead_lease", 1))),
+    )
+    for year, row in ((11, a), (12, b)):
+        if "revenue" in row and "margin" in row:
+            close(
+                row["ebit"],
+                decimal(row["revenue"], f"terminal.{year}.margin_decomposition")
+                * decimal(row["margin"], f"terminal.{year}.margin_decomposition"),
+                f"terminal.{year}.margin_decomposition",
+            )
+        if "refundable_profit" in row and "ordinary_profit" in row:
+            close(
+                max(D(0), decimal(row["ebit"], f"terminal.{year}.profit_decomposition")),
+                decimal(row["refundable_profit"], f"terminal.{year}.profit_decomposition")
+                + decimal(row["ordinary_profit"], f"terminal.{year}.profit_decomposition"),
+                f"terminal.{year}.profit_decomposition",
+            )
+        for aggregate, constituents in decompositions:
+            if aggregate in row and all(field in row for field, _ in constituents):
+                close(
+                    row[aggregate],
+                    sum(
+                        (
+                            decimal(row[field], f"terminal.{year}.{aggregate}_decomposition") * sign
+                            for field, sign in constituents
+                        ),
+                        D(0),
+                    ),
+                    f"terminal.{year}.{aggregate}_decomposition",
+                )
     numerator = decimal(a["fcff"])
     tv = numerator / (r - g)
     pv = tv / (1 + r) ** 10

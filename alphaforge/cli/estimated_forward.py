@@ -80,7 +80,8 @@ def export(root, pack, outputs, parent_pack=None):
         f"Original {pack['currency']} millions; absolute basic shares; nominal annual end-year WACC.",
         "",
     ]
-    for name, scenario in outputs["scenarios"].items():
+    for name in sorted(outputs["scenarios"]):
+        scenario = outputs["scenarios"][name]
         lines += [f"## Scenario: {name}", ""]
         for key, out in scenario.items():
             artifacts[f"{name}-{key}.json"] = canonical(
