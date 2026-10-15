@@ -62,6 +62,17 @@ def encode(value):
     return value
 
 
+def _nonempty_anchor(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    try:
+        return len(value) > 0
+    except TypeError:
+        return True
+
+
 def content_identity(pack):
     return digest(pack)
 
@@ -207,8 +218,17 @@ class Evidence:
             if not record.get("anchors"):
                 raise Unavailable("material_anchor_required", rid)
             for ref in record["anchors"]:
-                source = self.sources.get(ref["source_id"])
-                if source is None or ref["anchor"] not in source["anchors"]:
+                if not isinstance(ref, dict):
+                    raise Unavailable("anchor_not_owned", rid)
+                source = self.sources.get(ref.get("source_id"))
+                anchor = ref.get("anchor")
+                if (
+                    source is None
+                    or not _nonempty_anchor(anchor)
+                    or not any(
+                        _nonempty_anchor(owned) and owned == anchor for owned in source["anchors"]
+                    )
+                ):
                     raise Unavailable("anchor_not_owned", rid)
                 # A retained publication upper bound proves cutoff eligibility,
                 # never an exact first release date or historical-known-then claim.
@@ -226,7 +246,7 @@ class Evidence:
                     require(moment <= cutoff, "source_after_precise_cutoff", source["id"])
                 if iso_date(public_by) == cutoff.date() and not moments:
                     raise Unavailable("same_day_publication_time_unknown", source["id"])
-                if source["published_on"] is None:
+                if not source["published_on"]:
                     text(source.get("publication_limitation"), source["id"])
         return block
 
