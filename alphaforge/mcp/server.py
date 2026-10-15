@@ -82,7 +82,6 @@ def _sanitize(message: str) -> str:
     return message
 
 
-
 def _guard(source: str, params: dict[str, Any], fn: Callable[[], Any]) -> dict[str, Any]:
     try:
         return _envelope(source, params, fn())
@@ -103,6 +102,7 @@ def borsdata_search_company(query: str, limit: int = 20) -> dict[str, Any]:
     """
     if err := _require_key():
         return {"error": err}
+
     def fetch() -> Any:
         if "instruments" not in _cache:
             _cache["instruments"] = _bd().get_instruments()
@@ -120,9 +120,7 @@ def borsdata_search_company(query: str, limit: int = 20) -> dict[str, Any]:
 
 
 @mcp.tool()
-def borsdata_reports(
-    ins_id: int, period_type: str = "year", limit: int = 20
-) -> dict[str, Any]:
+def borsdata_reports(ins_id: int, period_type: str = "year", limit: int = 20) -> dict[str, Any]:
     """Fetch financial reports (income statement, balance sheet, cash flow).
 
     period_type is one of "year", "quarter" or "r12" (rolling twelve months).
@@ -133,6 +131,7 @@ def borsdata_reports(
     """
     if err := _require_key():
         return {"error": err}
+
     def fetch() -> Any:
         rows = _bd().get_reports([ins_id])
         rows = [r for r in rows if r.get("period_type") == period_type]
@@ -192,6 +191,7 @@ def borsdata_kpi_metadata() -> dict[str, Any]:
     """List Börsdata KPI metadata (ids, names, formats) for kpi_id lookup."""
     if err := _require_key():
         return {"error": err}
+
     def fetch() -> Any:
         if "kpi_metadata" not in _cache:
             _cache["kpi_metadata"] = _bd().get_kpi_metadata()
@@ -222,9 +222,7 @@ def borsdata_dividends(ins_ids: list[int]) -> dict[str, Any]:
     """Fetch dividend calendar rows (ex-date and amount) for instruments."""
     if err := _require_key():
         return {"error": err}
-    return _guard(
-        "borsdata/dividends", {"ins_ids": ins_ids}, lambda: _bd().get_dividends(ins_ids)
-    )
+    return _guard("borsdata/dividends", {"ins_ids": ins_ids}, lambda: _bd().get_dividends(ins_ids))
 
 
 @mcp.tool()

@@ -18,7 +18,12 @@ class FakeBorsdata:
 
     def get_reports(self, ins_ids, **kwargs):
         return [
-            {"insId": 750, "period_type": "year", "report_End_Date": "2025-12-31", "net_Sales": 100},
+            {
+                "insId": 750,
+                "period_type": "year",
+                "report_End_Date": "2025-12-31",
+                "net_Sales": 100,
+            },
             {"insId": 750, "period_type": "quarter", "report_End_Date": "2026-06-30"},
         ]
 
