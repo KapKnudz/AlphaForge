@@ -178,6 +178,36 @@ def test_post_witness_recoveries_and_settlements_are_rejected():
     assert base(p)["annual_fcff"]["status"] == "invalid_input"
 
 
+def test_loss_gap_recovery_queue_withholds_terminal_after_equal_witnesses():
+    p = response()
+    inputs = p["scenarios"]["base"]["operations"]["inputs"]
+    inputs.update(
+        margin_first="-.1",
+        margin_terminal=".2",
+        refundable_profit_share="1",
+        recovery_lag=10,
+    )
+    r = base(p)
+    witnesses = [row["value"] for row in r["annual_fcff"]["value"][10:]]
+    assert all(D(row["new_recovery"]) == 0 for row in witnesses)
+    assert all(D(row["finite_effects"]["recovery_transition"]) == 1 for row in witnesses)
+    assert r["explicit_pv"]["available"] and not r["terminal"]["available"]
+    assert r["terminal"]["reasons"][0]["code"] == "finite_effects_not_exhausted"
+
+
+def test_direct_annual_period_endpoints_must_be_supplied_together():
+    for supplied, missing in (("start", "end"), ("end", "start")):
+        p = pack()
+        row = p["scenarios"]["base"]["operations"]["rows"][0]
+        row[supplied] = "2024-03-01" if supplied == "start" else "2025-02-28"
+        row.pop(missing, None)
+        result = base(p)["annual_fcff"]
+        assert not result["available"]
+        assert result["value"][0]["reasons"] == [
+            {"code": "annual_period_pair_required", "path": "1"}
+        ]
+
+
 def test_no_duplicate_lease_tax_compensation_claims():
     p = pack()
     p["scenarios"]["base"]["bridge"]["items"][0]["allocation_id"] = "operating_tax"
@@ -451,6 +481,17 @@ def test_bridge_category_controls_method_and_sign():
     )
     debt["inputs"]["amount"] = "10"
     assert base(p)["common_equity"]["status"] == "invalid_input"
+    debt.update(
+        method="foreign_pv",
+        inputs={
+            "amount": "10",
+            "currency": "USD",
+            "reporting_currency": "EUR",
+            "foreign_per_reporting": "1.2",
+            "fx_date": p["valuation_date"],
+        },
+    )
+    assert base(p)["common_equity"]["status"] == "invalid_input"
 
     p = pack()
     asset = next(
@@ -592,7 +633,18 @@ def test_reference_comparison_preserves_component_tolerances_and_exact_metadata(
         "scenarios": {
             "base": {
                 "annual_fcff": {
-                    "value": [{"value": {"fcff": "14.000000000"}}],
+                    "value": [
+                        {
+                            "value": {
+                                "fcff": "14.000000000",
+                                "record_ids": ["1"],
+                                "extension_code": "1",
+                            }
+                        }
+                    ],
+                },
+                "bridge": {
+                    "value": [{"id": "1", "allocation_id": "1", "amount": "5.00000000"}]
                 },
                 "operating_value": {"value": {"ev": "140.00000000"}},
                 "per_share_reporting": {"value": {"price_estimate": "15.50000000"}},
@@ -604,6 +656,7 @@ def test_reference_comparison_preserves_component_tolerances_and_exact_metadata(
     actual["scenarios"]["base"]["annual_fcff"]["value"][0]["value"]["fcff"] = (
         "14.000000019"
     )
+    actual["scenarios"]["base"]["bridge"]["value"][0]["amount"] = "5.00000009"
     actual["scenarios"]["base"]["operating_value"]["value"]["ev"] = "140.00000009"
     actual["scenarios"]["base"]["per_share_reporting"]["value"]["price_estimate"] = (
         "15.500000009"
@@ -616,6 +669,22 @@ def test_reference_comparison_preserves_component_tolerances_and_exact_metadata(
     )
     with pytest.raises(AcceptanceError, match="annual comparison mismatch"):
         compare_outputs(outside, expected)
+
+    for mutate in (
+        lambda value: value["scenarios"]["base"]["annual_fcff"]["value"][0]["value"].update(
+            record_ids=["1.000000001"]
+        ),
+        lambda value: value["scenarios"]["base"]["annual_fcff"]["value"][0]["value"].update(
+            extension_code="1.000000001"
+        ),
+        lambda value: value["scenarios"]["base"]["bridge"]["value"][0].update(
+            allocation_id="1.000000001"
+        ),
+    ):
+        semantic = copy.deepcopy(expected)
+        mutate(semantic)
+        with pytest.raises(AcceptanceError, match="exact comparison mismatch"):
+            compare_outputs(semantic, expected)
 
     actual["identity"]["valuation_date"] = "2024-03-01"
     with pytest.raises(AcceptanceError, match="exact comparison mismatch"):
