@@ -13,12 +13,15 @@ import pytest
 
 from alphaforge.cli.estimated_forward import (
     SOURCE_PATHS as EXPORT_SOURCE_PATHS,
+)
+from alphaforge.cli.estimated_forward import (
     _code_sources,
 )
 from alphaforge.cli.main import build_parser
-from alphaforge.core.valuation.estimated_fcff import evaluate
+from alphaforge.core.valuation.estimated_fcff import evaluate, outcome, terminal
 from alphaforge.core.valuation.estimated_inputs import (
     LABEL,
+    Evidence,
     Unavailable,
     canonical,
     content_identity,
@@ -28,6 +31,8 @@ from alphaforge.core.valuation.estimated_inputs import (
 from tests.estimated_fixtures import block, pack, response
 from tools.check_estimated_forward_acceptance import (
     SOURCE_PATHS as ACCEPTANCE_SOURCE_PATHS,
+)
+from tools.check_estimated_forward_acceptance import (
     AcceptanceError,
     _code_identity,
     compare_outputs,
@@ -515,6 +520,75 @@ def test_terminal_ratios_and_finite_opening_components_are_distinct():
             "path": "terminal.11.noncash_addbacks_decomposition",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "first_margin,second_margin,revenue,available,reason",
+    [
+        (".2", ".2", True, True, None),
+        (".2", ".2", False, True, None),
+        (".2", ".2000000001", True, True, None),
+        (".2", ".1999999999", True, True, None),
+        (".2", ".2000000001", False, True, None),
+        (".2", ".20000002", False, True, None),
+        (".2", ".200000020000000001", False, False, "terminal_ratio_mismatch"),
+        (".2", ".3", False, False, "terminal_ratio_mismatch"),
+        (None, None, True, True, None),
+        (".2", None, False, False, "incomplete_witness_constituent"),
+        (None, ".2", False, False, "incomplete_witness_constituent"),
+    ],
+)
+def test_terminal_margin_annual_tolerance_boundary_and_optional_scope(
+    first_margin, second_margin, revenue, available, reason
+):
+    p = pack()
+    for row, margin in zip(
+        p["scenarios"]["base"]["operations"]["rows"][10:],
+        (first_margin, second_margin),
+        strict=True,
+    ):
+        if margin is not None:
+            row["margin"] = margin
+        if revenue:
+            row.update(revenue="100", growth="0")
+            if margin is not None:
+                assert abs(D(20) - D(100) * D(margin)) <= D("2e-8")
+    if first_margin is not None and second_margin is not None:
+        a, b = D(first_margin), D(second_margin)
+        assert (abs(a - b) <= max(D("2e-8"), D("2e-12") * max(abs(a), abs(b)))) == available
+    original = copy.deepcopy(p)
+    result = base(p)
+    assert p == original
+    assert result["annual_fcff"]["available"] and result["explicit_pv"]["available"]
+    rows = result["annual_fcff"]["value"]
+    assert len(rows) == 12
+    assert all(row["available"] and D(row["value"]["fcff"]) == 14 for row in rows)
+    with localcontext() as context:
+        context.prec = 64
+        try:
+            direct = outcome(
+                terminal(p["scenarios"]["base"]["terminal"], rows, Evidence(p), D(".1"))
+            )
+        except Unavailable as error:
+            direct = outcome(error=error)
+    assert direct == result["terminal"]
+    for stage in ("terminal", "operating_value", "common_equity"):
+        assert result[stage]["available"] == available
+    if available:
+        assert number(result["terminal"], "numerator") == 14
+        assert number(result["operating_value"], "ev") == pytest.approx(
+            D(140), abs=D("1e-7"), rel=D("2e-11")
+        )
+    else:
+        assert result["terminal"]["status"] == "invalid_input"
+        assert result["terminal"]["reasons"] == [
+            {
+                "code": reason,
+                "path": "margin"
+                if reason == "incomplete_witness_constituent"
+                else "terminal.margin",
+            }
+        ]
 
 
 def test_loss_has_no_automatic_refund_but_opening_recovery_survives():
