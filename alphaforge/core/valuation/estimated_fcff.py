@@ -60,12 +60,10 @@ SCENARIO_STAGES = (
 )
 
 
-def close(a, b, path, annual=True):
+def close(a, b, path, annual=True, *, code="reconciliation_failed"):
     a, b = decimal(a, path), decimal(b, path)
     absolute, relative = (D("2e-8"), D("2e-12")) if annual else (D("1e-7"), D("2e-11"))
-    require(
-        abs(a - b) <= max(absolute, relative * max(abs(a), abs(b))), "reconciliation_failed", path
-    )
+    require(abs(a - b) <= max(absolute, relative * max(abs(a), abs(b))), code, path)
 
 
 def outcome(value=None, error=None):
@@ -375,11 +373,7 @@ def terminal(block, rows, evidence, r):
         close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
     require(("margin" in a) == ("margin" in b), "incomplete_witness_constituent", "margin")
     if "margin" in a:
-        require(
-            decimal(a["margin"], "terminal.margin") == decimal(b["margin"], "terminal.margin"),
-            "terminal_ratio_mismatch",
-            "terminal.margin",
-        )
+        close(a["margin"], b["margin"], "terminal.margin", code="terminal_ratio_mismatch")
     for leg in (
         "ongoing_da",
         "refundable_profit",
