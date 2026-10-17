@@ -55,3 +55,20 @@ and `equity-research` for broader research when available and actually requested
 Their generic defaults do not authorize AlphaForge policy overrides. This skill
 ends at premise judgment; it does not run tools advertised by those skills,
 change deterministic validation, or replace the analyst's accounting judgment.
+
+## Maintenance
+
+When work reveals incorrect guidance, a missing reusable distinction or a
+misleading example, report an evidence-backed amendment candidate rather than
+silently rewriting financial guidance. Include:
+
+- The source anchor and why it supports the amendment.
+- An applicable example and a counterexample delimiting its scope.
+- The exact existing text to replace or remove, and proposed replacement text
+  (or the insertion point for an addition).
+
+Use evidence from the work, not manufactured lessons or issuer-specific facts
+promoted into universal rules. Obtain the applicable analyst or policy-owner
+approval before changing financial guidance; code acceptance alone is not
+financial-premise acceptance. Until approved, preserve existing financial
+acceptance boundaries.
