@@ -381,7 +381,7 @@ def test_terminal_optional_monetary_constituents_must_grow_coherently():
 
     p = pack()
     rows = p["scenarios"]["base"]["operations"]["rows"]
-    for row, gross, ordinary in zip(rows[10:], ("8", "0"), ("0", "8")):
+    for row, gross, ordinary in zip(rows[10:], ("8", "0"), ("0", "8"), strict=True):
         row.update(
             gross_charge=gross,
             ordinary_charge=ordinary,
