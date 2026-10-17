@@ -883,17 +883,23 @@ def evaluate(pack):
                     if reverse["available"]:
                         result_kind = reverse["value"]["outcome"]
                         reverse["status"] = result_kind
-                        if result_kind in {
-                            "unsupported_domain",
-                            "invalid_input",
-                            "numerical_failure",
-                            "no_crossing_observed",
-                            "sampled_match",
+                        if result_kind not in {
+                            "candidate_solution",
+                            "multiple_solutions",
+                            "match_region",
+                            "not_identifiable",
+                            "no_solution",
                         }:
                             diagnostics = reverse["value"]
-                            reverse = outcome(
-                                error=Unavailable(result_kind, "reverse", result_kind)
-                            )
+                            refusal = diagnostics.get("refusal")
+                            if refusal is None:
+                                error = Unavailable(result_kind, "reverse", result_kind)
+                            else:
+                                reason = refusal["reasons"][0]
+                                error = Unavailable(
+                                    reason["code"], reason["path"], refusal["status"]
+                                )
+                            reverse = outcome(error=error)
                             reverse["search_diagnostics"] = diagnostics
                     scenarios[name]["reverse"] = reverse
             except Unavailable as error:

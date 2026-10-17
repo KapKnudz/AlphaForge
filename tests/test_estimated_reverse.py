@@ -206,6 +206,75 @@ def test_reverse_prerequisites_only_withhold_reverse(mutation, status):
     assert s["per_share_quote"]["available"]
 
 
+@pytest.mark.parametrize(
+    "mutation, status, code, path",
+    [
+        (
+            lambda s: s.__setitem__("fx", None),
+            "not_requested",
+            "not_supplied",
+            "quote_fx",
+        ),
+        (
+            lambda s: s.__setitem__("ownership", None),
+            "not_requested",
+            "not_supplied",
+            "ownership",
+        ),
+        (
+            lambda s: s.__setitem__("terminal", None),
+            "not_requested",
+            "not_supplied",
+            "terminal",
+        ),
+        (
+            lambda s: s.__setitem__("bridge", None),
+            "not_requested",
+            "not_supplied",
+            "bridge",
+        ),
+        (
+            lambda s: s.__setitem__("rights", None),
+            "not_requested",
+            "not_supplied",
+            "rights",
+        ),
+        (
+            lambda s: s.__setitem__("discount", None),
+            "not_requested",
+            "not_supplied",
+            "discount",
+        ),
+        (
+            lambda s: s["operations"]["inputs"].pop("margin_first"),
+            "insufficient_evidence",
+            "missing_operand",
+            "margin_first",
+        ),
+        (
+            lambda s: s["fx"].update(record_ids=["missing-fx"]),
+            "insufficient_evidence",
+            "record_not_catalogued",
+            "missing-fx",
+        ),
+    ],
+)
+def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
+    mutation, status, code, path
+):
+    p = reverse_pack()
+    mutation(p["scenarios"]["base"])
+    forward_only = copy.deepcopy(p)
+    forward_only["scenarios"]["base"].pop("reverse")
+    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
+    actual = forward.evaluate(p)["scenarios"]["base"]["reverse"]
+    assert expected["status"] == status
+    assert expected["reasons"] == [{"code": code, "path": path}]
+    assert actual["status"] == expected["status"]
+    assert actual["reasons"] == expected["reasons"]
+    assert not actual["available"]
+
+
 def test_direct_budget_survives_unsupported_reverse_response():
     from tests.estimated_fixtures import pack
 
@@ -440,6 +509,19 @@ def test_exports_and_overrides_retain_reverse_identity_and_recompute(tmp_path):
     assert detached["identity"]["parent"] == child["parent"]
     assert detached["identity"]["human_status"] == "not_implementation_accepted"
     assert detached["value"]["target"]["close_date"] == "2024-02-28"
+    assert (
+        detached["identity"]["reverse_search_policy"]
+        == detached["value"]["search_policy"]
+        == "estimated-reverse-v1; linear-fade10; scan201; bisection200"
+    )
+    assert detached["identity"]["reverse_numerical_policy"] == (
+        "growth A=1e-10; repricing A=1e-6,R=1e-8"
+    )
+    assert detached["value"]["tolerances"] == {
+        "growth_absolute": "1E-10",
+        "quote_absolute": "0.000001",
+        "quote_relative": "1E-8",
+    }
     assert "estimated_reverse.py" in " ".join(detached["execution"]["code_sources"])
     limit = csv.field_size_limit()
     try:

@@ -394,11 +394,11 @@ def load(body):
 
 
 def identity_envelope(pack):
-    from alphaforge.core.valuation.estimated_reverse import SEARCH_POLICY
+    from alphaforge.core.valuation.estimated_reverse import NUMERICAL_POLICY, SEARCH_POLICY
 
     return {
         "reverse_search_policy": SEARCH_POLICY,
-        "reverse_numerical_policy": "growth A=1e-10; repricing A=1e-6,R=1e-8",
+        "reverse_numerical_policy": NUMERICAL_POLICY,
         "standard": STANDARD,
         "contract": CONTRACT,
         "label": LABEL,
