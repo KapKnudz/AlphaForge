@@ -10,7 +10,13 @@ import copy
 from decimal import Decimal as D
 from typing import NamedTuple
 
-from alphaforge.core.valuation.estimated_inputs import Evidence, decimal, encode, require
+from alphaforge.core.valuation.estimated_inputs import (
+    Evidence,
+    Unavailable,
+    decimal,
+    encode,
+    require,
+)
 from alphaforge.core.valuation.forward_fcff_contract import digest, iso_date, text
 
 
@@ -122,44 +128,17 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
         )
 
     def failure_outcome():
-        sample_failures = [sample for sample in samples if not sample["available"]]
-        signatures = {
-            (
-                failure["status"],
-                tuple((reason["code"], reason["path"]) for reason in failure["reasons"]),
-            )
-            for failure in sample_failures
-        }
-        if (
-            len(sample_failures) == len(samples) == POLICY.scan_points
-            and len(signatures) == 1
-            and not economic_domain_failure(sample_failures[0])
-        ):
-            failure = sample_failures[0]
-            return failure["status"], {
-                "status": failure["status"],
-                "reasons": failure["reasons"],
-            }
         kinds = {
             "unsupported_domain" if economic_domain_failure(failure) else failure["status"]
             for failure in failures
         }
         if "invalid_input" in kinds:
-            return "invalid_input", None
+            return "invalid_input"
         if "numerical_failure" in kinds:
-            return "numerical_failure", None
-        return "unsupported_domain", None
+            return "numerical_failure"
+        return "unsupported_domain"
 
-    def summary(
-        status,
-        roots,
-        brackets,
-        regions,
-        *,
-        complete=False,
-        basis=None,
-        refusal=None,
-    ):
+    def summary(status, roots, brackets, regions, *, complete=False, basis=None):
         result = {
             "outcome": status,
             "roots": roots,
@@ -184,8 +163,6 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
                 else [],
             },
         }
-        if refusal is not None:
-            result["refusal"] = refusal
         return result
 
     # Keep every policy point, including unsupported evaluations. Never search a
@@ -220,8 +197,7 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
             )
             start = None
     if failures:
-        status, refusal = failure_outcome()
-        return summary(status, [], brackets, regions, refusal=refusal)
+        return summary(failure_outcome(), [], brackets, regions)
 
     if constant_value:
         status = (
@@ -296,8 +272,7 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
         if sample["residual"] == 0 and not in_region:
             recover(sample["x"], sample["x"], sample["x"], 0)
             if failures:
-                status, refusal = failure_outcome()
-                return summary(status, roots, brackets, regions, refusal=refusal)
+                return summary(failure_outcome(), roots, brackets, regions)
     exhausted = False
     for bracket in brackets:
         left, right = bracket["left"], bracket["right"]
@@ -335,9 +310,8 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
         if failures:
             break
         exhausted |= not found
-    refusal = None
     if failures:
-        status, refusal = failure_outcome()
+        status = failure_outcome()
     elif exhausted:
         status = "numerical_failure"
     elif len(roots) > 1:
@@ -351,10 +325,10 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
     else:
         status = "no_crossing_observed"
     roots.sort(key=lambda root: root["initial_growth"])
-    return summary(status, roots, brackets, regions, refusal=refusal)
+    return summary(status, roots, brackets, regions)
 
 
-def solve(pack, scenario, valuation, forward_evaluator):
+def solve(pack, scenario, valuation, forward_evaluator, forward_quote):
     """Consume a declared, source-qualified reverse question; no financial approval."""
     from alphaforge.core.valuation.estimated_fcff import _dependent, _stage
 
@@ -434,6 +408,9 @@ def solve(pack, scenario, valuation, forward_evaluator):
         decimal(inputs.get("terminal_growth"), "terminal_growth") == terminal_growth,
         "reverse_terminal_growth_mismatch",
     )
+    if not forward_quote["available"]:
+        reason = forward_quote["reasons"][0]
+        raise Unavailable(reason["code"], reason["path"], forward_quote["status"])
     fixed = copy.deepcopy(scenario)
     fixed.pop("reverse", None)
     fixed["operations"]["inputs"].pop("initial_growth", None)

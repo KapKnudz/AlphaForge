@@ -878,7 +878,13 @@ def evaluate(pack):
                     reverse = _stage(
                         Evidence(pack),
                         "reverse",
-                        lambda scenario=scenario: solve(pack, scenario, valuation, _scenario),
+                        lambda scenario=scenario: solve(
+                            pack,
+                            scenario,
+                            valuation,
+                            _scenario,
+                            scenarios[name]["per_share_quote"],
+                        ),
                     )
                     if reverse["available"]:
                         result_kind = reverse["value"]["outcome"]
@@ -891,15 +897,9 @@ def evaluate(pack):
                             "no_solution",
                         }:
                             diagnostics = reverse["value"]
-                            refusal = diagnostics.get("refusal")
-                            if refusal is None:
-                                error = Unavailable(result_kind, "reverse", result_kind)
-                            else:
-                                reason = refusal["reasons"][0]
-                                error = Unavailable(
-                                    reason["code"], reason["path"], refusal["status"]
-                                )
-                            reverse = outcome(error=error)
+                            reverse = outcome(
+                                error=Unavailable(result_kind, "reverse", result_kind)
+                            )
                             reverse["search_diagnostics"] = diagnostics
                     scenarios[name]["reverse"] = reverse
             except Unavailable as error:

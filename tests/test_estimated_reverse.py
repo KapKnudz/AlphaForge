@@ -275,6 +275,39 @@ def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
     assert not actual["available"]
 
 
+def test_fixed_terminal_refusal_precedes_candidate_domain_classification():
+    p = reverse_pack()
+    p["scenarios"]["base"]["operations"]["inputs"].update(
+        legacy_remaining="100", legacy_annual="1"
+    )
+    forward_only = copy.deepcopy(p)
+    forward_only["scenarios"]["base"].pop("reverse")
+    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
+    actual = result(p)
+    assert expected["status"] == "invalid_input"
+    assert expected["reasons"] == [{"code": "finite_effects_not_exhausted", "path": ""}]
+    assert actual["status"] == expected["status"]
+    assert actual["reasons"] == expected["reasons"]
+
+
+def test_fixed_fx_refusal_precedes_mixed_candidate_domain_failures():
+    p = reverse_pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["inputs"].update(refundable_profit_share=".5", recovery_lag=3)
+    genuine_hole = result(copy.deepcopy(p))
+    assert genuine_hole["status"] == "unsupported_domain"
+    assert genuine_hole["search_diagnostics"]["failed_evaluations"]
+    scenario["fx"] = None
+    forward_only = copy.deepcopy(p)
+    forward_only["scenarios"]["base"].pop("reverse")
+    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
+    actual = result(p)
+    assert expected["status"] == "not_requested"
+    assert expected["reasons"] == [{"code": "not_supplied", "path": "quote_fx"}]
+    assert actual["status"] == expected["status"]
+    assert actual["reasons"] == expected["reasons"]
+
+
 def test_direct_budget_survives_unsupported_reverse_response():
     from tests.estimated_fixtures import pack
 
