@@ -308,7 +308,9 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
     affected = set()
     for entry in changed:
         path = entry["path"]
-        if ".fx." in path:
+        if ".reverse." in path or path.endswith(".reverse"):
+            affected.add("reverse")
+        elif ".fx." in path:
             affected.update(OUTPUTS[1:])
         elif ".ownership." in path:
             affected.update(OUTPUTS[1:])
@@ -320,6 +322,12 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
             affected.update(OUTPUTS[1:])
         else:
             affected.update(OUTPUTS)
+    if affected & set(OUTPUTS) and any(
+        isinstance(scenario, dict) and scenario.get("reverse") is not None
+        for version_pack in (pack, child)
+        for scenario in version_pack["scenarios"].values()
+    ):
+        affected.add("reverse")
     child.update(
         {
             "pack_version": version,
@@ -386,7 +394,11 @@ def load(body):
 
 
 def identity_envelope(pack):
+    from alphaforge.core.valuation.estimated_reverse import SEARCH_POLICY
+
     return {
+        "reverse_search_policy": SEARCH_POLICY,
+        "reverse_numerical_policy": "growth A=1e-10; repricing A=1e-6,R=1e-8",
         "standard": STANDARD,
         "contract": CONTRACT,
         "label": LABEL,

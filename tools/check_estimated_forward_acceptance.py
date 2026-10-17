@@ -25,6 +25,7 @@ SOURCE_PATHS = (
     "alphaforge/core/valuation/estimated_inputs.py",
     "alphaforge/core/valuation/estimated_projection.py",
     "alphaforge/core/valuation/estimated_fcff.py",
+    "alphaforge/core/valuation/estimated_reverse.py",
     "alphaforge/core/valuation/forward_fcff.py",
     "alphaforge/core/valuation/forward_fcff_contract.py",
     "tools/check_estimated_forward_acceptance.py",

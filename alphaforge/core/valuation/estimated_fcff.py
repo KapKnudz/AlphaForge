@@ -1,4 +1,4 @@
-"""Conditional aggregate FCFF/WACC/common allocation. No reverse-growth search."""
+"""Conditional aggregate FCFF/WACC/common allocation and shared reverse evaluation."""
 
 from __future__ import annotations
 
@@ -77,12 +77,12 @@ def outcome(value=None, error=None):
 
 
 def reverse_outcome():
-    return outcome(error=Unavailable("reverse_not_implemented_stage4", "reverse", "not_requested"))
+    return outcome(error=Unavailable("reverse_not_requested", "reverse", "not_requested"))
 
 
-def scenario_refusal(error):
+def scenario_refusal(error, reverse_requested=False):
     result = {stage: outcome(error=error) for stage in SCENARIO_STAGES[:-1]}
-    result["reverse"] = reverse_outcome()
+    result["reverse"] = outcome(error=error) if reverse_requested else reverse_outcome()
     return result
 
 
@@ -872,11 +872,39 @@ def evaluate(pack):
             try:
                 require(isinstance(scenario, dict), "invalid_scenario", name)
                 scenarios[name] = _scenario(pack, scenario, valuation)
+                if scenario.get("reverse") is not None:
+                    from alphaforge.core.valuation.estimated_reverse import solve
+
+                    reverse = _stage(
+                        Evidence(pack),
+                        "reverse",
+                        lambda scenario=scenario: solve(pack, scenario, valuation, _scenario),
+                    )
+                    if reverse["available"]:
+                        result_kind = reverse["value"]["outcome"]
+                        reverse["status"] = result_kind
+                        if result_kind in {
+                            "unsupported_domain",
+                            "invalid_input",
+                            "numerical_failure",
+                            "no_crossing_observed",
+                            "sampled_match",
+                        }:
+                            diagnostics = reverse["value"]
+                            reverse = outcome(
+                                error=Unavailable(result_kind, "reverse", result_kind)
+                            )
+                            reverse["search_diagnostics"] = diagnostics
+                    scenarios[name]["reverse"] = reverse
             except Unavailable as error:
-                scenarios[name] = scenario_refusal(error)
+                scenarios[name] = scenario_refusal(
+                    error, isinstance(scenario, dict) and scenario.get("reverse") is not None
+                )
             except (KeyError, TypeError, AttributeError, ContractError) as error:
                 malformed = Unavailable("malformed_scenario_input", str(error), "invalid_input")
-                scenarios[name] = scenario_refusal(malformed)
+                scenarios[name] = scenario_refusal(
+                    malformed, isinstance(scenario, dict) and scenario.get("reverse") is not None
+                )
         conclusion = {"status": "withheld", "reasons": ["not_an_investment_recommendation"]}
         values = []
         for s in scenarios.values():

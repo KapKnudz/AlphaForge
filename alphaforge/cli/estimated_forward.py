@@ -28,6 +28,7 @@ SOURCE_PATHS = (
     "alphaforge/core/valuation/estimated_inputs.py",
     "alphaforge/core/valuation/estimated_projection.py",
     "alphaforge/core/valuation/estimated_fcff.py",
+    "alphaforge/core/valuation/estimated_reverse.py",
     "alphaforge/core/valuation/forward_fcff.py",
     "alphaforge/core/valuation/forward_fcff_contract.py",
     "alphaforge/cli/estimated_forward.py",
@@ -72,8 +73,15 @@ def export(root, pack, outputs, parent_pack=None):
         lineterminator="\n",
     )
     writer.writeheader()
+    reverse_stream = io.StringIO(newline="")
+    reverse_writer = csv.DictWriter(
+        reverse_stream,
+        fieldnames=["scenario", "status", "record_type", "record", "context"],
+        lineterminator="\n",
+    )
+    reverse_writer.writeheader()
     lines = [
-        "# Estimated forward valuation",
+        "# Estimated valuation — forward and declared reverse analysis",
         "",
         f"**{LABEL}**",
         "",
@@ -90,7 +98,24 @@ def export(root, pack, outputs, parent_pack=None):
                 {**context, "scenario": name, "output": key, **out}
             )
             lines.append(
-                f"- {key}: {out['status']}; reasons={canonical(out['reasons'])}; value={canonical(out['value'])}"
+                f"- {key}: {out['status']}; reasons={canonical(out['reasons'])}; value={canonical(out['value'])}; search_diagnostics={canonical(out.get('search_diagnostics'))}"
+            )
+        reverse = scenario["reverse"]
+        diagnostics = reverse.get("value") or reverse.get("search_diagnostics")
+        reverse_records = [("outcome", reverse)]
+        if diagnostics is not None:
+            reverse_records += [("scan", row) for row in diagnostics["scan"]]
+            reverse_records += [("root", root) for root in diagnostics["roots"]]
+            reverse_records += [("match_region", region) for region in diagnostics["match_regions"]]
+        for record_type, record in reverse_records:
+            reverse_writer.writerow(
+                {
+                    "scenario": name,
+                    "status": reverse["status"],
+                    "record_type": record_type,
+                    "record": canonical(record),
+                    "context": canonical(context),
+                }
             )
         cash = scenario["annual_fcff"]
         rows = cash["value"] or [cash]
@@ -106,6 +131,7 @@ def export(root, pack, outputs, parent_pack=None):
                 }
             )
     artifacts["annual.csv"] = stream.getvalue()
+    artifacts["reverse.csv"] = reverse_stream.getvalue()
     lines += [
         "",
         "## Conclusion",

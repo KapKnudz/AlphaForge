@@ -1254,7 +1254,7 @@ def test_cli_export_is_invariant_to_scenario_insertion_order(tmp_path, capsys):
 
     first_directory, first_args = run("first-order", first)
     first_bytes = {path.name: path.read_bytes() for path in first_directory.iterdir()}
-    assert len(first_bytes) == 27
+    assert len(first_bytes) == 28
     second_directory, _ = run("second-order", second)
     assert second_directory == first_directory
     assert first_bytes == {path.name: path.read_bytes() for path in second_directory.iterdir()}
@@ -1684,9 +1684,7 @@ def test_malformed_mapping_shapes_have_structured_refusals(tmp_path, capsys):
         assert scenario[name]["status"] == "invalid_input"
         assert scenario[name]["reasons"] == expected
     assert scenario["reverse"]["status"] == "not_requested"
-    assert scenario["reverse"]["reasons"] == [
-        {"code": "reverse_not_implemented_stage4", "path": "reverse"}
-    ]
+    assert scenario["reverse"]["reasons"] == [{"code": "reverse_not_requested", "path": "reverse"}]
 
     malformed_projection = response()
     malformed_projection["scenarios"]["base"]["operations"]["inputs"] = []
