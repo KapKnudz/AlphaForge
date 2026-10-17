@@ -308,6 +308,12 @@ def annual(block, evidence, valuation, allocations):
             refused = outcome(error=error)
             refused["supplied_components_not_qualified_fcff"] = row
             result.append(refused)
+        except ContractError as error:
+            refused = outcome(
+                error=Unavailable("malformed_stage_input", str(error), "invalid_input")
+            )
+            refused["supplied_components_not_qualified_fcff"] = row
+            result.append(refused)
     return result
 
 
