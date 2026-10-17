@@ -227,6 +227,10 @@ Write-once local bundles under `estimated-forward/<artifact identity>/` contain
 original inputs, outputs, execution/code identities, report, annual CSV and
 individual output JSON files. Scenario sections and CSV rows are composed in
 canonical scenario-id order, so insertion order cannot change an artifact bundle.
+When full parent context is supplied, its canonical content identity is included
+in the execution receipt before artifact hashing. Reloading a saved child without
+that optional context retains the child's parent/revision metadata but produces a
+distinct artifact; identical contexts reuse byte-identical immutable bundles.
 Code identities cover the estimated modules and the shared supplied-schedule
 calculation/contract helpers they execute. Detached output files/CSV rows/report retain the
 full identity and assumption pack, source anchors, conditions, limitations,

@@ -53,6 +53,8 @@ def export(root, pack, outputs, parent_pack=None):
         "code_sources": _code_sources(code_root),
         "scope": "software calculation only; not financial or human implementation acceptance",
     }
+    if parent_pack is not None:
+        receipt["parent_pack_identity"] = content_identity(parent_pack)
     artifact = digest(receipt)
     target = root / artifact
     context = {"identity": outputs["identity"], "assumption_pack": pack, "execution": receipt}
