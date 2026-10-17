@@ -275,6 +275,39 @@ def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
     assert not actual["available"]
 
 
+@pytest.mark.parametrize(
+    "variant, status, reasons",
+    [
+        ("missing", "not_requested", [{"code": "not_supplied", "path": "rights"}]),
+        ("malformed", "invalid_input", [{"code": "invalid_right_items", "path": ""}]),
+        (
+            "unqualified",
+            "unsupported",
+            [{"code": "unqualified_record", "path": "rights-bad"}],
+        ),
+        ("supported", "not_requested", [{"code": "not_supplied", "path": "ownership"}]),
+    ],
+)
+def test_rights_qualification_precedes_standalone_ownership(variant, status, reasons):
+    p = reverse_pack()
+    scenario = p["scenarios"]["base"]
+    scenario["ownership"] = None
+    if variant == "missing":
+        scenario["rights"] = None
+    elif variant == "malformed":
+        scenario["rights"]["items"] = "bad"
+    elif variant == "unqualified":
+        p["records"]["rights-bad"] = copy.deepcopy(p["records"]["budget"])
+        p["records"]["rights-bad"]["status"] = "unsupported"
+        scenario["rights"]["record_ids"] = ["rights-bad"]
+    forward_only = copy.deepcopy(p)
+    forward_only["scenarios"]["base"].pop("reverse")
+    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
+    actual = result(p)
+    assert expected["status"] == actual["status"] == status
+    assert expected["reasons"] == actual["reasons"] == reasons
+
+
 def test_fixed_terminal_refusal_precedes_candidate_domain_classification():
     p = reverse_pack()
     p["scenarios"]["base"]["operations"]["inputs"].update(

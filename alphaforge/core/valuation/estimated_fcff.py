@@ -834,17 +834,17 @@ def qualify_reverse_inputs(pack, scenario, valuation):
     _dependent(
         _stage(
             evidence,
-            "per_share_reporting",
-            lambda: basic_shares(scenario.get("ownership"), evidence, valuation),
+            "common_equity",
+            lambda: qualify_rights(
+                scenario.get("rights"), evidence, valuation, allocations
+            ),
         )
     )
     _dependent(
         _stage(
             evidence,
-            "common_equity",
-            lambda: qualify_rights(
-                scenario.get("rights"), evidence, valuation, allocations
-            ),
+            "per_share_reporting",
+            lambda: basic_shares(scenario.get("ownership"), evidence, valuation),
         )
     )
     _dependent(
