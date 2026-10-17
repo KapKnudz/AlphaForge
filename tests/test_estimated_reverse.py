@@ -350,7 +350,13 @@ def test_reverse_ignores_replaced_original_growth_and_preserves_forward_outputs(
     forward_only["scenarios"]["base"].pop("reverse")
     expected_forward = forward.evaluate(forward_only)["scenarios"]["base"]
     outputs = forward.evaluate(p)["scenarios"]["base"]
-    assert {key: value for key, value in outputs.items() if key != "reverse"} == expected_forward
+    assert {key: value for key, value in outputs.items() if key != "reverse"} == {
+        key: value for key, value in expected_forward.items() if key != "reverse"
+    }
+    assert expected_forward["reverse"]["status"] == "not_requested"
+    assert expected_forward["reverse"]["reasons"] == [
+        {"code": "reverse_not_requested", "path": "reverse"}
+    ]
     assert outputs["annual_fcff"]["status"] == "invalid_input"
     assert outputs["annual_fcff"]["reasons"] == [{"code": "invalid_growth", "path": ""}]
     assert outputs["reverse"]["status"] == "candidate_solution"
