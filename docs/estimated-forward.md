@@ -134,8 +134,9 @@ material annual witness leg, including supplied recurring tax, investment and
 lease constituents, must grow coherently. Complete supplied decompositions reconcile
 to their selected cash aggregate; partial optional detail remains optional, and
 charge/payment or entitlement/recovery timing is not collapsed. Retained witness
-growth must exactly equal the
-selected Gordon growth. Retained witness revenue is optional for direct rows, but
+growth must exactly equal the selected Gordon growth. Paired retained margins use
+the annual numerical tolerance below and are not multiplied by growth. Retained
+witness revenue is optional for direct rows, but
 when present it must be present in both witnesses and reconcile at the annual
 witness tolerance; generated response revenue is always checked. Aggregate
 response recovery queues are checked
@@ -236,8 +237,9 @@ not the legacy retained-run/replay contract.
 
 Calculations use local Decimal64, with guard precision for normal probabilities.
 JSON retains unrounded decimal strings. Independent comparison uses
-`abs(a-b) <= max(A, R*max(abs(a),abs(b)))`: annual legs/witnesses (including terminal
-numerator) A=2e-8 million/R=2e-12; value/individual bridge/common components
+`abs(a-b) <= max(A, R*max(abs(a),abs(b)))`: annual monetary legs/witnesses (including
+terminal numerator) A=2e-8 million/R=2e-12; retained terminal-margin fractions use
+those same A/R values; value/individual bridge/common components
 A=1e-7 million/R=2e-11; per-share A=1e-8 currency/R=2e-11. Identities, dates, units,
 share counts and withholding/allocation semantics are exact, never tolerance
 exceptions. Tests cover components as well as totals. Presentation rounding is
