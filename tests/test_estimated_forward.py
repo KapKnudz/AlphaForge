@@ -216,6 +216,86 @@ def test_first_ten_row_refusal_preserves_root_status_and_reason(value, status, c
         assert result[output]["reasons"] == expected
 
 
+def test_bridge_consumes_earnings_before_validating_later_items():
+    p = pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim = next(
+        item for item in scenario["bridge"]["items"] if item["category"] == "consideration"
+    )
+    claim.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "2",
+        },
+    )
+    lease = next(item for item in scenario["bridge"]["items"] if item["category"] == "lease_debt")
+    lease["inputs"]["amount"] = "bad"
+    refused = base(p)["bridge"]
+    assert refused["status"] == "insufficient_evidence"
+    assert refused["reasons"] == [{"code": "missing_operand", "path": "annual.1.ebit"}]
+    scenario["operations"]["rows"][0]["ebit"] = "20"
+    progressed = base(p)["bridge"]
+    assert progressed["status"] == "invalid_input"
+    assert progressed["reasons"] == [{"code": "invalid_number", "path": "lease_debt"}]
+    lease["inputs"]["amount"] = "-5"
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim["inputs"]["current_pv_anchor"] = "bad"
+    assert base(p)["bridge"]["reasons"] == [
+        {"code": "missing_operand", "path": "annual.1.ebit"}
+    ]
+    scenario["operations"]["rows"][0]["ebit"] = "20"
+    assert base(p)["bridge"]["reasons"] == [{"code": "invalid_number", "path": ""}]
+
+
+def test_cli_reports_consumed_bridge_row_refusal(tmp_path, capsys):
+    p = pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim = next(
+        item for item in scenario["bridge"]["items"] if item["category"] == "consideration"
+    )
+    claim.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "2",
+        },
+    )
+    lease = next(item for item in scenario["bridge"]["items"] if item["category"] == "lease_debt")
+    lease["inputs"]["amount"] = "bad"
+    expected = base(p)["bridge"]
+    input_path = tmp_path / "bridge-order.json"
+    input_path.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+    )
+    assert args.func(args) == 0
+    directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
+    exported = json.loads((directory / "base-bridge.json").read_text())
+    assert exported["status"] == expected["status"]
+    assert exported["reasons"] == expected["reasons"]
+    assert canonical(expected["reasons"]) in (directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("later_operand", ["coefficient", "settlement"])
+def test_projection_arithmetic_precedes_later_operand_consumption(later_operand):
+    p = response()
+    inputs = p["scenarios"]["base"]["operations"]["inputs"]
+    inputs.update(revenue="1e999999", initial_growth="10")
+    if later_operand == "coefficient":
+        inputs.pop("margin_first")
+    else:
+        inputs["settlements"] = [None]
+    refused = base(p)["annual_fcff"]
+    assert refused["status"] == "numerical_failure"
+    assert refused["reasons"][0]["code"] == "numerical_failure"
+    assert base(response())["annual_fcff"]["available"]
+
+
 def test_unsupported_row_refusal_is_not_collapsed_by_consumers():
     p = pack()
     p["records"]["unsupported-row"] = {

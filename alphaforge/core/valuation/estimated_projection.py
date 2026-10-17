@@ -9,7 +9,7 @@ from decimal import Decimal as D
 from alphaforge.core.valuation.estimated_inputs import decimal, require
 
 
-def qualify_response(block, *, include_initial_growth=True):
+def qualify_response(block, *, include_initial_growth=True, eager=True):
     p = block["inputs"]
     require(isinstance(p, dict), "invalid_projection_inputs")
     numbers = {}
@@ -68,19 +68,23 @@ def qualify_response(block, *, include_initial_growth=True):
             key,
         )
     require(n("revenue") > 0, "invalid_baseline_revenue")
-    for key in (
-        "opening_wc",
-        "opening_deferred",
-        "initial_cash_diagnostic",
-        "margin_first",
-        "margin_terminal",
-        "da_first",
-        "da_terminal",
-        "wc_ratio",
-    ):
-        n(key)
-    settlements = [decimal(value, "settlements") for value in raw_settlements]
+    if eager:
+        for key in (
+            "opening_wc",
+            "opening_deferred",
+            "initial_cash_diagnostic",
+            "margin_first",
+            "margin_terminal",
+            "da_first",
+            "da_terminal",
+            "wc_ratio",
+        ):
+            n(key)
+        settlements = [decimal(value, "settlements") for value in raw_settlements]
+    else:
+        settlements = raw_settlements
     return {
+        "inputs": p,
         "numbers": numbers,
         "mature_year": maturity,
         "recovery_lag": lag,
@@ -151,14 +155,15 @@ def qualify_fixed_schedules(block):
             "opening_deferred_remaining",
         ):
             require(row[leg] == 0, "finite_cash_in_terminal", "terminal." + leg)
-    return qualified
 
 
-def project(block, qualified=None):
-    qualified = qualified or qualify_response(block)
+def project(block):
+    qualified = qualify_response(block, eager=False)
     numbers = qualified["numbers"]
 
     def n(key):
+        if key not in numbers:
+            numbers[key] = decimal(qualified["inputs"].get(key), key)
         return numbers[key]
 
     growth = n("terminal_growth")
@@ -239,7 +244,11 @@ def project(block, qualified=None):
         lease_renewal = r * n("lease_renewal_rate")
         lease_lead = increment * n("lease_growth_capital")
         close = r * n("wc_ratio")
-        settlement = settlements[t - 1] if t <= len(settlements) else D(0)
+        settlement = (
+            decimal(settlements[t - 1], "settlements")
+            if t <= len(settlements)
+            else D(0)
+        )
         row = {
             "revenue": r,
             "growth": growths[t - 1],

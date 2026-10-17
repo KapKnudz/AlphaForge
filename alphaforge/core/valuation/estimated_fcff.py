@@ -283,23 +283,20 @@ def qualify_operations(block, evidence, allocations, *, include_initial_growth=T
         "unsupported_projection",
         status="unsupported",
     )
-    if block["mode"] != "aggregate_response":
-        return None
-    qualified = qualify_response(block, include_initial_growth=include_initial_growth)
-    if not include_initial_growth:
+    if block["mode"] == "aggregate_response" and not include_initial_growth:
+        qualify_response(block, include_initial_growth=False)
         for record_id in block["record_ids"]:
             require(
                 evidence.pack["records"][record_id]["kind"] != "fact",
                 "fact_is_not_forecast",
                 record_id,
             )
-    return qualified
 
 
 def annual(block, evidence, valuation, allocations):
-    qualified = qualify_operations(block, evidence, allocations)
+    qualify_operations(block, evidence, allocations)
     rows = (
-        project(block, qualified)
+        project(block)
         if block["mode"] == "aggregate_response"
         else copy.deepcopy(block["rows"])
     )
@@ -528,7 +525,7 @@ def terminal(block, rows, evidence, r, response_block=None, *, reverse_candidate
     }
 
 
-def qualify_bridge(block, evidence, valuation, allocations):
+def qualify_bridge_inventory(block, evidence, valuation, allocations):
     evidence.block(block, "bridge")
     require(block["valuation_date"] == valuation.isoformat(), "bridge_date_mismatch")
     categories = block["categories"]
@@ -544,52 +541,62 @@ def qualify_bridge(block, evidence, valuation, allocations):
         "bridge",
         "bridge",
     )
-    ids, prepared = set(), []
-    for item in block["items"]:
-        evidence.block(item, "bridge." + item["id"])
-        require(item["id"] not in ids, "duplicate_bridge_id", item["id"])
-        ids.add(item["id"])
-        require(item["category"] in BRIDGE_CATEGORIES, "unknown_bridge_category")
-        p = item["inputs"]
-        claim = None
-        if item["method"] == "supplied_pv":
-            amount = decimal(p.get("amount"), item["id"])
-        elif item["method"] == "foreign_pv":
-            require(p["currency"] != evidence.pack["currency"], "foreign_currency_required")
-            q = exchange_rate(
-                p,
-                valuation,
-                evidence.pack["currency"],
-                "currency",
-                "foreign_per_reporting",
-                "fx_date",
-                item["id"] + ".fx",
-            )
-            amount = decimal(p.get("amount"), item["id"]) / q
-        elif item["method"] == "earnings_linked_pv":
-            require(
-                item["category"] not in ADDITIVE_BRIDGE_CATEGORIES,
-                "bridge_method_category_mismatch",
-                item["id"],
-            )
-            baseline = decimal(p.get("recurring_baseline_ebit"))
-            require(baseline > 0, "invalid_claim_baseline")
-            claim = (
-                baseline,
-                decimal(p.get("current_pv_anchor")),
-                decimal(p.get("later_pv_anchor")),
-            )
-            amount = None
-        else:
-            raise Unavailable("unsupported_bridge_method", item["id"], "unsupported")
-        if amount is not None:
-            additive = item["category"] in ADDITIVE_BRIDGE_CATEGORIES
-            require(
-                amount >= 0 if additive else amount <= 0,
-                "bridge_direction_mismatch",
-                item["id"],
-            )
-        prepared.append((item, amount, claim))
+    return block["items"]
+
+
+def qualify_bridge_item(item, evidence, valuation, ids, *, eager=True):
+    evidence.block(item, "bridge." + item["id"])
+    require(item["id"] not in ids, "duplicate_bridge_id", item["id"])
+    ids.add(item["id"])
+    require(item["category"] in BRIDGE_CATEGORIES, "unknown_bridge_category")
+    p = item["inputs"]
+    claim = None
+    if item["method"] == "supplied_pv":
+        amount = decimal(p.get("amount"), item["id"])
+    elif item["method"] == "foreign_pv":
+        require(p["currency"] != evidence.pack["currency"], "foreign_currency_required")
+        q = exchange_rate(
+            p,
+            valuation,
+            evidence.pack["currency"],
+            "currency",
+            "foreign_per_reporting",
+            "fx_date",
+            item["id"] + ".fx",
+        )
+        amount = decimal(p.get("amount"), item["id"]) / q
+    elif item["method"] == "earnings_linked_pv":
+        require(
+            item["category"] not in ADDITIVE_BRIDGE_CATEGORIES,
+            "bridge_method_category_mismatch",
+            item["id"],
+        )
+        baseline = decimal(p.get("recurring_baseline_ebit"))
+        require(baseline > 0, "invalid_claim_baseline")
+        claim = (
+            baseline,
+            decimal(p.get("current_pv_anchor")) if eager else p.get("current_pv_anchor"),
+            decimal(p.get("later_pv_anchor")) if eager else p.get("later_pv_anchor"),
+        )
+        amount = None
+    else:
+        raise Unavailable("unsupported_bridge_method", item["id"], "unsupported")
+    if amount is not None:
+        additive = item["category"] in ADDITIVE_BRIDGE_CATEGORIES
+        require(
+            amount >= 0 if additive else amount <= 0,
+            "bridge_direction_mismatch",
+            item["id"],
+        )
+    return item, amount, claim
+
+
+def qualify_bridge(block, evidence, valuation, allocations):
+    ids = set()
+    prepared = [
+        qualify_bridge_item(item, evidence, valuation, ids)
+        for item in qualify_bridge_inventory(block, evidence, valuation, allocations)
+    ]
     require(
         {item["category"] for item, _, _ in prepared} == BRIDGE_CATEGORIES,
         "unvalued_bridge_category",
@@ -598,8 +605,12 @@ def qualify_bridge(block, evidence, valuation, allocations):
 
 
 def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_candidate=False):
-    result = []
-    for item, amount, claim in qualify_bridge(block, evidence, valuation, allocations):
+    result, ids = [], set()
+    items = qualify_bridge_inventory(block, evidence, valuation, allocations)
+    for raw_item in items:
+        item, amount, claim = qualify_bridge_item(
+            raw_item, evidence, valuation, ids, eager=False
+        )
         if claim is not None:
             rows = annual_result["value"]
             if rows is None:
@@ -610,7 +621,10 @@ def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_ca
                 raise earnings_error
             earnings = [max(D(0), decimal(x["value"]["ebit"])) for x in rows[:5]]
             baseline, current_anchor, later_anchor = claim
-            amount = -(current_anchor * earnings[0] + later_anchor * sum(earnings) / 5) / baseline
+            amount = -(
+                decimal(current_anchor) * earnings[0]
+                + decimal(later_anchor) * sum(earnings) / 5
+            ) / baseline
             require(
                 amount <= 0,
                 "bridge_direction_mismatch",
@@ -618,6 +632,7 @@ def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_ca
                 "unsupported_domain" if reverse_candidate else "invalid_input",
             )
         result.append({**item, "amount": amount})
+    require({item["category"] for item in result} == BRIDGE_CATEGORIES, "unvalued_bridge_category")
     return result
 
 
