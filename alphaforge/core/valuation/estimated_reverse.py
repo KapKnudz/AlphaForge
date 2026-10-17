@@ -10,13 +10,7 @@ import copy
 from decimal import Decimal as D
 from typing import NamedTuple
 
-from alphaforge.core.valuation.estimated_inputs import (
-    Evidence,
-    Unavailable,
-    decimal,
-    encode,
-    require,
-)
+from alphaforge.core.valuation.estimated_inputs import Evidence, decimal, encode, require
 from alphaforge.core.valuation.forward_fcff_contract import digest, iso_date, text
 
 
@@ -117,21 +111,8 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
         evaluations.append(item)
         return item, out
 
-    def economic_domain_failure(failure):
-        return any(
-            reason["code"] in {"finite_effects_not_exhausted", "finite_cash_in_terminal"}
-            or (
-                reason["code"] == "reconciliation_failed"
-                and reason["path"].startswith("terminal.")
-            )
-            for reason in failure["reasons"]
-        )
-
     def failure_outcome():
-        kinds = {
-            "unsupported_domain" if economic_domain_failure(failure) else failure["status"]
-            for failure in failures
-        }
+        kinds = {failure["status"] for failure in failures}
         if "invalid_input" in kinds:
             return "invalid_input"
         if "numerical_failure" in kinds:
@@ -328,9 +309,13 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
     return summary(status, roots, brackets, regions)
 
 
-def solve(pack, scenario, valuation, forward_evaluator, forward_quote):
+def solve(pack, scenario, valuation, forward_evaluator):
     """Consume a declared, source-qualified reverse question; no financial approval."""
-    from alphaforge.core.valuation.estimated_fcff import _dependent, _stage
+    from alphaforge.core.valuation.estimated_fcff import (
+        _dependent,
+        _stage,
+        qualify_reverse_inputs,
+    )
 
     evidence = Evidence(pack)
     evidence.qualify("reverse")
@@ -402,15 +387,7 @@ def solve(pack, scenario, valuation, forward_evaluator, forward_quote):
     )
     inputs = ops.get("inputs")
     require(isinstance(inputs, dict), "invalid_projection_inputs")
-    terminal = evidence.block(scenario.get("terminal"), "terminal")
-    terminal_growth = decimal(terminal.get("growth"), "terminal.growth")
-    require(
-        decimal(inputs.get("terminal_growth"), "terminal_growth") == terminal_growth,
-        "reverse_terminal_growth_mismatch",
-    )
-    if not forward_quote["available"]:
-        reason = forward_quote["reasons"][0]
-        raise Unavailable(reason["code"], reason["path"], forward_quote["status"])
+    qualify_reverse_inputs(pack, scenario, valuation)
     fixed = copy.deepcopy(scenario)
     fixed.pop("reverse", None)
     fixed["operations"]["inputs"].pop("initial_growth", None)

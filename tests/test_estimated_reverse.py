@@ -278,7 +278,10 @@ def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
 def test_fixed_terminal_refusal_precedes_candidate_domain_classification():
     p = reverse_pack()
     p["scenarios"]["base"]["operations"]["inputs"].update(
-        legacy_remaining="100", legacy_annual="1"
+        legacy_remaining="100",
+        legacy_annual="1",
+        refundable_profit_share=".5",
+        recovery_lag=3,
     )
     forward_only = copy.deepcopy(p)
     forward_only["scenarios"]["base"].pop("reverse")
@@ -290,22 +293,73 @@ def test_fixed_terminal_refusal_precedes_candidate_domain_classification():
     assert actual["reasons"] == expected["reasons"]
 
 
-def test_fixed_fx_refusal_precedes_mixed_candidate_domain_failures():
+@pytest.mark.parametrize(
+    "field, path",
+    [("fx", "quote_fx"), ("bridge", "bridge"), ("ownership", "ownership")],
+)
+def test_fixed_refusal_precedes_mixed_candidate_domain_failures(field, path):
     p = reverse_pack()
     scenario = p["scenarios"]["base"]
-    scenario["operations"]["inputs"].update(refundable_profit_share=".5", recovery_lag=3)
-    genuine_hole = result(copy.deepcopy(p))
-    assert genuine_hole["status"] == "unsupported_domain"
-    assert genuine_hole["search_diagnostics"]["failed_evaluations"]
-    scenario["fx"] = None
+    scenario["operations"]["inputs"].update(
+        initial_growth=".06", refundable_profit_share=".5", recovery_lag=3
+    )
+    scenario[field] = None
+    actual = result(p)
+    assert actual["status"] == "not_requested"
+    assert actual["reasons"] == [{"code": "not_supplied", "path": path}]
+
+
+def test_reverse_ignores_replaced_original_growth_and_preserves_forward_outputs():
+    x = D(".013123")
+    p = reverse_pack(str(independent_simple_price(x)))
+    p["scenarios"]["base"]["operations"]["inputs"]["initial_growth"] = "-1"
     forward_only = copy.deepcopy(p)
     forward_only["scenarios"]["base"].pop("reverse")
-    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
-    actual = result(p)
-    assert expected["status"] == "not_requested"
-    assert expected["reasons"] == [{"code": "not_supplied", "path": "quote_fx"}]
-    assert actual["status"] == expected["status"]
-    assert actual["reasons"] == expected["reasons"]
+    expected_forward = forward.evaluate(forward_only)["scenarios"]["base"]
+    outputs = forward.evaluate(p)["scenarios"]["base"]
+    assert {key: value for key, value in outputs.items() if key != "reverse"} == expected_forward
+    assert outputs["annual_fcff"]["status"] == "invalid_input"
+    assert outputs["annual_fcff"]["reasons"] == [{"code": "invalid_growth", "path": ""}]
+    assert outputs["reverse"]["status"] == "candidate_solution"
+    assert abs(D(outputs["reverse"]["value"]["roots"][0]["initial_growth"]) - x) < D("1e-10")
+
+
+def test_fixed_discount_and_built_rate_dependencies_keep_forward_ordering():
+    p = reverse_pack()
+    scenario = p["scenarios"]["base"]
+    scenario["discount"] = None
+    scenario["ownership"] = None
+    assert result(p)["reasons"] == [{"code": "not_supplied", "path": "discount"}]
+
+    p = reverse_pack()
+    scenario = p["scenarios"]["base"]
+    scenario["discount"]["inputs"] = {
+        "risk_free_continuous": ".03",
+        "beta": "1.2",
+        "equity_risk_premium": ".05",
+        "market_close": "20",
+        "market_close_date": p["valuation_date"],
+        "market_close_currency": "SEK",
+        "debt": "25",
+        "debt_date": p["valuation_date"],
+        "debt_currency": "EUR",
+        "debt_cost": ".06",
+        "debt_cost_date": p["valuation_date"],
+        "debt_cost_basis": "nominal_annual_effective_pre_tax",
+        "shield_rate": ".2",
+        "shield_rate_date": p["valuation_date"],
+    }
+    scenario["ownership"] = None
+    assert result(p)["reasons"] == [{"code": "not_supplied", "path": "ownership"}]
+
+
+def test_missing_and_invalid_fixed_projection_operands_remain_distinct():
+    missing = reverse_pack()
+    missing["scenarios"]["base"]["operations"]["inputs"].pop("margin_first")
+    assert result(missing)["reasons"] == [{"code": "missing_operand", "path": "margin_first"}]
+    invalid = reverse_pack()
+    invalid["scenarios"]["base"]["operations"]["inputs"]["margin_first"] = "bad"
+    assert result(invalid)["reasons"] == [{"code": "invalid_number", "path": "margin_first"}]
 
 
 def test_direct_budget_survives_unsupported_reverse_response():
@@ -430,11 +484,11 @@ def test_tangency_and_discontinuity_do_not_manufacture_solutions():
 def test_domain_holes_are_not_skipped_in_scan_or_refinement(monkeypatch, hole, status):
     original = forward._scenario
 
-    def hole_evaluator(pack, scenario, valuation):
+    def hole_evaluator(pack, scenario, valuation, **kwargs):
         x = D(scenario["operations"]["inputs"]["initial_growth"])
         if x == D(hole):
             raise Unavailable("synthetic_funding_hole", str(x), "unsupported")
-        return original(pack, scenario, valuation)
+        return original(pack, scenario, valuation, **kwargs)
 
     monkeypatch.setattr(forward, "_scenario", hole_evaluator)
     p = reverse_pack(str(independent_simple_price(D(".013123"))))
@@ -459,6 +513,9 @@ def test_real_tax_transition_hole_withholds_reverse_not_forward():
     assert failed and failed[0]["reasons"][0]["code"] == "finite_effects_not_exhausted"
     assert len(r["search_diagnostics"]["scan"]) == 201
     assert r["search_diagnostics"]["roots"] == []
+    different_original = copy.deepcopy(p)
+    different_original["scenarios"]["base"]["operations"]["inputs"]["initial_growth"] = ".06"
+    assert result(different_original) == r
 
 
 def test_recovered_loss_has_no_new_refund_but_preserves_opening_recovery():
@@ -515,6 +572,36 @@ def test_forward_override_also_recomputes_and_invalidates_requested_reverse():
         result(child)["value"]["fixed_assumptions_identity"]
         != result(p)["value"]["fixed_assumptions_identity"]
     )
+
+
+def test_cli_and_api_preserve_fixed_refusal_reason_parity(tmp_path):
+    p = reverse_pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["inputs"].update(
+        initial_growth=".06", refundable_profit_share=".5", recovery_lag=3
+    )
+    scenario["fx"] = None
+    outputs = forward.evaluate(p)
+    api_target = export(tmp_path / "api", p, outputs)
+    api_reverse = json.loads((api_target / "base-reverse.json").read_text())
+    input_file = tmp_path / "pack.json"
+    input_file.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        [
+            "estimated-forward",
+            "--input-json",
+            str(input_file),
+            "--exports-dir",
+            str(tmp_path / "cli"),
+        ]
+    )
+    assert args.func(args) == 0
+    cli_target = next((tmp_path / "cli" / "estimated-forward").iterdir())
+    cli_reverse = json.loads((cli_target / "base-reverse.json").read_text())
+    assert cli_reverse["status"] == api_reverse["status"] == "not_requested"
+    assert cli_reverse["reasons"] == api_reverse["reasons"] == [
+        {"code": "not_supplied", "path": "quote_fx"}
+    ]
 
 
 def test_exports_and_overrides_retain_reverse_identity_and_recompute(tmp_path):

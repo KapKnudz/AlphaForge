@@ -17,7 +17,11 @@ from alphaforge.core.valuation.estimated_inputs import (
     require,
     validate_envelope,
 )
-from alphaforge.core.valuation.estimated_projection import project
+from alphaforge.core.valuation.estimated_projection import (
+    project,
+    qualify_fixed_schedules,
+    qualify_response,
+)
 from alphaforge.core.valuation.forward_fcff import _anniversary
 from alphaforge.core.valuation.forward_fcff_contract import ContractError, iso_date, text
 
@@ -60,10 +64,15 @@ SCENARIO_STAGES = (
 )
 
 
-def close(a, b, path, annual=True, *, code="reconciliation_failed"):
+def close(a, b, path, annual=True, *, code="reconciliation_failed", status="invalid_input"):
     a, b = decimal(a, path), decimal(b, path)
     absolute, relative = (D("2e-8"), D("2e-12")) if annual else (D("1e-7"), D("2e-11"))
-    require(abs(a - b) <= max(absolute, relative * max(abs(a), abs(b))), code, path)
+    require(
+        abs(a - b) <= max(absolute, relative * max(abs(a), abs(b))),
+        code,
+        path,
+        status,
+    )
 
 
 def outcome(value=None, error=None):
@@ -107,6 +116,17 @@ def require_allocations(supplied, allocations, destination, path):
     require(set(supplied) == expected, "incomplete_allocation_consumption", path)
 
 
+def allocation_map(pack):
+    raw = pack["allocations"]
+    require(len({item["id"] for item in raw}) == len(raw), "duplicate_allocation")
+    allocations = {item["id"]: item["destination"] for item in raw}
+    require(
+        set(allocations.values()) <= {"operations", "bridge", "rights", "excluded_pair"},
+        "unsupported_allocation_destination",
+    )
+    return allocations
+
+
 def exchange_rate(block, valuation, reporting_currency, currency_key, rate_key, date_key, path):
     require(block[date_key] == valuation.isoformat(), "fx_date_mismatch", path)
     require(
@@ -129,6 +149,20 @@ def exchange_rate(block, valuation, reporting_currency, currency_key, rate_key, 
         path,
     )
     return q
+
+
+def quote_exchange_rate(scenario, evidence, valuation):
+    fx = evidence.block(scenario.get("fx"), "quote_fx")
+    require(fx["quote_currency"] == evidence.pack["quote_currency"], "fx_quote_currency_mismatch")
+    return exchange_rate(
+        fx,
+        valuation,
+        evidence.pack["currency"],
+        "quote_currency",
+        "quote_per_reporting",
+        "valuation_date",
+        "quote_fx",
+    )
 
 
 def basic_shares(block, evidence, valuation):
@@ -229,7 +263,7 @@ def rate(block, evidence, scenario, valuation):
     }
 
 
-def annual(block, evidence, valuation, allocations):
+def qualify_operations(block, evidence, allocations, *, include_initial_growth=True):
     evidence.block(block, "operations")
     require_allocations(block.get("allocation_ids"), allocations, "operations", "operations")
     require(
@@ -249,7 +283,26 @@ def annual(block, evidence, valuation, allocations):
         "unsupported_projection",
         status="unsupported",
     )
-    rows = project(block) if block["mode"] == "aggregate_response" else copy.deepcopy(block["rows"])
+    if block["mode"] != "aggregate_response":
+        return None
+    qualified = qualify_response(block, include_initial_growth=include_initial_growth)
+    if not include_initial_growth:
+        for record_id in block["record_ids"]:
+            require(
+                evidence.pack["records"][record_id]["kind"] != "fact",
+                "fact_is_not_forecast",
+                record_id,
+            )
+    return qualified
+
+
+def annual(block, evidence, valuation, allocations):
+    qualified = qualify_operations(block, evidence, allocations)
+    rows = (
+        project(block, qualified)
+        if block["mode"] == "aggregate_response"
+        else copy.deepcopy(block["rows"])
+    )
     require(isinstance(rows, list), "invalid_annual_rows")
     require(10 <= len(rows) <= 12, "ten_full_years_required")
     result = []
@@ -317,12 +370,24 @@ def annual(block, evidence, valuation, allocations):
     return result
 
 
-def terminal(block, rows, evidence, r):
+def qualify_terminal(block, evidence, r, response_block=None):
     evidence.block(block, "terminal")
     text(block["sustainable_mechanism"])
     require(block["mode"] == "gordon", "unsupported_tail", status="unsupported")
-    g = decimal(block.get("growth"), "terminal.growth")
-    require(-1 < g < r, "invalid_terminal_growth")
+    growth = decimal(block.get("growth"), "terminal.growth")
+    require(-1 < growth < r, "invalid_terminal_growth")
+    if response_block is not None:
+        qualify_fixed_schedules(response_block)
+    return growth
+
+
+def terminal(block, rows, evidence, r, response_block=None, *, reverse_candidate=False):
+    g = qualify_terminal(block, evidence, r, response_block)
+    candidate_status = "unsupported_domain" if reverse_candidate else "invalid_input"
+
+    def reconcile(a, b, path, *, code="reconciliation_failed"):
+        close(a, b, path, code=code, status=candidate_status)
+
     require(len(rows) == 12, "complete_witnesses_required")
     witness_error = first_row_error(rows[10:12])
     if witness_error is not None:
@@ -336,6 +401,7 @@ def terminal(block, rows, evidence, r):
         require(
             all(decimal(x) == 0 for x in row["finite_effects"].values()),
             "finite_effects_not_exhausted",
+            status=candidate_status,
         )
         require(
             decimal(row.get("legacy_da", 0)) == 0 and decimal(row.get("opening_tax", 0)) == 0,
@@ -370,16 +436,16 @@ def terminal(block, rows, evidence, r):
         "insufficient_evidence",
     )
     if all(revenue_present):
-        close(
+        reconcile(
             b["revenue"],
             decimal(a["revenue"], "terminal.revenue") * (1 + g),
             "terminal.revenue",
         )
     for leg in CASH_LEGS + ("fcff",):
-        close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
+        reconcile(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
     require(("margin" in a) == ("margin" in b), "incomplete_witness_constituent", "margin")
     if "margin" in a:
-        close(a["margin"], b["margin"], "terminal.margin", code="terminal_ratio_mismatch")
+        reconcile(a["margin"], b["margin"], "terminal.margin", code="terminal_ratio_mismatch")
     for leg in (
         "ongoing_da",
         "refundable_profit",
@@ -408,7 +474,7 @@ def terminal(block, rows, evidence, r):
     ):
         require((leg in a) == (leg in b), "incomplete_witness_constituent", leg)
         if leg in a:
-            close(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
+            reconcile(b[leg], decimal(a[leg], "terminal." + leg) * (1 + g), "terminal." + leg)
     decompositions = (
         ("noncash_addbacks", (("ongoing_da", 1), ("legacy_da", 1))),
         ("new_charge", (("gross_charge", 1), ("ordinary_charge", 1), ("topup_charge", 1))),
@@ -423,14 +489,14 @@ def terminal(block, rows, evidence, r):
     )
     for year, row in ((11, a), (12, b)):
         if "revenue" in row and "margin" in row:
-            close(
+            reconcile(
                 row["ebit"],
                 decimal(row["revenue"], f"terminal.{year}.margin_decomposition")
                 * decimal(row["margin"], f"terminal.{year}.margin_decomposition"),
                 f"terminal.{year}.margin_decomposition",
             )
         if "refundable_profit" in row and "ordinary_profit" in row:
-            close(
+            reconcile(
                 max(D(0), decimal(row["ebit"], f"terminal.{year}.profit_decomposition")),
                 decimal(row["refundable_profit"], f"terminal.{year}.profit_decomposition")
                 + decimal(row["ordinary_profit"], f"terminal.{year}.profit_decomposition"),
@@ -438,7 +504,7 @@ def terminal(block, rows, evidence, r):
             )
         for aggregate, constituents in decompositions:
             if aggregate in row and all(field in row for field, _ in constituents):
-                close(
+                reconcile(
                     row[aggregate],
                     sum(
                         (
@@ -462,7 +528,7 @@ def terminal(block, rows, evidence, r):
     }
 
 
-def bridge(block, evidence, annual_result, valuation, allocations):
+def qualify_bridge(block, evidence, valuation, allocations):
     evidence.block(block, "bridge")
     require(block["valuation_date"] == valuation.isoformat(), "bridge_date_mismatch")
     categories = block["categories"]
@@ -478,13 +544,14 @@ def bridge(block, evidence, annual_result, valuation, allocations):
         "bridge",
         "bridge",
     )
-    ids, result = set(), []
+    ids, prepared = set(), []
     for item in block["items"]:
         evidence.block(item, "bridge." + item["id"])
         require(item["id"] not in ids, "duplicate_bridge_id", item["id"])
         ids.add(item["id"])
         require(item["category"] in BRIDGE_CATEGORIES, "unknown_bridge_category")
         p = item["inputs"]
+        claim = None
         if item["method"] == "supplied_pv":
             amount = decimal(p.get("amount"), item["id"])
         elif item["method"] == "foreign_pv":
@@ -507,6 +574,33 @@ def bridge(block, evidence, annual_result, valuation, allocations):
             )
             baseline = decimal(p.get("recurring_baseline_ebit"))
             require(baseline > 0, "invalid_claim_baseline")
+            claim = (
+                baseline,
+                decimal(p.get("current_pv_anchor")),
+                decimal(p.get("later_pv_anchor")),
+            )
+            amount = None
+        else:
+            raise Unavailable("unsupported_bridge_method", item["id"], "unsupported")
+        if amount is not None:
+            additive = item["category"] in ADDITIVE_BRIDGE_CATEGORIES
+            require(
+                amount >= 0 if additive else amount <= 0,
+                "bridge_direction_mismatch",
+                item["id"],
+            )
+        prepared.append((item, amount, claim))
+    require(
+        {item["category"] for item, _, _ in prepared} == BRIDGE_CATEGORIES,
+        "unvalued_bridge_category",
+    )
+    return prepared
+
+
+def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_candidate=False):
+    result = []
+    for item, amount, claim in qualify_bridge(block, evidence, valuation, allocations):
+        if claim is not None:
             rows = annual_result["value"]
             if rows is None:
                 rows = _dependent(annual_result)
@@ -515,23 +609,15 @@ def bridge(block, evidence, annual_result, valuation, allocations):
             if earnings_error is not None:
                 raise earnings_error
             earnings = [max(D(0), decimal(x["value"]["ebit"])) for x in rows[:5]]
-            amount = (
-                -(
-                    decimal(p.get("current_pv_anchor")) * earnings[0]
-                    + decimal(p.get("later_pv_anchor")) * sum(earnings) / 5
-                )
-                / baseline
+            baseline, current_anchor, later_anchor = claim
+            amount = -(current_anchor * earnings[0] + later_anchor * sum(earnings) / 5) / baseline
+            require(
+                amount <= 0,
+                "bridge_direction_mismatch",
+                item["id"],
+                "unsupported_domain" if reverse_candidate else "invalid_input",
             )
-        else:
-            raise Unavailable("unsupported_bridge_method", item["id"], "unsupported")
-        additive = item["category"] in ADDITIVE_BRIDGE_CATEGORIES
-        require(
-            amount >= 0 if additive else amount <= 0,
-            "bridge_direction_mismatch",
-            item["id"],
-        )
         result.append({**item, "amount": amount})
-    require({item["category"] for item in result} == BRIDGE_CATEGORIES, "unvalued_bridge_category")
     return result
 
 
@@ -588,7 +674,7 @@ def rights_exchange_rate(block, evidence, valuation):
     return D(1)
 
 
-def allocate(block, preclaims, shares, evidence, valuation):
+def qualify_rights(block, evidence, valuation, allocations):
     evidence.block(block, "rights")
     require(block["valuation_date"] == valuation.isoformat(), "rights_date_mismatch")
     require(
@@ -596,15 +682,24 @@ def allocate(block, preclaims, shares, evidence, valuation):
         "unsupported_rights",
         status="unsupported",
     )
+    require(isinstance(block["items"], list), "invalid_right_items")
+    require(all(isinstance(item, dict) for item in block["items"]), "invalid_right_item")
+    require_allocations(
+        [item["allocation_id"] for item in block["items"]],
+        allocations,
+        "rights",
+        "rights",
+    )
+    if not block["items"]:
+        require(block["currency"] == evidence.pack["currency"], "empty_rights_currency_mismatch")
     q = rights_exchange_rate(block, evidence, valuation)
-    items = block["items"]
-    require(len({x["id"] for x in items}) == len(items), "duplicate_right_id")
+    require(len({item["id"] for item in block["items"]}) == len(block["items"]), "duplicate_right_id")
     prepared = []
-    for item in items:
+    for item in block["items"]:
         evidence.block(item, "rights." + item["id"])
 
-        def n(k, item=item):
-            return decimal(item.get(k), "rights." + item["id"] + "." + k)
+        def n(key, item=item):
+            return decimal(item.get(key), "rights." + item["id"] + "." + key)
 
         count, strike, vol = n("count"), n("strike"), n("volatility")
         rf, div = n("risk_free_continuous"), n("dividend_yield")
@@ -615,6 +710,10 @@ def allocate(block, preclaims, shares, evidence, valuation):
             item["id"],
         )
         prepared.append((item, count, strike, vol, rf, div, t))
+    return q, prepared
+
+
+def allocate(block, preclaims, shares, q, prepared):
     if preclaims <= 0:
         return {
             "common_residual": preclaims,
@@ -684,15 +783,82 @@ def _dependent(upstream):
     return upstream["value"]
 
 
-def _scenario(pack, scenario, valuation):
+def qualify_reverse_inputs(pack, scenario, valuation):
     evidence = Evidence(pack)
-    raw_allocations = pack["allocations"]
-    require(len({x["id"] for x in raw_allocations}) == len(raw_allocations), "duplicate_allocation")
-    allocations = {x["id"]: x["destination"] for x in raw_allocations}
-    require(
-        set(allocations.values()) <= {"operations", "bridge", "rights", "excluded_pair"},
-        "unsupported_allocation_destination",
+    allocations = allocation_map(pack)
+
+    def operations():
+        block = scenario.get("operations")
+        qualify_operations(block, evidence, allocations, include_initial_growth=False)
+        return block
+
+    operation_block = _dependent(_stage(evidence, "annual_fcff", operations))
+    rate_result = _dependent(
+        _stage(
+            evidence,
+            "explicit_pv",
+            lambda: rate(
+                evidence.block(scenario.get("discount"), "discount"),
+                evidence,
+                scenario,
+                valuation,
+            ),
+        )
     )
+    discount_rate = decimal(rate_result["wacc"])
+
+    def terminal_inputs():
+        growth = qualify_terminal(
+            scenario.get("terminal"),
+            evidence,
+            discount_rate,
+            operation_block,
+        )
+        require(
+            decimal(operation_block["inputs"].get("terminal_growth"), "terminal_growth")
+            == growth,
+            "reverse_terminal_growth_mismatch",
+        )
+        return growth
+
+    _dependent(_stage(evidence, "operating_value", terminal_inputs))
+    _dependent(
+        _stage(
+            evidence,
+            "common_equity",
+            lambda: qualify_bridge(
+                scenario.get("bridge"), evidence, valuation, allocations
+            ),
+        )
+    )
+    _dependent(
+        _stage(
+            evidence,
+            "per_share_reporting",
+            lambda: basic_shares(scenario.get("ownership"), evidence, valuation),
+        )
+    )
+    _dependent(
+        _stage(
+            evidence,
+            "common_equity",
+            lambda: qualify_rights(
+                scenario.get("rights"), evidence, valuation, allocations
+            ),
+        )
+    )
+    _dependent(
+        _stage(
+            evidence,
+            "per_share_quote",
+            lambda: quote_exchange_rate(scenario, evidence, valuation),
+        )
+    )
+
+
+def _scenario(pack, scenario, valuation, *, reverse_candidate=False):
+    evidence = Evidence(pack)
+    allocations = allocation_map(pack)
     result = {}
     result["annual_fcff"] = _stage(
         evidence,
@@ -741,7 +907,19 @@ def _scenario(pack, scenario, valuation):
     def tail():
         rows = _dependent(cash)
         r = decimal(_dependent(rate_result)["wacc"])
-        return terminal(scenario.get("terminal"), rows, evidence, r)
+        response_block = (
+            scenario.get("operations")
+            if scenario.get("operations", {}).get("mode") == "aggregate_response"
+            else None
+        )
+        return terminal(
+            scenario.get("terminal"),
+            rows,
+            evidence,
+            r,
+            response_block,
+            reverse_candidate=reverse_candidate,
+        )
 
     result["terminal"] = _stage(evidence, "operating_value", tail)
 
@@ -769,7 +947,14 @@ def _scenario(pack, scenario, valuation):
     result["bridge"] = _stage(
         evidence,
         "common_equity",
-        lambda: bridge(scenario.get("bridge"), evidence, cash, valuation, allocations),
+        lambda: bridge(
+            scenario.get("bridge"),
+            evidence,
+            cash,
+            valuation,
+            allocations,
+            reverse_candidate=reverse_candidate,
+        ),
     )
 
     shares = _stage(
@@ -785,25 +970,9 @@ def _scenario(pack, scenario, valuation):
         total = sum((decimal(x["amount"]) for x in items), D(0))
         pre = value + total
         rights = scenario.get("rights")
-        evidence.block(rights, "rights")
-        require(rights["valuation_date"] == valuation.isoformat(), "rights_date_mismatch")
-        require(
-            rights["method"] == "endogenous_european_calls_basic_shares",
-            "unsupported_rights",
-            status="unsupported",
-        )
-        require(isinstance(rights["items"], list), "invalid_right_items")
-        require(all(isinstance(item, dict) for item in rights["items"]), "invalid_right_item")
-        require_allocations(
-            [item["allocation_id"] for item in rights["items"]],
-            allocations,
-            "rights",
-            "rights",
-        )
+        q, prepared_rights = qualify_rights(rights, evidence, valuation, allocations)
         # Empty, explicitly evidenced rights do not make common total depend on shares.
-        if not rights["items"]:
-            require(rights["currency"] == pack["currency"], "empty_rights_currency_mismatch")
-            rights_exchange_rate(rights, evidence, valuation)
+        if not prepared_rights:
             allocated = {
                 "common_residual": pre,
                 "rights_value": D(0),
@@ -816,8 +985,8 @@ def _scenario(pack, scenario, valuation):
                 rights,
                 pre,
                 decimal(_dependent(shares)),
-                evidence,
-                valuation,
+                q,
+                prepared_rights,
             )
         return {"bridge_total": total, "residual_before_rights": pre, **allocated}
 
@@ -836,17 +1005,7 @@ def _scenario(pack, scenario, valuation):
 
     def quote():
         value = _dependent(result["per_share_reporting"])
-        fx = evidence.block(scenario.get("fx"), "quote_fx")
-        require(fx["quote_currency"] == pack["quote_currency"], "fx_quote_currency_mismatch")
-        q = exchange_rate(
-            fx,
-            valuation,
-            pack["currency"],
-            "quote_currency",
-            "quote_per_reporting",
-            "valuation_date",
-            "quote_fx",
-        )
+        q = quote_exchange_rate(scenario, evidence, valuation)
         return {
             "signed_quotient": decimal(value["signed_quotient"]) * q,
             "price_estimate": decimal(value["price_estimate"]) * q
@@ -882,8 +1041,12 @@ def evaluate(pack):
                             pack,
                             scenario,
                             valuation,
-                            _scenario,
-                            scenarios[name]["per_share_quote"],
+                            lambda candidate_pack, candidate, candidate_valuation: _scenario(
+                                candidate_pack,
+                                candidate,
+                                candidate_valuation,
+                                reverse_candidate=True,
+                            ),
                         ),
                     )
                     if reverse["available"]:
