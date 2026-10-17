@@ -1189,9 +1189,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
+    from alphaforge.cli.estimated_forward import add_parsers as add_estimated_parsers
     from alphaforge.cli.forward_fcff import add_parsers
 
     add_parsers(sub)
+    add_estimated_parsers(sub)
 
     imp = sub.add_parser("import-watchlist", help="Import watchlist CSV")
     imp.add_argument("--file", required=True, help="CSV path")
