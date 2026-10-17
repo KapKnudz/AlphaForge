@@ -1,6 +1,6 @@
 # Architecture entry point
 
-AlphaForge has three implemented research-input paths joined by company identity
+AlphaForge has four implemented research-input paths joined by company identity
 and explicit dated boundaries, not by a model conversation:
 
 ```text
