@@ -276,6 +276,67 @@ def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
 
 
 @pytest.mark.parametrize(
+    "scope",
+    [
+        "explicit_pv",
+        "operating_value",
+        "common_equity",
+        "per_share_reporting",
+        "per_share_quote",
+    ],
+)
+def test_output_limitation_precedes_reverse_fixed_operand_preparation(scope):
+    x = D(".013123")
+    p = reverse_pack(str(independent_simple_price(x)))
+    p["scenarios"]["base"]["operations"]["inputs"].pop("margin_first")
+    reason = f"Synthetic {scope} limitation"
+    p["limitations"].append(
+        {"reason": reason, "status": "unsupported", "affected_outputs": [scope]}
+    )
+    expected_reason = [{"code": "unresolved_limitation", "path": reason}]
+
+    forward_only = copy.deepcopy(p)
+    forward_only["scenarios"]["base"].pop("reverse")
+    expected = forward.evaluate(forward_only)["scenarios"]["base"]["per_share_quote"]
+    actual = result(p)
+    assert expected["status"] == actual["status"] == "unsupported"
+    assert expected["reasons"] == actual["reasons"] == expected_reason
+    assert not actual["available"]
+    assert "search_diagnostics" not in actual
+
+    without_limitation = copy.deepcopy(p)
+    without_limitation["limitations"] = []
+    assert result(without_limitation)["reasons"] == [
+        {"code": "missing_operand", "path": "margin_first"}
+    ]
+
+    with_margin = copy.deepcopy(p)
+    with_margin["scenarios"]["base"]["operations"]["inputs"]["margin_first"] = ".2"
+    restored = result(with_margin)
+    assert restored["status"] == "unsupported"
+    assert restored["reasons"] == expected_reason
+
+
+def test_conditional_output_limitation_does_not_veto_supported_reverse():
+    x = D(".013123")
+    control = reverse_pack(str(independent_simple_price(x)))
+    conditional = copy.deepcopy(control)
+    conditional["limitations"].append(
+        {
+            "reason": "Synthetic conditional quote limitation",
+            "status": "conditional",
+            "affected_outputs": ["per_share_quote"],
+        }
+    )
+    assert result(control)["status"] == "candidate_solution"
+    conditional_result = result(conditional)
+    assert conditional_result["status"] == "candidate_solution"
+    assert abs(
+        D(conditional_result["value"]["roots"][0]["initial_growth"]) - x
+    ) < D("1e-10")
+
+
+@pytest.mark.parametrize(
     "variant, status, reasons",
     [
         ("missing", "not_requested", [{"code": "not_supplied", "path": "rights"}]),
@@ -611,6 +672,56 @@ def test_forward_override_also_recomputes_and_invalidates_requested_reverse():
         result(child)["value"]["fixed_assumptions_identity"]
         != result(p)["value"]["fixed_assumptions_identity"]
     )
+
+
+def test_cli_exports_preserve_output_limitation_precedence(tmp_path):
+    p = reverse_pack()
+    p["scenarios"]["base"]["operations"]["inputs"].pop("margin_first")
+    reason = "Synthetic quote limitation"
+    p["limitations"].append(
+        {
+            "reason": reason,
+            "status": "unsupported",
+            "affected_outputs": ["per_share_quote"],
+        }
+    )
+    expected = result(p)
+    input_file = tmp_path / "limited-pack.json"
+    input_file.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        [
+            "estimated-forward",
+            "--input-json",
+            str(input_file),
+            "--exports-dir",
+            str(tmp_path / "limited-cli"),
+        ]
+    )
+    assert args.func(args) == 0
+    target = next((tmp_path / "limited-cli" / "estimated-forward").iterdir())
+
+    detached = json.loads((target / "base-reverse.json").read_text())
+    complete = json.loads((target / "outputs.json").read_text())
+    assert detached["assumption_pack"] == p
+    assert {key: detached[key] for key in expected} == expected
+    assert complete["scenarios"]["base"]["reverse"] == expected
+
+    report_line = next(
+        line
+        for line in (target / "report.md").read_text().splitlines()
+        if line.startswith("- reverse:")
+    )
+    assert report_line == (
+        '- reverse: unsupported; reasons=[{"code":"unresolved_limitation",'
+        f'"path":"{reason}"}}]; value=null; search_diagnostics=null'
+    )
+    with (target / "reverse.csv").open() as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "unsupported"
+    assert rows[0]["record_type"] == "outcome"
+    assert json.loads(rows[0]["record"]) == expected
+    assert json.loads(rows[0]["context"])["assumption_pack"] == p
 
 
 def test_cli_and_api_preserve_fixed_refusal_reason_parity(tmp_path):

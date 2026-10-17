@@ -801,6 +801,14 @@ def _dependent(upstream):
 def qualify_reverse_inputs(pack, scenario, valuation):
     evidence = Evidence(pack)
     allocations = allocation_map(pack)
+    for target in (
+        "per_share_quote",
+        "per_share_reporting",
+        "common_equity",
+        "operating_value",
+        "explicit_pv",
+    ):
+        evidence.qualify(target)
 
     def operations():
         block = scenario.get("operations")
