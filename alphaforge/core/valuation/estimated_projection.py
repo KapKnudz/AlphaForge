@@ -9,25 +9,32 @@ from decimal import Decimal as D
 from alphaforge.core.valuation.estimated_inputs import decimal, require
 
 
-def project(block):
+def qualify_response(block, *, include_initial_growth=True, eager=True):
     p = block["inputs"]
     require(isinstance(p, dict), "invalid_projection_inputs")
+    numbers = {}
 
     def n(key):
-        return decimal(p.get(key), key)
+        numbers[key] = decimal(p.get(key), key)
+        return numbers[key]
 
-    growth = n("terminal_growth")
-    initial = n("initial_growth")
-    require(-1 < growth and -1 < initial, "invalid_growth")
+    n("terminal_growth")
+    if include_initial_growth:
+        n("initial_growth")
+    require(
+        -1 < numbers["terminal_growth"]
+        and (not include_initial_growth or -1 < numbers["initial_growth"]),
+        "invalid_growth",
+    )
     maturity = p["mature_year"]
     lag = p["recovery_lag"]
     years = p["opening_deferred_years"]
     require(type(maturity) is int and 2 <= maturity <= 10, "invalid_maturity")
     require(type(lag) is int and 0 <= lag <= 10, "invalid_recovery_lag")
     require(type(years) is int and 1 <= years <= 12, "invalid_deferred_years")
-    settlements = p["settlements"]
-    require(isinstance(settlements, list), "invalid_settlements")
-    require(len(settlements) <= 10, "settlement_in_terminal_witnesses")
+    raw_settlements = p["settlements"]
+    require(isinstance(raw_settlements, list), "invalid_settlements")
+    require(len(raw_settlements) <= 10, "settlement_in_terminal_witnesses")
     for key in (
         "refundable_profit_share",
         "recovery_fraction",
@@ -60,8 +67,113 @@ def project(block):
             "opening_fractions_must_sum_to_one",
             key,
         )
+    require(n("revenue") > 0, "invalid_baseline_revenue")
+    if eager:
+        for key in (
+            "opening_wc",
+            "opening_deferred",
+            "initial_cash_diagnostic",
+            "margin_first",
+            "margin_terminal",
+            "da_first",
+            "da_terminal",
+            "wc_ratio",
+        ):
+            n(key)
+        settlements = [decimal(value, "settlements") for value in raw_settlements]
+    else:
+        settlements = raw_settlements
+    return {
+        "inputs": p,
+        "numbers": numbers,
+        "mature_year": maturity,
+        "recovery_lag": lag,
+        "opening_deferred_years": years,
+        "settlements": settlements,
+        "fractions": fractions,
+    }
+
+
+def qualify_fixed_schedules(block):
+    qualified = qualify_response(block, include_initial_growth=False)
+    n = qualified["numbers"]
+    pf = qualified["fractions"]["opening_payment_fractions"]
+    rf = qualified["fractions"]["opening_recovery_fractions"]
+    years = qualified["opening_deferred_years"]
+    customer = n["legacy_remaining"]
+    pay = n["opening_payable"]
+    recover = n["opening_recoverable"] * n["opening_recovery_fraction"]
+    deferred = n["opening_deferred"]
+    rows = []
+    for year in range(1, 13):
+        legacy = min(customer, n["legacy_annual"])
+        customer -= legacy
+        opening_payment = n["opening_payable"] * pf[year - 1] if year <= len(pf) else D(0)
+        opening_recovery = (
+            n["opening_recoverable"] * n["opening_recovery_fraction"] * rf[year - 1]
+            if year <= len(rf)
+            else D(0)
+        )
+        opening_deferred = n["opening_deferred"] / years if year <= years else D(0)
+        pay -= opening_payment
+        recover -= opening_recovery
+        deferred -= opening_deferred
+        if year >= len(pf):
+            pay = D(0)
+        if year >= len(rf):
+            recover = D(0)
+        if year >= years:
+            deferred = D(0)
+        rows.append(
+            {
+                "legacy_da": legacy,
+                "opening_payment": opening_payment,
+                "opening_recovery": opening_recovery,
+                "opening_deferred_cash": opening_deferred,
+                "opening_tax": opening_payment - opening_recovery + opening_deferred,
+                "opening_payable_remaining": pay,
+                "opening_recoverable_remaining": recover,
+                "opening_deferred_remaining": deferred,
+                "finite_effects": (customer, pay, recover, deferred),
+            }
+        )
+    for row in rows[10:12]:
+        require(
+            all(value == 0 for value in row["finite_effects"]),
+            "finite_effects_not_exhausted",
+        )
+        require(
+            row["legacy_da"] == 0 and row["opening_tax"] == 0,
+            "finite_cash_in_terminal",
+        )
+        for leg in (
+            "opening_payment",
+            "opening_recovery",
+            "opening_deferred_cash",
+            "opening_payable_remaining",
+            "opening_recoverable_remaining",
+            "opening_deferred_remaining",
+        ):
+            require(row[leg] == 0, "finite_cash_in_terminal", "terminal." + leg)
+
+
+def project(block):
+    qualified = qualify_response(block, eager=False)
+    numbers = qualified["numbers"]
+
+    def n(key):
+        if key not in numbers:
+            numbers[key] = decimal(qualified["inputs"].get(key), key)
+        return numbers[key]
+
+    growth = n("terminal_growth")
+    initial = n("initial_growth")
+    maturity = qualified["mature_year"]
+    lag = qualified["recovery_lag"]
+    years = qualified["opening_deferred_years"]
+    settlements = qualified["settlements"]
+    fractions = qualified["fractions"]
     revenues = [n("revenue")]
-    require(revenues[0] > 0, "invalid_baseline_revenue")
     growths = []
     for t in range(1, 14):
         g = growth + (initial - growth) * D(10 - t) / 9 if t <= 10 else growth

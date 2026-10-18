@@ -16,6 +16,7 @@ recommendation. Reference-only reviews remain reference-only.
 - `core/valuation/estimated_inputs.py`: evidence resolution, identity, versions.
 - `core/valuation/estimated_projection.py`: optional aggregate response budgets.
 - `core/valuation/estimated_fcff.py`: annual FCFF, WACC, continuation and claims.
+- `core/valuation/estimated_reverse.py`: bounded search through that same evaluator.
 - `cli/estimated_forward.py`: actual command/report/JSON/CSV composition.
 - `tests/estimated_fixtures.py`: executable, **entirely synthetic** direct-budget
   and response-budget requests. `tests/test_estimated_forward.py` executes both
@@ -189,8 +190,8 @@ shares withhold per-share only unless endogenous rights actually require that
 denominator for common allocation. Missing quote FX withholds quote output only;
 any separately required rights FX remains a genuine common-value dependency.
 
-Each scenario always exports the same forward diagnostic stages plus the
-independent not-requested reverse stage, including scenario-level malformed-input
+Each scenario always exports the same forward diagnostic stages plus a separate
+reverse stage (not requested unless supplied), including scenario-level malformed-input
 fallbacks. Each stage exports availability, conditional/insufficient-evidence/
 invalid-input/unsupported/not-requested/numerical-failure status and direct or
 propagated reasons. An aggregate or dependent consumer preserves the first chronologically
@@ -199,22 +200,106 @@ shape failures remain distinct. Operating gaps suppress dependent complete PVs; 
 undiscounted cash; tail gaps preserve explicit PV; bridge gaps preserve EV;
 denominator/quote-FX gaps remain scoped. Unaffected annual rows and supplied
 component diagnostics remain visible. Limitations name their affected outputs.
-Reverse exports **not requested/not implemented**; it does not suppress forward
-estimates. A supplied recovered growth path is only another forward input, never
-a newly computed inverse result. Reverse implementation and initial human
-implementation acceptance are later work.
+Missing reverse prerequisites do not suppress supported forward estimates.
+A supplied recovered growth path by itself remains only another forward input;
+only an explicitly requested reverse analysis invokes the search below. Arithmetic
+success does not provide initial human implementation acceptance.
 
 The conclusion is always withheld as an investment recommendation. A scenario
 range spanning 10% of absolute base common value or a changed common sign adds an
 explicit material-disagreement reason. Conditional scenarios are not probability
 distributions or guaranteed bounds; smaller differences can also be material.
 
+## Declared reverse analysis
+
+Supply `scenarios.<name>.reverse` with `record_ids`,
+`parameter="initial_nominal_revenue_growth"`, and evidenced `domain` and `target`
+blocks. Omission/null means not requested. The executable synthetic example is
+`tests/test_estimated_reverse.py:reverse_pack`; none of its fictional premises
+qualifies a company.
+
+The `domain` block has its own `record_ids`, decimal `lower`/`upper` satisfying
+`-1 < lower < upper`, and `selected_independently_of_target=true`. It requires
+nonempty `selection_basis`, `full_interval_support`, `fixed_claim_independence`,
+`funding_and_distress_support`, and `thresholds_and_continuity` explanations.
+These are supplied financial premises, **not calculator-created review or proofs**.
+Bounds never widen, shrink or depend on whether the price fits. Material unsupported
+funding, distress, tax, capacity or claim economics in any advertised part withhold
+the full reverse question; mark its records/limitations accordingly rather than
+omit the hole. An absent/unsupported response does not disqualify direct forward
+budgets.
+
+The `target` block requires `record_ids`, positive `price`, quote `currency`,
+matching `valuation_date`, actual `close_date` no later than V, exact integer
+`lag_days`, `share_basis="basic_common"`, `exchange`, `close_selection_basis`,
+`corporate_action_basis`, and `rights_comparability`. Actual close-selection and
+rights judgments are supplied, not inferred from a date or exchange label. FX
+remains the same qualified dated forward FX block. Dated market weights in a
+built WACC remain independent assumptions, not recomputed from the reverse target.
+
+Only the existing `aggregate_response` is implemented for this axis. Solve x:
+
+```text
+growth_t = gT + (x-gT)*(10-t)/9, t=1..10
+Revenue_t = Revenue_(t-1)*(1+growth_t)
+```
+
+The forward projection's gT must equal the selected terminal gT. Every candidate
+changes **only** `operations.inputs.initial_growth`. The same qualified forward
+owner recomputes annual/witness EBIT, tax charges/payments/recoveries and balances,
+compatible D&A, next-year capacity investment, economic leases, WC, earnings-linked
+claims, and endogenous rights/common allocation. Independent drivers, dated
+WACC/weights, bridge PVs supported as independent, shares and FX stay fixed.
+No frozen base investment/WC cash, free contraction disposal, automatic loss refund,
+new funding model, floor or separate inverse financial model is introduced.
+
+Search policy `estimated-reverse-v1` evaluates exactly 201 evenly spaced points
+including endpoints, retains all sampled match regions and sign brackets, and
+uses at most 200 bisections per bracket. Every sampled/refinement refusal is
+retained; none is skipped or bridged to claim full-domain success. Refinement
+seeks residual <=1e-12 for useful full paths, but acceptance still requires both
+Appendix C growth localization <=1e-10 and forward repricing
+`abs(error) <= max(1e-6, 1e-8*max(abs(price),abs(target)))`. Exhaustion may not
+substitute a narrow growth bracket for acceptable repricing. A freshly repriced
+candidate exports x, all ten growth/revenue/FCFF paths, horizon CAGR, full qualified
+forward stages including witnesses/claims, bracket, iterations and signed residual.
+
+Reverse status distinguishes `candidate_solution`, discovered `multiple_solutions`,
+`match_region`, `not_identifiable`, `no_solution`, `no_crossing_observed`, `sampled_match`,
+`unsupported_domain`, `invalid_input`, and `numerical_failure`; missing premises
+retain their scoped insufficient-evidence/unsupported/not-requested refusal.
+Unsupported-domain, invalid-input, numerical-failure, isolated sampled-match and
+sampled-absence outputs have null `value` plus retained `search_diagnostics`.
+An isolated near-match without a localized root is `sampled_match`, not absence
+or a recovered solution. Candidates are **not certified
+unique**, and multiplicity is not exhaustive. Near-matching consecutive samples
+are a sampled region at quote tolerance, not many identified roots or proof the
+whole interval matches. Tangencies/inter-sample roots may remain undiscovered.
+No continuity, monotonicity, completeness or financial review is inferred from a
+finite scan or a supplied narrative assertion.
+
+A deliberately narrow exact special case can demonstrate absence/nonidentification:
+if both margin and D&A endpoints, cash/lease renewal and growth coefficients, and
+WC/revenue ratio are all zero, the existing equations make value independent of x.
+Opening states, settlements, fixed claims, shares/FX and rights allocation then
+remain x-independent. After qualified forward evaluations, a nonmatching constant
+value gives `no_solution`; a matching value gives `not_identifiable` over the full
+declared interval at quote tolerance, with no precise recovered x. Other sampled
+absence is **only** `no_crossing_observed`. There is no general proof/certificate
+framework or uniqueness certification. Demonstrated no-solution can satisfy a
+reverse calculation gate; sampled absence/unsupported economics alone cannot.
+Negative quotients remain signed nontradable diagnostics, never market prices.
+Supported candidates remain conditional on supplied interval-wide economics and
+separate independent numerical, financial and actual human implementation review.
+
 ## Overrides, export and numerical checks
 
 `--override-json FILE` accepts `version`, `author`, `prepared_on`, `reason` and
 `changes` (replacement top-level fields). It leaves the original untouched,
-creates a content-bound parented version, recomputes outputs, records changed
-paths/affected outputs/actual result differences, and invalidates current reviews.
+creates a content-bound parented version, recomputes forward and requested reverse
+outputs, records changed paths/affected outputs/actual result differences, and
+invalidates current reviews. Reverse-only changes affect reverse/conclusion;
+changed forward drivers also invalidate requested reverse analysis.
 Result differences compare both versions' scenario and output-key unions with
 presence flags and separately retain the full changed firm-conclusion pair.
 Each changed path records before/after values and explicit presence flags, so a
@@ -224,8 +309,11 @@ The export retains the parent pack as well as the child. It does not edit an
 accepted reference or silently carry its approval into changed premises.
 
 Write-once local bundles under `estimated-forward/<artifact identity>/` contain
-original inputs, outputs, execution/code identities, report, annual CSV and
-individual output JSON files. Scenario sections and CSV rows are composed in
+original inputs, outputs, execution/code identities, report, annual CSV,
+`reverse.csv` (outcome/scan/root/match-region records) and individual output JSON
+files. Reverse CSV rows and detached JSON retain the full immutable identity,
+target/FX basis, pack and original/parent, sources/anchors, dates, conditions,
+search/numerical policy and distinct calculation/financial/human review states. Scenario sections and CSV rows are composed in
 canonical scenario-id order, so insertion order cannot change an artifact bundle.
 When full parent context is supplied, its canonical content identity is included
 in the execution receipt before artifact hashing. Reloading a saved child without
@@ -249,7 +337,8 @@ share counts and withholding/allocation semantics are exact, never tolerance
 exceptions. Tests cover components as well as totals. Presentation rounding is
 not a license to change assumptions, reference expectations or tolerances.
 
-A private reference can be checked without adding it to the repository:
+The forward-only private-reference checker can be used without adding inputs to
+the repository (it does not provide independent reverse acceptance):
 
 ```sh
 python tools/check_estimated_forward_acceptance.py --manifest "$MANIFEST"

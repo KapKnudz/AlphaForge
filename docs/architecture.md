@@ -63,8 +63,8 @@ exports, immutable executed-run numerical retention/audit replay, readiness
 assessment, the one-company MFN/PDF evidence lane, and separate
 [supplied-schedule conditional FCFF research](valuation.md#conditional-supplied-schedule-forward-fcff-research)
 with [retained-only replay](executed-run-replay.md#forward-fcff-research-lane), plus
-[aggregate estimated forward valuation](estimated-forward.md) with local reports,
-provenance, scoped withholding and preserved overrides (no estimated reverse solver).
+[aggregate estimated forward and declared reverse valuation](estimated-forward.md)
+with local reports, provenance, scoped withholding and preserved overrides.
 Optional [Jev shadow signals](jev-shadow.md) are observational: they do not
 change selection, readiness or packet contents.
 

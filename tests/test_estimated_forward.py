@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import subprocess
+import sys
 from decimal import Decimal as D
 from decimal import localcontext
 from pathlib import Path
@@ -214,6 +215,84 @@ def test_first_ten_row_refusal_preserves_root_status_and_reason(value, status, c
     for output in ("explicit_pv", "terminal", "operating_value", "common_equity"):
         assert result[output]["status"] == status
         assert result[output]["reasons"] == expected
+
+
+def test_bridge_consumes_earnings_before_validating_later_items():
+    p = pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim = next(
+        item for item in scenario["bridge"]["items"] if item["category"] == "consideration"
+    )
+    claim.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "2",
+        },
+    )
+    lease = next(item for item in scenario["bridge"]["items"] if item["category"] == "lease_debt")
+    lease["inputs"]["amount"] = "bad"
+    refused = base(p)["bridge"]
+    assert refused["status"] == "insufficient_evidence"
+    assert refused["reasons"] == [{"code": "missing_operand", "path": "annual.1.ebit"}]
+    scenario["operations"]["rows"][0]["ebit"] = "20"
+    progressed = base(p)["bridge"]
+    assert progressed["status"] == "invalid_input"
+    assert progressed["reasons"] == [{"code": "invalid_number", "path": "lease_debt"}]
+    lease["inputs"]["amount"] = "-5"
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim["inputs"]["current_pv_anchor"] = "bad"
+    assert base(p)["bridge"]["reasons"] == [{"code": "missing_operand", "path": "annual.1.ebit"}]
+    scenario["operations"]["rows"][0]["ebit"] = "20"
+    assert base(p)["bridge"]["reasons"] == [{"code": "invalid_number", "path": ""}]
+
+
+def test_cli_reports_consumed_bridge_row_refusal(tmp_path, capsys):
+    p = pack()
+    scenario = p["scenarios"]["base"]
+    scenario["operations"]["rows"][0]["ebit"] = None
+    claim = next(
+        item for item in scenario["bridge"]["items"] if item["category"] == "consideration"
+    )
+    claim.update(
+        method="earnings_linked_pv",
+        inputs={
+            "recurring_baseline_ebit": "20",
+            "current_pv_anchor": "1",
+            "later_pv_anchor": "2",
+        },
+    )
+    lease = next(item for item in scenario["bridge"]["items"] if item["category"] == "lease_debt")
+    lease["inputs"]["amount"] = "bad"
+    expected = base(p)["bridge"]
+    input_path = tmp_path / "bridge-order.json"
+    input_path.write_text(json.dumps(p))
+    args = build_parser().parse_args(
+        ["estimated-forward", "--input-json", str(input_path), "--exports-dir", str(tmp_path)]
+    )
+    assert args.func(args) == 0
+    directory = Path(json.loads(capsys.readouterr().out)["export_directory"])
+    exported = json.loads((directory / "base-bridge.json").read_text())
+    assert exported["status"] == expected["status"]
+    assert exported["reasons"] == expected["reasons"]
+    assert canonical(expected["reasons"]) in (directory / "report.md").read_text()
+
+
+@pytest.mark.parametrize("later_operand", ["coefficient", "settlement"])
+def test_projection_arithmetic_precedes_later_operand_consumption(later_operand):
+    p = response()
+    inputs = p["scenarios"]["base"]["operations"]["inputs"]
+    inputs.update(revenue="1e999999", initial_growth="10")
+    if later_operand == "coefficient":
+        inputs.pop("margin_first")
+    else:
+        inputs["settlements"] = [None]
+    refused = base(p)["annual_fcff"]
+    assert refused["status"] == "numerical_failure"
+    assert refused["reasons"][0]["code"] == "numerical_failure"
+    assert base(response())["annual_fcff"]["available"]
 
 
 def test_unsupported_row_refusal_is_not_collapsed_by_consumers():
@@ -845,6 +924,88 @@ def test_negative_residual_is_not_tradable_or_floored():
     assert not r["per_share_quote"]["value"]["tradable_price"]
 
 
+def test_ordinary_rights_block_shares_then_item_refusal_order(tmp_path):
+    p = pack()
+    p["allocations"].append({"id": "award", "destination": "rights"})
+    scenario = p["scenarios"]["base"]
+    ownership = copy.deepcopy(scenario["ownership"])
+    scenario["ownership"] = None
+    scenario["rights"]["items"] = [
+        block(
+            id="award",
+            allocation_id="award",
+            count="bad",
+            strike="1",
+            volatility="0",
+            risk_free_continuous="0",
+            dividend_yield="0",
+            expiry="2025-02-28",
+        )
+    ]
+    missing_owner = [{"code": "not_supplied", "path": "ownership"}]
+    refused = base(p)
+    assert refused["common_equity"]["status"] == "not_requested"
+    assert refused["common_equity"]["reasons"] == missing_owner
+    assert refused["per_share_quote"]["reasons"] == missing_owner
+    assert refused["operating_value"]["available"]
+
+    input_path = tmp_path / "rights-order.json"
+    input_path.write_text(json.dumps(p))
+    command = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "alphaforge.cli.main",
+            "estimated-forward",
+            "--input-json",
+            str(input_path),
+            "--exports-dir",
+            str(tmp_path / "exports"),
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    target = Path(json.loads(command.stdout)["export_directory"])
+    exported = json.loads((target / "outputs.json").read_text())
+    assert exported["scenarios"]["base"] == refused
+
+    scenario["ownership"] = ownership
+    invalid_item = base(p)["common_equity"]
+    assert invalid_item["status"] == "invalid_input"
+    assert invalid_item["reasons"] == [{"code": "invalid_number", "path": "rights.award.count"}]
+    scenario["rights"]["items"][0]["count"] = "10000"
+    assert base(p)["per_share_quote"]["available"]
+    scenario["ownership"] = None
+    assert base(p)["common_equity"]["reasons"] == missing_owner
+
+    rights = copy.deepcopy(scenario["rights"])
+    scenario["rights"] = None
+    assert base(p)["common_equity"]["reasons"] == [{"code": "not_supplied", "path": "rights"}]
+    scenario["rights"] = rights
+    scenario["rights"]["items"][0]["count"] = "bad"
+    scenario["discount"]["inputs"] = {
+        "risk_free_continuous": ".03",
+        "beta": "1.2",
+        "equity_risk_premium": ".05",
+        "market_close": "20",
+        "market_close_date": p["valuation_date"],
+        "market_close_currency": "SEK",
+        "debt": "25",
+        "debt_date": p["valuation_date"],
+        "debt_currency": "EUR",
+        "debt_cost": ".06",
+        "debt_cost_date": p["valuation_date"],
+        "debt_cost_basis": "nominal_annual_effective_pre_tax",
+        "shield_rate": ".2",
+        "shield_rate_date": p["valuation_date"],
+    }
+    assert base(p)["wacc"]["reasons"] == missing_owner
+    assert base(p)["per_share_quote"]["reasons"] == missing_owner
+
+
 def test_endogenous_calls_independently_known_atm_value():
     p = pack()
     p["valuation_date"] = "2023-02-28"
@@ -1254,7 +1415,7 @@ def test_cli_export_is_invariant_to_scenario_insertion_order(tmp_path, capsys):
 
     first_directory, first_args = run("first-order", first)
     first_bytes = {path.name: path.read_bytes() for path in first_directory.iterdir()}
-    assert len(first_bytes) == 27
+    assert len(first_bytes) == 28
     second_directory, _ = run("second-order", second)
     assert second_directory == first_directory
     assert first_bytes == {path.name: path.read_bytes() for path in second_directory.iterdir()}
@@ -1684,9 +1845,7 @@ def test_malformed_mapping_shapes_have_structured_refusals(tmp_path, capsys):
         assert scenario[name]["status"] == "invalid_input"
         assert scenario[name]["reasons"] == expected
     assert scenario["reverse"]["status"] == "not_requested"
-    assert scenario["reverse"]["reasons"] == [
-        {"code": "reverse_not_implemented_stage4", "path": "reverse"}
-    ]
+    assert scenario["reverse"]["reasons"] == [{"code": "reverse_not_requested", "path": "reverse"}]
 
     malformed_projection = response()
     malformed_projection["scenarios"]["base"]["operations"]["inputs"] = []

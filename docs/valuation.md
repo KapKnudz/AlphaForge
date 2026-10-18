@@ -10,9 +10,13 @@ Research results do not confer issuer admission, calibration or readiness.
 aggregate annual FCFF/nominal WACC lane with full terminal witnesses, dated claims,
 endogenous rights allocation, scoped withholding and inspectable parented overrides.
 The [estimated forward contract](estimated-forward.md) owns its input examples,
-formulas, provenance and actual local JSON/CSV/report composition. It does not
-relabel financing-shield-excluded values, weaken existing eligibility or implement
-reverse DCF. Every output is **PROVISIONAL — ESTIMATED, NOT A VERIFIED FORECAST**;
+formulas, provenance and actual local JSON/CSV/report composition. A declared
+estimated reverse question solves initial nominal revenue growth through the same
+qualified forward evaluator, recomputing dependent economics within independently
+supported fixed bounds. Bounded sampling does not certify uniqueness/completeness;
+missing reverse prerequisites preserve supported forward output. This does not
+relabel financing-shield-excluded values or weaken existing eligibility.
+Every output is **PROVISIONAL — ESTIMATED, NOT A VERIFIED FORECAST**;
 calculation, financial review and human implementation acceptance remain distinct.
 
 ## Heuristic valuation_score (ranking)
