@@ -346,7 +346,7 @@ def revise(pack, *, version, author, prepared_on, reason, changes):
             },
         }
     )
-    # Recompute both versions through the same forward path; record actual output
+    # Recompute both versions through the same valuation evaluator; record actual
     # differences without promoting any original review to the new premise set.
     from alphaforge.core.valuation.estimated_fcff import evaluate
 

@@ -1,4 +1,4 @@
-"""User-facing estimated forward research exports; no acquisition or legacy admission."""
+"""User-facing estimated forward and declared reverse exports; no acquisition or legacy admission."""
 
 from __future__ import annotations
 
