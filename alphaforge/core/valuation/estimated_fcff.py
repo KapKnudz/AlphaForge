@@ -683,7 +683,7 @@ def rights_exchange_rate(block, evidence, valuation):
     return D(1)
 
 
-def qualify_rights(block, evidence, valuation, allocations):
+def qualify_rights_block(block, evidence, valuation, allocations):
     evidence.block(block, "rights")
     require(block["valuation_date"] == valuation.isoformat(), "rights_date_mismatch")
     require(
@@ -701,6 +701,10 @@ def qualify_rights(block, evidence, valuation, allocations):
     )
     if not block["items"]:
         require(block["currency"] == evidence.pack["currency"], "empty_rights_currency_mismatch")
+    return block
+
+
+def qualify_rights_items(block, evidence, valuation):
     q = rights_exchange_rate(block, evidence, valuation)
     require(
         len({item["id"] for item in block["items"]}) == len(block["items"]), "duplicate_right_id"
@@ -722,6 +726,11 @@ def qualify_rights(block, evidence, valuation, allocations):
         )
         prepared.append((item, count, strike, vol, rf, div, t))
     return q, prepared
+
+
+def qualify_rights(block, evidence, valuation, allocations):
+    block = qualify_rights_block(block, evidence, valuation, allocations)
+    return qualify_rights_items(block, evidence, valuation)
 
 
 def allocate(block, preclaims, shares, q, prepared):
@@ -983,8 +992,10 @@ def _scenario(pack, scenario, valuation, *, reverse_candidate=False):
         items = _dependent(result["bridge"])
         total = sum((decimal(x["amount"]) for x in items), D(0))
         pre = value + total
-        rights = scenario.get("rights")
-        q, prepared_rights = qualify_rights(rights, evidence, valuation, allocations)
+        rights = qualify_rights_block(scenario.get("rights"), evidence, valuation, allocations)
+        # Preserve ordinary forward's share-before-item consumption for nonempty rights.
+        common_shares = decimal(_dependent(shares)) if rights["items"] else None
+        q, prepared_rights = qualify_rights_items(rights, evidence, valuation)
         # Empty, explicitly evidenced rights do not make common total depend on shares.
         if not prepared_rights:
             allocated = {
@@ -998,7 +1009,7 @@ def _scenario(pack, scenario, valuation, *, reverse_candidate=False):
             allocated = allocate(
                 rights,
                 pre,
-                decimal(_dependent(shares)),
+                common_shares,
                 q,
                 prepared_rights,
             )

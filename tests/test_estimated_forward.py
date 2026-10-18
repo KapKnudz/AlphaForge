@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import subprocess
+import sys
 from decimal import Decimal as D
 from decimal import localcontext
 from pathlib import Path
@@ -921,6 +922,88 @@ def test_negative_residual_is_not_tradable_or_floored():
     assert number(r["per_share_reporting"], "signed_quotient") == pytest.approx(D("-4.5"))
     assert r["per_share_reporting"]["value"]["price_estimate"] is None
     assert not r["per_share_quote"]["value"]["tradable_price"]
+
+
+def test_ordinary_rights_block_shares_then_item_refusal_order(tmp_path):
+    p = pack()
+    p["allocations"].append({"id": "award", "destination": "rights"})
+    scenario = p["scenarios"]["base"]
+    ownership = copy.deepcopy(scenario["ownership"])
+    scenario["ownership"] = None
+    scenario["rights"]["items"] = [
+        block(
+            id="award",
+            allocation_id="award",
+            count="bad",
+            strike="1",
+            volatility="0",
+            risk_free_continuous="0",
+            dividend_yield="0",
+            expiry="2025-02-28",
+        )
+    ]
+    missing_owner = [{"code": "not_supplied", "path": "ownership"}]
+    refused = base(p)
+    assert refused["common_equity"]["status"] == "not_requested"
+    assert refused["common_equity"]["reasons"] == missing_owner
+    assert refused["per_share_quote"]["reasons"] == missing_owner
+    assert refused["operating_value"]["available"]
+
+    input_path = tmp_path / "rights-order.json"
+    input_path.write_text(json.dumps(p))
+    command = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-m",
+            "alphaforge.cli.main",
+            "estimated-forward",
+            "--input-json",
+            str(input_path),
+            "--exports-dir",
+            str(tmp_path / "exports"),
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    target = Path(json.loads(command.stdout)["export_directory"])
+    exported = json.loads((target / "outputs.json").read_text())
+    assert exported["scenarios"]["base"] == refused
+
+    scenario["ownership"] = ownership
+    invalid_item = base(p)["common_equity"]
+    assert invalid_item["status"] == "invalid_input"
+    assert invalid_item["reasons"] == [{"code": "invalid_number", "path": "rights.award.count"}]
+    scenario["rights"]["items"][0]["count"] = "10000"
+    assert base(p)["per_share_quote"]["available"]
+    scenario["ownership"] = None
+    assert base(p)["common_equity"]["reasons"] == missing_owner
+
+    rights = copy.deepcopy(scenario["rights"])
+    scenario["rights"] = None
+    assert base(p)["common_equity"]["reasons"] == [{"code": "not_supplied", "path": "rights"}]
+    scenario["rights"] = rights
+    scenario["rights"]["items"][0]["count"] = "bad"
+    scenario["discount"]["inputs"] = {
+        "risk_free_continuous": ".03",
+        "beta": "1.2",
+        "equity_risk_premium": ".05",
+        "market_close": "20",
+        "market_close_date": p["valuation_date"],
+        "market_close_currency": "SEK",
+        "debt": "25",
+        "debt_date": p["valuation_date"],
+        "debt_currency": "EUR",
+        "debt_cost": ".06",
+        "debt_cost_date": p["valuation_date"],
+        "debt_cost_basis": "nominal_annual_effective_pre_tax",
+        "shield_rate": ".2",
+        "shield_rate_date": p["valuation_date"],
+    }
+    assert base(p)["wacc"]["reasons"] == missing_owner
+    assert base(p)["per_share_quote"]["reasons"] == missing_owner
 
 
 def test_endogenous_calls_independently_known_atm_value():
