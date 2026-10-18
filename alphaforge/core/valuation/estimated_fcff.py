@@ -295,11 +295,7 @@ def qualify_operations(block, evidence, allocations, *, include_initial_growth=T
 
 def annual(block, evidence, valuation, allocations):
     qualify_operations(block, evidence, allocations)
-    rows = (
-        project(block)
-        if block["mode"] == "aggregate_response"
-        else copy.deepcopy(block["rows"])
-    )
+    rows = project(block) if block["mode"] == "aggregate_response" else copy.deepcopy(block["rows"])
     require(isinstance(rows, list), "invalid_annual_rows")
     require(10 <= len(rows) <= 12, "ten_full_years_required")
     result = []
@@ -608,9 +604,7 @@ def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_ca
     result, ids = [], set()
     items = qualify_bridge_inventory(block, evidence, valuation, allocations)
     for raw_item in items:
-        item, amount, claim = qualify_bridge_item(
-            raw_item, evidence, valuation, ids, eager=False
-        )
+        item, amount, claim = qualify_bridge_item(raw_item, evidence, valuation, ids, eager=False)
         if claim is not None:
             rows = annual_result["value"]
             if rows is None:
@@ -621,10 +615,10 @@ def bridge(block, evidence, annual_result, valuation, allocations, *, reverse_ca
                 raise earnings_error
             earnings = [max(D(0), decimal(x["value"]["ebit"])) for x in rows[:5]]
             baseline, current_anchor, later_anchor = claim
-            amount = -(
-                decimal(current_anchor) * earnings[0]
-                + decimal(later_anchor) * sum(earnings) / 5
-            ) / baseline
+            amount = (
+                -(decimal(current_anchor) * earnings[0] + decimal(later_anchor) * sum(earnings) / 5)
+                / baseline
+            )
             require(
                 amount <= 0,
                 "bridge_direction_mismatch",
@@ -708,7 +702,9 @@ def qualify_rights(block, evidence, valuation, allocations):
     if not block["items"]:
         require(block["currency"] == evidence.pack["currency"], "empty_rights_currency_mismatch")
     q = rights_exchange_rate(block, evidence, valuation)
-    require(len({item["id"] for item in block["items"]}) == len(block["items"]), "duplicate_right_id")
+    require(
+        len({item["id"] for item in block["items"]}) == len(block["items"]), "duplicate_right_id"
+    )
     prepared = []
     for item in block["items"]:
         evidence.block(item, "rights." + item["id"])
@@ -838,8 +834,7 @@ def qualify_reverse_inputs(pack, scenario, valuation):
             operation_block,
         )
         require(
-            decimal(operation_block["inputs"].get("terminal_growth"), "terminal_growth")
-            == growth,
+            decimal(operation_block["inputs"].get("terminal_growth"), "terminal_growth") == growth,
             "reverse_terminal_growth_mismatch",
         )
         return growth
@@ -849,18 +844,14 @@ def qualify_reverse_inputs(pack, scenario, valuation):
         _stage(
             evidence,
             "common_equity",
-            lambda: qualify_bridge(
-                scenario.get("bridge"), evidence, valuation, allocations
-            ),
+            lambda: qualify_bridge(scenario.get("bridge"), evidence, valuation, allocations),
         )
     )
     _dependent(
         _stage(
             evidence,
             "common_equity",
-            lambda: qualify_rights(
-                scenario.get("rights"), evidence, valuation, allocations
-            ),
+            lambda: qualify_rights(scenario.get("rights"), evidence, valuation, allocations),
         )
     )
     _dependent(

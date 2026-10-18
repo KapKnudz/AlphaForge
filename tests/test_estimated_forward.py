@@ -243,9 +243,7 @@ def test_bridge_consumes_earnings_before_validating_later_items():
     lease["inputs"]["amount"] = "-5"
     scenario["operations"]["rows"][0]["ebit"] = None
     claim["inputs"]["current_pv_anchor"] = "bad"
-    assert base(p)["bridge"]["reasons"] == [
-        {"code": "missing_operand", "path": "annual.1.ebit"}
-    ]
+    assert base(p)["bridge"]["reasons"] == [{"code": "missing_operand", "path": "annual.1.ebit"}]
     scenario["operations"]["rows"][0]["ebit"] = "20"
     assert base(p)["bridge"]["reasons"] == [{"code": "invalid_number", "path": ""}]
 

@@ -259,9 +259,7 @@ def test_reverse_prerequisites_only_withhold_reverse(mutation, status):
         ),
     ],
 )
-def test_fixed_forward_refusal_is_preserved_by_requested_reverse(
-    mutation, status, code, path
-):
+def test_fixed_forward_refusal_is_preserved_by_requested_reverse(mutation, status, code, path):
     p = reverse_pack()
     mutation(p["scenarios"]["base"])
     forward_only = copy.deepcopy(p)
@@ -331,9 +329,7 @@ def test_conditional_output_limitation_does_not_veto_supported_reverse():
     assert result(control)["status"] == "candidate_solution"
     conditional_result = result(conditional)
     assert conditional_result["status"] == "candidate_solution"
-    assert abs(
-        D(conditional_result["value"]["roots"][0]["initial_growth"]) - x
-    ) < D("1e-10")
+    assert abs(D(conditional_result["value"]["roots"][0]["initial_growth"]) - x) < D("1e-10")
 
 
 @pytest.mark.parametrize(
@@ -749,9 +745,11 @@ def test_cli_and_api_preserve_fixed_refusal_reason_parity(tmp_path):
     cli_target = next((tmp_path / "cli" / "estimated-forward").iterdir())
     cli_reverse = json.loads((cli_target / "base-reverse.json").read_text())
     assert cli_reverse["status"] == api_reverse["status"] == "not_requested"
-    assert cli_reverse["reasons"] == api_reverse["reasons"] == [
-        {"code": "not_supplied", "path": "quote_fx"}
-    ]
+    assert (
+        cli_reverse["reasons"]
+        == api_reverse["reasons"]
+        == [{"code": "not_supplied", "path": "quote_fx"}]
+    )
 
 
 def test_exports_and_overrides_retain_reverse_identity_and_recompute(tmp_path):

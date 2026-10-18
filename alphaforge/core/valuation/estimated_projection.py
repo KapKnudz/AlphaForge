@@ -244,11 +244,7 @@ def project(block):
         lease_renewal = r * n("lease_renewal_rate")
         lease_lead = increment * n("lease_growth_capital")
         close = r * n("wc_ratio")
-        settlement = (
-            decimal(settlements[t - 1], "settlements")
-            if t <= len(settlements)
-            else D(0)
-        )
+        settlement = decimal(settlements[t - 1], "settlements") if t <= len(settlements) else D(0)
         row = {
             "revenue": r,
             "growth": growths[t - 1],

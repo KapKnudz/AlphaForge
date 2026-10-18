@@ -270,8 +270,7 @@ def search(evaluate_point, lower, upper, target, *, constant_value=False):
             # Work more accurately than the acceptance threshold so recovered
             # constituent paths remain useful; Appendix C acceptance is unchanged.
             if right - left <= POLICY.growth_absolute and (
-                abs(residual) <= POLICY.refinement_residual
-                or iteration == POLICY.max_bisections
+                abs(residual) <= POLICY.refinement_residual or iteration == POLICY.max_bisections
             ):
                 found = recover(x, left, right, iteration)
                 if found:
